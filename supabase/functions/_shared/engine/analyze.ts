@@ -4,6 +4,7 @@
 // that the provider returned; nothing is invented.
 import type { AnalyzedItem, ConceptVector, ContentItem } from '../types.ts';
 import { normalize, projectText, round } from './text.ts';
+import { CONCEPT_BY_ID } from './concepts.ts';
 
 /**
  * Provider genre names whose emotional/thematic meaning is not literally in
@@ -103,6 +104,12 @@ export function analyzeItem(item: ContentItem): AnalyzedItem {
   const hints = genreHints(item.genres);
   const concepts: ConceptVector = { ...fromText };
   for (const [k, v] of Object.entries(hints)) concepts[k] = round(Math.max(concepts[k] ?? 0, v));
+  // Concepts the provider returned this item for (e.g. Spotify results for "melancholic").
+  // Weak evidence (0.35) and never overrides text-derived values.
+  const retrievedFor = Array.isArray(item.metadata?.retrievedFor) ? (item.metadata!.retrievedFor as string[]) : [];
+  // Only used when the item's own metadata is too thin to analyse (e.g. a bare track title).
+  const ownEvidence = Object.values(fromText).filter((v) => v >= 0.3).length;
+  if (ownEvidence < 2) for (const c of retrievedFor) if (CONCEPT_BY_ID[c] && (concepts[c] ?? 0) < 0.35) concepts[c] = 0.35;
   // Format-level priors grounded in the item's kind.
   if ((item.kind === 'movie' || item.kind === 'series' || item.kind === 'video') && item.genres.some((g) => /documentar/i.test(g))) {
     concepts.documentary = Math.max(concepts.documentary ?? 0, 0.9);

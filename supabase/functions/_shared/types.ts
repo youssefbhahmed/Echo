@@ -22,7 +22,8 @@ export type ProviderId = 'youtube' | 'spotify' | 'itunes' | 'tmdb' | 'tvmaze' | 
 export type Embed =
   | { type: 'youtube'; videoId: string }
   | { type: 'spotify'; uri: string; kind: 'track' | 'album' | 'artist' | 'playlist' | 'show' | 'episode' }
-  | { type: 'audio'; previewUrl: string };
+  | { type: 'applepodcast'; collectionId: string; episodeId?: string }
+  | { type: 'audio'; previewUrl: string; label?: string };
 
 /** Normalized catalog item. Every provider adapter maps into this shape. */
 export interface ContentItem {

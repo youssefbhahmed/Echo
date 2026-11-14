@@ -256,9 +256,15 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
 
   if (trajectoryStep !== undefined && intent.trajectory && total) {
     const { from, to } = intent.trajectory;
+    const hasFrom = (item.concepts[from] ?? 0) >= 0.25;
+    const hasTo = (item.concepts[to] ?? 0) >= 0.25;
     const phase = trajectoryStep < total / 3 ? 'opens' : trajectoryStep >= (2 * total) / 3 ? 'resolves' : 'bridges';
-    const detail = phase === 'opens' ? `Opens the arc in a ${conceptLabel(from).toLowerCase()} register` : phase === 'resolves' ? `Lands on the ${conceptLabel(to).toLowerCase()} end of the arc` : `Bridges ${conceptLabel(from).toLowerCase()} and ${conceptLabel(to).toLowerCase()}`;
-    reasons.push({ kind: 'trajectory', detail });
+    // Only claim a role in the arc that the item's own metadata supports.
+    let detail: string | null = null;
+    if (phase === 'opens' && hasFrom) detail = `Opens the arc in a ${conceptLabel(from).toLowerCase()} register`;
+    else if (phase === 'resolves' && hasTo) detail = `Lands on the ${conceptLabel(to).toLowerCase()} end of the arc`;
+    else if (hasFrom && hasTo) detail = `Bridges ${conceptLabel(from).toLowerCase()} and ${conceptLabel(to).toLowerCase()}`;
+    if (detail) reasons.push({ kind: 'trajectory', detail: `Step ${trajectoryStep + 1} of ${total}: ${detail.charAt(0).toLowerCase()}${detail.slice(1)}` });
   }
 
   const qMatched = strong(positivePart(intent.target)).sort((a, b) => (intent.target[b] ?? 0) - (intent.target[a] ?? 0)).slice(0, 3);
@@ -268,7 +274,7 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
 
   // Creator familiarity
   const cKeys = creatorKeys(item);
-  const likedCreator = item.creators.find((cr, i) => (profile.creators[cKeys[i]] ?? 0) >= 0.5);
+  const likedCreator = item.creators.find((_cr, i) => (profile.creators[cKeys[i]] ?? 0) >= 0.5);
   if (likedCreator && ctx.exploration < 0.75) reasons.push({ kind: 'creator', detail: `From ${likedCreator}, whose work you've responded to` });
 
   // Profile / cross-media evidence

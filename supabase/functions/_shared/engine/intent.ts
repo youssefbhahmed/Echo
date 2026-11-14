@@ -28,7 +28,7 @@ export const GENRE_WORDS = [
 ];
 
 const FILLER = new Set(
-  ('understand learn learning explore discover through serious same feeling feelings gives give vibe vibes mood moods completely totally usual usually preferences preference think would love loved enjoy outside comfort zone surprise new different something someone somewhere either kinda bit lot little good great best amazing nice ones one watch listen read tonight today right now currently starts start starting gradually becomes become ending ends end turns turning while also doesnt dont isnt have has has to be necessarily needn need deep complex light easy short long quick').split(' '),
+  ('feels feel watching listening reading sounds looks seems after before understand learn learning explore discover through serious same feeling feelings gives give vibe vibes mood moods completely totally usual usually preferences preference think would love loved enjoy outside comfort zone surprise new different something someone somewhere either kinda bit lot little good great best amazing nice ones one watch listen read tonight today right now currently starts start starting gradually becomes become ending ends end turns turning while also doesnt dont isnt have has has to be necessarily needn need deep complex light easy short long quick').split(' '),
 );
 
 const DESCRIPTIVE_VERBS = /(feel|feels|feeling|felt|sound|sounds|sounding|look|looks|seem|seems|taste|tastes)\s*$/;

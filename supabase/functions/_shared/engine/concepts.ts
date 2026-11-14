@@ -71,7 +71,7 @@ export const CONCEPTS: ConceptDef[] = [
   },
   {
     id: 'civilization', label: 'Ancient worlds & civilization', group: 'theme',
-    terms: ['civilization', 'civilisation', 'ancient', 'archaeolog', 'mesopotamia', 'egypt', 'pharaoh', 'rome', 'roman', 'greece', 'greek', 'sumer', 'neolithic', 'prehistor', 'origins', 'human origins', 'aztec', 'maya', 'bronze age', 'anthropolog'],
+    terms: ['civilization', 'civilisation', 'ancient', 'archaeolog', 'mesopotamia', 'egypt', 'pharaoh', 'rome', 'roman', 'greece', 'greek', 'sumer', 'neolithic', 'prehistor', 'origins of civilization', 'origin of civilization', 'human origins', 'first cities', 'early humans', 'aztec', 'maya', 'bronze age', 'anthropolog'],
     related: ['history', 'myth', 'society', 'science'],
     search: { books: 'ancient civilization', screen: 'ancient', youtube: 'origins of civilization documentary', podcasts: 'ancient history', music: 'world music' },
   },

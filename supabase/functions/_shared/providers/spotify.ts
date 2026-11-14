@@ -1,0 +1,99 @@
+// Spotify Web API — Client Credentials for catalog search; official embeds for playback.
+// https://developer.spotify.com/documentation/web-api
+// Constraints honoured (Developer Policy, May 2025 + Feb 2026 dev-mode changes):
+//  • search `limit` max 10 in Development Mode; popularity fields may be absent.
+//  • Spotify content is NEVER sent to ML/AI models (no embeddings / LLM) — see pipeline.ts.
+//  • Cover art & metadata are always shown with a link back to Spotify; playback uses the official embed.
+import type { ContentItem } from '../types.ts';
+import { ProviderError, stripHtml } from './http.ts';
+import { tagRetrieval, type Provider, type ProviderContext } from './types.ts';
+
+interface Img { url: string; width?: number }
+interface SArtist { id: string; name: string }
+interface STrack { id: string; name: string; artists: SArtist[]; album: { name: string; images: Img[]; release_date?: string; id: string }; duration_ms: number; external_urls: { spotify: string }; preview_url?: string | null; popularity?: number; explicit?: boolean }
+interface SAlbum { id: string; name: string; artists: SArtist[]; images: Img[]; release_date?: string; total_tracks?: number; external_urls: { spotify: string }; album_type?: string }
+interface SPlaylist { id: string; name: string; description?: string; owner?: { display_name?: string }; images?: Img[]; external_urls: { spotify: string } }
+interface SShow { id: string; name: string; description?: string; publisher?: string; images: Img[]; languages?: string[]; external_urls: { spotify: string }; total_episodes?: number }
+interface SEpisode { id: string; name: string; description?: string; duration_ms: number; release_date?: string; images: Img[]; language?: string; external_urls: { spotify: string } }
+
+const img = (i?: Img[]) => i?.[0]?.url;
+
+export function mapSpotify(type: 'track' | 'album' | 'playlist' | 'show' | 'episode', x: unknown): ContentItem | null {
+  if (!x) return null;
+  switch (type) {
+    case 'track': {
+      const t = x as STrack;
+      return { id: `spotify:track:${t.id}`, category: 'music', kind: 'track', provider: 'spotify', externalId: t.id, title: t.name, creators: t.artists.map((a) => a.name),
+        genres: [], tags: [t.album?.name].filter(Boolean) as string[], artworkUrl: img(t.album?.images), durationSec: Math.round(t.duration_ms / 1000), releaseDate: t.album?.release_date,
+        externalUrl: t.external_urls.spotify, embed: { type: 'spotify', uri: `spotify:track:${t.id}`, kind: 'track' }, popularity: t.popularity !== undefined ? t.popularity / 100 : undefined,
+        metadata: { album: t.album?.name, previewUrl: t.preview_url ?? null } };
+    }
+    case 'album': {
+      const a = x as SAlbum;
+      return { id: `spotify:album:${a.id}`, category: 'music', kind: 'album', provider: 'spotify', externalId: a.id, title: a.name, creators: a.artists.map((r) => r.name), genres: [], tags: [],
+        artworkUrl: img(a.images), releaseDate: a.release_date, externalUrl: a.external_urls.spotify, embed: { type: 'spotify', uri: `spotify:album:${a.id}`, kind: 'album' }, metadata: { tracks: a.total_tracks, albumType: a.album_type } };
+    }
+    case 'playlist': {
+      const p = x as SPlaylist;
+      return { id: `spotify:playlist:${p.id}`, category: 'music', kind: 'playlist', provider: 'spotify', externalId: p.id, title: p.name, creators: p.owner?.display_name ? [p.owner.display_name] : [],
+        description: stripHtml(p.description), genres: [], tags: [], artworkUrl: img(p.images), externalUrl: p.external_urls.spotify, embed: { type: 'spotify', uri: `spotify:playlist:${p.id}`, kind: 'playlist' } };
+    }
+    case 'show': {
+      const s = x as SShow;
+      return { id: `spotify:show:${s.id}`, category: 'podcasts', kind: 'podcast', provider: 'spotify', externalId: s.id, title: s.name, creators: s.publisher ? [s.publisher] : [], description: stripHtml(s.description).slice(0, 1500),
+        genres: [], tags: [], artworkUrl: img(s.images), language: s.languages?.[0]?.slice(0, 2), externalUrl: s.external_urls.spotify, embed: { type: 'spotify', uri: `spotify:show:${s.id}`, kind: 'show' }, metadata: { episodes: s.total_episodes } };
+    }
+    case 'episode': {
+      const e = x as SEpisode;
+      return { id: `spotify:episode:${e.id}`, category: 'podcasts', kind: 'episode', provider: 'spotify', externalId: e.id, title: e.name, creators: [], description: stripHtml(e.description).slice(0, 1500),
+        genres: [], tags: [], artworkUrl: img(e.images), durationSec: Math.round(e.duration_ms / 1000), language: e.language?.slice(0, 2), releaseDate: e.release_date, externalUrl: e.external_urls.spotify,
+        embed: { type: 'spotify', uri: `spotify:episode:${e.id}`, kind: 'episode' } };
+    }
+  }
+}
+
+export async function spotifyAppToken(ctx: ProviderContext): Promise<string> {
+  const id = ctx.env('SPOTIFY_CLIENT_ID');
+  const secret = ctx.env('SPOTIFY_CLIENT_SECRET');
+  if (!id || !secret) throw new ProviderError('spotify', 'auth', 'not configured');
+  const res = await ctx.http.json<{ access_token: string; expires_in: number }>('https://accounts.spotify.com/api/token', {
+    init: { method: 'POST', headers: { Authorization: `Basic ${btoa(`${id}:${secret}`)}`, 'Content-Type': 'application/x-www-form-urlencoded' }, body: 'grant_type=client_credentials' },
+    cacheKey: `spotify:apptoken:${id}`, ttl: 50 * 60, provider: 'spotify',
+  });
+  return res.access_token;
+}
+
+export const spotify: Provider = {
+  id: 'spotify',
+  label: 'Spotify',
+  categories: ['music', 'podcasts'],
+  searchCost: 1,
+  setup: 'developer.spotify.com → Dashboard → Create app (Web API). Set SPOTIFY_CLIENT_ID and SPOTIFY_CLIENT_SECRET as Supabase secrets. Note: Development Mode apps need the owner to have Spotify Premium and allow 5 users.',
+  configured: (env) => !!(env('SPOTIFY_CLIENT_ID') && env('SPOTIFY_CLIENT_SECRET')),
+  async search(p, ctx) {
+    const token = await spotifyAppToken(ctx);
+    const types = p.category === 'podcasts' ? ['show', 'episode'] : p.kinds?.length ? p.kinds.filter((k) => ['track', 'album', 'playlist'].includes(k)) : ['track', 'album', 'playlist'];
+    const genreFilter = p.category === 'music' && p.genres?.length === 1 && /^[a-z\- ]+$/.test(p.genres[0]) ? ` genre:"${p.genres[0]}"` : '';
+    const params = new URLSearchParams({ q: `${p.query}${genreFilter}`, type: types.join(','), limit: '10', market: ctx.env('SPOTIFY_MARKET') ?? 'US' });
+    const data = await ctx.http.json<Record<string, { items: unknown[] }>>(`https://api.spotify.com/v1/search?${params}`, {
+      init: { headers: { Authorization: `Bearer ${token}` } }, cacheKey: `spotify:search:${params}`, ttl: 2 * 86400, provider: 'spotify',
+    });
+    const out: ContentItem[] = [];
+    for (const t of types as Array<'track' | 'album' | 'playlist' | 'show' | 'episode'>) {
+      for (const it of data[`${t}s`]?.items ?? []) {
+        const m = mapSpotify(t, it);
+        if (m) out.push(m);
+      }
+    }
+    return tagRetrieval(out, p);
+  },
+  async resolve(title, ctx, category) {
+    const token = await spotifyAppToken(ctx);
+    const type = category === 'podcasts' ? 'show' : 'track';
+    const params = new URLSearchParams({ q: title, type, limit: '3', market: ctx.env('SPOTIFY_MARKET') ?? 'US' });
+    const data = await ctx.http.json<Record<string, { items: unknown[] }>>(`https://api.spotify.com/v1/search?${params}`, {
+      init: { headers: { Authorization: `Bearer ${token}` } }, cacheKey: `spotify:resolve:${params}`, ttl: 7 * 86400, provider: 'spotify',
+    });
+    return mapSpotify(type, data[`${type}s`]?.items?.[0]);
+  },
+};
