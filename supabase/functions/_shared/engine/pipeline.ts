@@ -123,7 +123,7 @@ export function describeIntent(intent: Intent): string {
   const top = topKeys(positivePart(intent.target), 4, 0.2).filter((k) => CONCEPT_BY_ID[k]);
   if (top.length) parts.push(top.map((k) => conceptLabel(k).toLowerCase()).join(' · '));
   if (intent.references.length) parts.push(`in the spirit of ${intent.references.join(', ')}`);
-  if (intent.relaxed.length) parts.push(`not necessarily ${intent.relaxed.map((r) => (CONCEPT_BY_ID[r] ? conceptLabel(r).toLowerCase() : r)).join(', ')}`);
+  if (intent.relaxed.length) parts.push(`not necessarily ${[...new Set(intent.relaxed.map((r) => (CONCEPT_BY_ID[r] ? conceptLabel(r).toLowerCase() : r === 'sci-fi' ? 'science fiction' : r)))].join(', ')}`);
   if (intent.excludes.length) parts.push(`avoiding ${intent.excludes.map((r) => (CONCEPT_BY_ID[r] ? conceptLabel(r).toLowerCase() : r)).join(', ')}`);
   if (intent.trajectory) parts.push(`moving from ${conceptLabel(intent.trajectory.from).toLowerCase()} to ${conceptLabel(intent.trajectory.to).toLowerCase()}`);
   if (intent.complexity === 'deep') parts.push('in-depth');

@@ -1,5 +1,5 @@
 // Server-side helpers for ECHO Edge Functions (Deno). Never imported by the frontend.
-import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { createClient, type SupabaseClient } from 'npm:@supabase/supabase-js@2.119.0';
 import type { AnalyzedItem, ContentItem, TasteProfile } from './types.ts';
 import { hydrateProfile } from './engine/profile.ts';
 import type { CacheStore } from './providers/http.ts';

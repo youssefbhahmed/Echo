@@ -68,10 +68,12 @@ function extractReferences(original: string): { refs: string[]; spans: string[] 
 /** Map a phrase onto concept ids and genre words. */
 export function phraseToConcepts(phrase: string): { concepts: string[]; genres: string[] } {
   const hits = conceptHits(phrase);
-  const concepts = Object.keys(hits);
+  let concepts = Object.keys(hits);
+  // "science fiction" is a genre, not a statement about science.
+  if (concepts.includes('sci-fi')) concepts = concepts.filter((c) => c !== 'science');
   const norm = normalize(phrase);
-  const genres = GENRE_WORDS.filter((g) => new RegExp(`(^|\\s)${g.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`).test(norm));
-  return { concepts, genres };
+  let genres = GENRE_WORDS.filter((g) => new RegExp(`(^|\\s)${g.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(\\s|$)`).test(norm));
+  return { concepts, genres: genres.includes('science fiction') ? genres.filter((g) => g !== 'science') : genres };
 }
 
 const ORDINALS: Record<string, number> = { first: 0, '1st': 0, second: 1, '2nd': 1, third: 2, '3rd': 2, fourth: 3, '4th': 3, fifth: 4, '5th': 4, sixth: 5, last: -1 };

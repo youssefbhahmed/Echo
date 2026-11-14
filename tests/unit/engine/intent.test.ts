@@ -90,3 +90,11 @@ describe('refineIntent', () => {
     expect(r.exploration).toBeCloseTo(0.7);
   });
 });
+
+describe('genre phrases', () => {
+  it('"science fiction" relaxes sci-fi only, not science', () => {
+    const i = parseIntent("like Interstellar but it doesn't have to be science fiction");
+    expect(i.relaxed).toContain('sci-fi');
+    expect(i.relaxed).not.toContain('science');
+  });
+});
