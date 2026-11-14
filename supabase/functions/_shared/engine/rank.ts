@@ -1,6 +1,6 @@
 // Pipeline steps 5–7 — personal ranking, diversity adjustment, explanation.
 import type { AnalyzedItem, ConceptVector, Explanation, Intent, Recommendation, ScoreBreakdown, TasteProfile } from '../types.ts';
-import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
+import { conceptPhrase, CONCEPT_BY_ID } from './concepts.ts';
 import { creatorKeys, genreKeys } from './profile.ts';
 import { contentTokens, cosine, denseCosine, negativePart, normalize, normKey, positivePart, round } from './text.ts';
 
@@ -239,16 +239,18 @@ function kindNoun(kind: AnalyzedItem['kind'], plural = false): string {
  */
 export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHits?: string[] }, intent: Intent, profile: TasteProfile, view: ProfileView, ctx: RankContext, trajectoryStep?: number, total?: number): Explanation {
   const reasons: Explanation['reasons'] = [];
-  const strong = (cv: ConceptVector, min = 0.25) => Object.keys(cv).filter((k) => (item.concepts[k] ?? 0) >= min && cv[k] > 0);
-  const matchedConcepts = Object.entries(item.concepts).filter(([, v]) => v >= 0.25).sort((a, b) => b[1] - a[1]).map(([k]) => k);
+  // Claims about an item's qualities only use concepts found in its OWN metadata (not ones inherited from the search query).
+  const inherited = new Set(Array.isArray(item.metadata?.inheritedConcepts) ? (item.metadata!.inheritedConcepts as string[]) : []);
+  const strong = (cv: ConceptVector, min = 0.25) => Object.keys(cv).filter((k) => !inherited.has(k) && (item.concepts[k] ?? 0) >= min && cv[k] > 0);
+  const matchedConcepts = Object.entries(item.concepts).filter(([k, v]) => v >= 0.25 && !inherited.has(k)).sort((a, b) => b[1] - a[1]).map(([k]) => k);
 
   const refTitle = ctx.referenceSimilar?.get(item.id);
   if (refTitle) reasons.push({ kind: 'reference', detail: `Listed as similar to ${refTitle} by the catalog provider` });
   else if (ctx.references?.length) {
     for (const r of ctx.references) {
-      const shared = Object.keys(r.concepts).filter((k) => r.concepts[k] >= 0.3 && (item.concepts[k] ?? 0) >= 0.3).sort((a, b) => r.concepts[b] - r.concepts[a]).slice(0, 3);
+      const shared = Object.keys(r.concepts).filter((k) => !inherited.has(k) && r.concepts[k] >= 0.3 && (item.concepts[k] ?? 0) >= 0.3).sort((a, b) => r.concepts[b] - r.concepts[a]).slice(0, 3);
       if (shared.length) {
-        reasons.push({ kind: 'reference', detail: `Shares the ${list(shared.map(conceptLabel))} qualities of ${r.title}` });
+        reasons.push({ kind: 'reference', detail: `Shares the ${list(shared.map(conceptPhrase))} qualities of ${r.title}` });
         break;
       }
     }
@@ -261,15 +263,20 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
     const phase = trajectoryStep < total / 3 ? 'opens' : trajectoryStep >= (2 * total) / 3 ? 'resolves' : 'bridges';
     // Only claim a role in the arc that the item's own metadata supports.
     let detail: string | null = null;
-    if (phase === 'opens' && hasFrom) detail = `Opens the arc in a ${conceptLabel(from).toLowerCase()} register`;
-    else if (phase === 'resolves' && hasTo) detail = `Lands on the ${conceptLabel(to).toLowerCase()} end of the arc`;
-    else if (hasFrom && hasTo) detail = `Bridges ${conceptLabel(from).toLowerCase()} and ${conceptLabel(to).toLowerCase()}`;
+    if (phase === 'opens' && hasFrom) detail = `Opens the arc in a ${conceptPhrase(from)} register`;
+    else if (phase === 'resolves' && hasTo) detail = `Lands on the ${conceptPhrase(to)} end of the arc`;
+    else if (hasFrom && hasTo) detail = `Bridges ${conceptPhrase(from)} and ${conceptPhrase(to)}`;
     if (detail) reasons.push({ kind: 'trajectory', detail: `Step ${trajectoryStep + 1} of ${total}: ${detail.charAt(0).toLowerCase()}${detail.slice(1)}` });
   }
 
   const qMatched = strong(positivePart(intent.target)).sort((a, b) => (intent.target[b] ?? 0) - (intent.target[a] ?? 0)).slice(0, 3);
-  if (qMatched.length && ctx.hasQuery) reasons.push({ kind: 'query', detail: `Matches the ${list(qMatched.map(conceptLabel))} feel you asked for` });
-  else if (qMatched.length) reasons.push({ kind: 'context', detail: `Fits the ${list(qMatched.map(conceptLabel))} mood you selected` });
+  const qMoods = qMatched.filter((k) => CONCEPT_BY_ID[k]?.group === 'mood');
+  const qThemes = qMatched.filter((k) => CONCEPT_BY_ID[k]?.group !== 'mood');
+  if (qMatched.length && ctx.hasQuery) {
+    const parts = [qThemes.length ? `the ${list(qThemes.map(conceptPhrase))} you asked about` : '', qMoods.length ? `the ${list(qMoods.map(conceptPhrase))} feel you wanted` : ''].filter(Boolean);
+    reasons.push({ kind: 'query', detail: `Speaks to ${parts.join(', with ')}` });
+  }
+  else if (qMatched.length) reasons.push({ kind: 'context', detail: `Fits the ${list(qMatched.map(conceptPhrase))} mood you selected` });
   else if (score.keywordHits?.length && ctx.hasQuery) reasons.push({ kind: 'query', detail: `Directly about ${score.keywordHits.slice(0, 3).join(', ')}` });
 
   // Creator familiarity
@@ -286,7 +293,7 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
         .map((e) => ({ e, overlap: pMatched.filter((k) => (e.concepts[k] ?? 0) >= 0.3).length, cross: e.category !== item.category }))
         .filter((x) => x.overlap > 0)
         .sort((a, b) => b.overlap - a.overlap || Number(b.cross) - Number(a.cross))[0];
-      const labels = list(pMatched.map(conceptLabel));
+      const labels = list(pMatched.map(conceptPhrase));
       if (ev && ev.cross) reasons.push({ kind: 'profile', detail: `You liked ${ev.e.title} (${kindNoun(ev.e.kind)}); this ${kindNoun(item.kind)} carries the same ${labels} qualities` });
       else if (ev) reasons.push({ kind: 'profile', detail: `In the ${labels} vein of ${ev.e.title}, which you liked` });
       else reasons.push({ kind: 'profile', detail: `Aligned with your interest in ${labels}` });
@@ -299,7 +306,7 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
     const genre = item.genres[0];
     reasons.push({
       kind: 'novelty',
-      detail: shared.length ? `A step outside your usual ${genre ? `territory (${genre.toLowerCase()})` : 'territory'}, connected through ${list(shared.map(conceptLabel))}` : `Something new to you${genre ? ` in ${genre.toLowerCase()}` : ''}`,
+      detail: shared.length ? `A step outside your usual ${genre ? `territory (${genre.toLowerCase()})` : 'territory'}, connected through ${list(shared.map(conceptPhrase))}` : `Something new to you${genre ? ` in ${genre.toLowerCase()}` : ''}`,
     });
   }
 
@@ -314,7 +321,7 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
   if (!reasons.length) {
     const by = typeof item.metadata?.retrievedBy === 'string' ? item.metadata.retrievedBy : null;
     if (by) reasons.push({ kind: 'query', detail: `Found by searching ${item.provider === 'youtube' ? 'YouTube' : item.provider} for “${by}”` });
-    if (matchedConcepts.length) reasons.push({ kind: 'query', detail: `Tagged ${list(matchedConcepts.slice(0, 2).map(conceptLabel))} from its description and genres` });
+    if (matchedConcepts.length) reasons.push({ kind: 'query', detail: `Tagged ${list(matchedConcepts.slice(0, 2).map(conceptPhrase))} from its description and genres` });
   }
 
   const order: Explanation['reasons'][number]['kind'][] = ['reference', 'trajectory', 'query', 'context', 'profile', 'creator', 'novelty', 'collaborative', 'quality'];

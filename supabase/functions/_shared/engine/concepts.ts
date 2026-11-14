@@ -137,7 +137,7 @@ export const CONCEPTS: ConceptDef[] = [
   },
   {
     id: 'psychology', label: 'Mind & psychology', group: 'theme',
-    terms: ['psycholog', 'mind', 'mental', 'brain', 'memory', 'dream', 'unconscious', 'behavior', 'behaviour', 'emotion', 'trauma', 'therapy', 'cognitive', 'perception', 'madness'],
+    terms: ['psycholog', 'mind', 'mental', 'brain', 'memory', 'unconscious', 'behavior', 'behaviour', 'emotion', 'trauma', 'therapy', 'cognitive', 'perception', 'madness'],
     related: ['philosophy', 'identity', 'science', 'mystery'],
     search: { books: 'psychology', screen: 'psychological', youtube: 'psychology explained', podcasts: 'psychology', music: 'introspective' },
   },
@@ -361,4 +361,9 @@ export const MOOD_CHIPS = ['melancholic', 'uplifting', 'calm', 'energetic', 'nos
 
 export function conceptLabel(id: string): string {
   return CONCEPT_BY_ID[id]?.label ?? id;
+}
+
+/** Short form for use inside sentences ("Cosmic & space" → "cosmic"). */
+export function conceptPhrase(id: string): string {
+  return (CONCEPT_BY_ID[id]?.label ?? id).split(' & ')[0].toLowerCase();
 }

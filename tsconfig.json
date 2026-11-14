@@ -1,7 +1,12 @@
 {
   "compilerOptions": {
     "target": "ES2022",
-    "lib": ["ES2022", "DOM", "DOM.Iterable", "WebWorker"],
+    "lib": [
+      "ES2022",
+      "DOM",
+      "DOM.Iterable",
+      "WebWorker"
+    ],
     "module": "ESNext",
     "moduleResolution": "bundler",
     "jsx": "react-jsx",
@@ -14,8 +19,28 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "types": ["node", "vite/client", "vite-plugin-pwa/client", "vitest/globals"],
-    "paths": { "@shared/*": ["./supabase/functions/_shared/*"] }
+    "types": [
+      "node",
+      "vite/client",
+      "vite-plugin-pwa/client",
+      "vitest/globals"
+    ],
+    "paths": {
+      "@shared/*": [
+        "./supabase/functions/_shared/*"
+      ]
+    }
   },
-  "include": ["src", "tests/unit", "supabase/functions/_shared", "vite.config.ts", "playwright.config.ts", "tests/e2e"]
+  "include": [
+    "src",
+    "tests/unit",
+    "supabase/functions/_shared",
+    "vite.config.ts",
+    "playwright.config.ts",
+    "tests/e2e"
+  ],
+  "exclude": [
+    "supabase/functions/_shared/server.ts",
+    "supabase/functions/_shared/schemas.ts"
+  ]
 }

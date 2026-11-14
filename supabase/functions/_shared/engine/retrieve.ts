@@ -87,7 +87,12 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
       queries.push({ q: conceptSearch(intent.trajectory.from, 'music') ?? intent.trajectory.from, retrievedFor: [intent.trajectory.from] });
       queries.push({ q: conceptSearch(intent.trajectory.to, 'music') ?? intent.trajectory.to, retrievedFor: [intent.trajectory.to] });
     }
-    for (const c of concepts) {
+    // Music search works best with moods/atmospheres; abstract themes ("history") retrieve noise.
+    const MUSIC_THEMES = new Set(['cosmic', 'nature', 'spiritual', 'love', 'loss', 'solitude', 'sci-fi', 'myth', 'time-memory']);
+    const catConcepts = category === 'music'
+      ? [...concepts.filter((c) => CONCEPT_BY_ID[c]?.group === 'mood' || MUSIC_THEMES.has(c)), ...(concepts.some((c) => CONCEPT_BY_ID[c]?.group === 'mood') ? [] : ['dreamy', 'calm'])]
+      : concepts;
+    for (const c of catConcepts) {
       const s = conceptSearch(c, category);
       if (s) queries.push({ q: s, retrievedFor: [c] });
     }

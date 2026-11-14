@@ -15,3 +15,5 @@ playwright-report
 coverage
 .secrets
 supabase/functions/.local-ca.crt
+.env.e2e
+supabase/functions/.env.local

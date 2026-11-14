@@ -143,3 +143,16 @@ describe('profile seeding, statements and insights', () => {
     expect(s.explicit.likes).toContain('Tarkovsky');
   });
 });
+
+describe('grounding of inherited evidence', () => {
+  it('never claims a quality that only came from the search query', () => {
+    const thin = make({ title: 'Just a Track', category: 'music', creators: ['Someone'], metadata: { retrievedFor: ['civilization'], retrievedBy: 'world music' } });
+    expect(thin.concepts.civilization).toBe(0.35);
+    let p = emptyProfile();
+    p = applyFeedback(p, make({ title: 'Ancient Rome', category: 'books', tags: ['ancient civilization', 'rome', 'history'] }), 'like');
+    const [rec] = rankCandidates([thin], parseIntent(''), p, { exploration: 0.4, hasQuery: false });
+    expect(rec.explanation.matchedConcepts).not.toContain('civilization');
+    expect(rec.explanation.text).not.toMatch(/ancient/i);
+    expect(rec.explanation.text).toMatch(/Found by searching|Retrieved/);
+  });
+});

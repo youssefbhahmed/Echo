@@ -109,12 +109,13 @@ export function analyzeItem(item: ContentItem): AnalyzedItem {
   const retrievedFor = Array.isArray(item.metadata?.retrievedFor) ? (item.metadata!.retrievedFor as string[]) : [];
   // Only used when the item's own metadata is too thin to analyse (e.g. a bare track title).
   const ownEvidence = Object.values(fromText).filter((v) => v >= 0.3).length;
-  if (ownEvidence < 2) for (const c of retrievedFor) if (CONCEPT_BY_ID[c] && (concepts[c] ?? 0) < 0.35) concepts[c] = 0.35;
+  const inherited: string[] = [];
+  if (ownEvidence < 2) for (const c of retrievedFor) if (CONCEPT_BY_ID[c] && (concepts[c] ?? 0) < 0.35) { concepts[c] = 0.35; inherited.push(c); }
   // Format-level priors grounded in the item's kind.
   if ((item.kind === 'movie' || item.kind === 'series' || item.kind === 'video') && item.genres.some((g) => /documentar/i.test(g))) {
     concepts.documentary = Math.max(concepts.documentary ?? 0, 0.9);
   }
-  return { ...item, concepts };
+  return inherited.length ? { ...item, concepts, metadata: { ...(item.metadata ?? {}), inheritedConcepts: inherited } } : { ...item, concepts };
 }
 
 export function analyzeItems(items: ContentItem[]): AnalyzedItem[] {
