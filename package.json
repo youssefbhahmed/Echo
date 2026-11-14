@@ -10,6 +10,8 @@
     "preview": "vite preview --port 4173",
     "typecheck": "tsc -p tsconfig.json",
     "typecheck:functions": "deno check --config supabase/functions/deno.json supabase/functions/*/index.ts",
+    "functions:dev": "deno run -A --env-file=supabase/functions/.env.local scripts/dev-functions.ts",
+    "test:api": "deno test -A --env-file=supabase/functions/.env.local tests/integration/api.test.ts",
     "test": "vitest run",
     "test:watch": "vitest",
     "test:e2e": "playwright test --trace off",

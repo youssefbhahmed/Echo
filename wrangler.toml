@@ -1,0 +1,5 @@
+# Cloudflare Pages (static hosting for the ECHO PWA).
+# Deploy with Git integration (recommended) or: npx wrangler pages deploy dist --project-name echo
+name = "echo"
+pages_build_output_dir = "dist"
+compatibility_date = "2026-11-01"

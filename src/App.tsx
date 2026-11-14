@@ -21,6 +21,14 @@ function Gate({ children }: { children: React.ReactNode }) {
   if (loading) return <Listening label="Waking up…" />;
   if (!session) return <Navigate to="/auth" replace state={{ from: loc.pathname }} />;
   if (profile.isLoading) return <Listening label="Remembering you…" />;
+  if (profile.isError)
+    return (
+      <div className="mx-auto max-w-md px-6 py-24 text-center">
+        <p className="font-display text-2xl">ECHO can’t reach its server right now.</p>
+        <p className="mt-2 text-sm text-mist">{(profile.error as Error).message}</p>
+        <button type="button" onClick={() => profile.refetch()} className="mt-5 rounded-full bg-ember px-5 py-2.5 font-semibold text-ink">Try again</button>
+      </div>
+    );
   if (profile.data && !profile.data.account.onboarded_at && loc.pathname !== '/welcome') return <Navigate to="/welcome" replace />;
   return <>{children}</>;
 }

@@ -8,12 +8,12 @@ insert into auth.users (id, email, instance_id, aud, role) values
   ('11111111-1111-1111-1111-111111111111', 'alice@example.test', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated'),
   ('22222222-2222-2222-2222-222222222222', 'bob@example.test', '00000000-0000-0000-0000-000000000000', 'authenticated', 'authenticated');
 
-select is((select count(*)::int from public.profiles), 2, 'signup trigger creates profiles');
-select is((select count(*)::int from public.taste_profiles), 2, 'signup trigger creates taste profiles');
+select is((select count(*)::int from public.profiles where id in ('11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222')), 2, 'signup trigger creates profiles');
+select is((select count(*)::int from public.taste_profiles where user_id in ('11111111-1111-1111-1111-111111111111','22222222-2222-2222-2222-222222222222')), 2, 'signup trigger creates taste profiles');
 
 insert into public.content_items (id, category, kind, provider, external_id, title, external_url)
-values ('openlibrary:book:OL1W', 'books', 'book', 'openlibrary', 'OL1W', 'A Book', 'https://openlibrary.org/works/OL1W');
-insert into public.provider_cache (key, value, expires_at) values ('k', '{}', now() + interval '1 day');
+values ('openlibrary:book:OL1W', 'books', 'book', 'openlibrary', 'OL1W', 'A Book', 'https://openlibrary.org/works/OL1W') on conflict (id) do nothing;
+insert into public.provider_cache (key, value, expires_at) values ('rls-test-key', '{}', now() + interval '1 day') on conflict (key) do nothing;
 insert into public.oauth_tokens (user_id, provider, access_token, expires_at) values ('11111111-1111-1111-1111-111111111111', 'spotify', 'secret-token', now());
 
 -- ── act as Alice ──
@@ -21,7 +21,7 @@ set local role authenticated;
 select set_config('request.jwt.claims', '{"sub":"11111111-1111-1111-1111-111111111111","role":"authenticated"}', true);
 
 select is((select count(*)::int from public.profiles), 1, 'alice sees only her profile');
-select is((select count(*)::int from public.content_items), 1, 'catalog is readable');
+select ok(exists (select 1 from public.content_items where id = 'openlibrary:book:OL1W'), 'catalog is readable');
 select throws_ok($$ insert into public.content_items (id, category, kind, provider, external_id, title, external_url) values ('x', 'books', 'book', 'openlibrary', 'x', 'x', 'https://x') $$, '42501', null, 'users cannot write the shared catalog');
 select throws_ok($$ select * from public.oauth_tokens $$, '42501', null, 'oauth tokens are not readable by users');
 select throws_ok($$ select * from public.provider_cache $$, '42501', null, 'provider cache is not readable by users');
