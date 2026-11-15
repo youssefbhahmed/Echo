@@ -46,7 +46,7 @@ test('full journey: signup → onboarding → discover → feedback → chat →
 
   // Chat with refinement
   await page.goto('/echo');
-  await page.fill('textarea', 'existential philosophy books and podcasts, please');
+  await page.fill('textarea', 'existential philosophy books and tv series, please');
   await page.keyboard.press('Enter');
   await expect(page.locator('article').first()).toBeVisible({ timeout: 60_000 });
   await expect(page.getByText(/I read this as/)).toBeVisible();

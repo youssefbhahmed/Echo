@@ -1,5 +1,4 @@
-// Official embedded players only: YouTube IFrame Player API, Spotify Embed, Apple Podcasts embed,
-// and plain <audio> for publisher-provided podcast audio / licensed 30-second previews.
+// Official embedded players only: YouTube IFrame Player API and Spotify Embed.
 import { useEffect, useRef, useState } from 'react';
 import type { Embed } from '@shared/types.ts';
 
@@ -100,26 +99,5 @@ export function EmbedPlayer({ embed, title, onPlay }: { embed: Embed; title: str
         />
       );
     }
-    case 'applepodcast': {
-      const src = `https://embed.podcasts.apple.com/us/podcast/id${embed.collectionId}${embed.episodeId ? `?i=${embed.episodeId}&theme=dark` : '?theme=dark'}`;
-      return (
-        <iframe
-          title={`Apple Podcasts: ${title}`}
-          src={src}
-          className="w-full overflow-hidden rounded-2xl"
-          style={{ height: embed.episodeId ? 175 : 450 }}
-          sandbox="allow-forms allow-popups allow-same-origin allow-scripts allow-storage-access-by-user-activation allow-top-navigation-by-user-activation"
-          allow="autoplay *; encrypted-media *; clipboard-write"
-          loading="lazy"
-        />
-      );
-    }
-    case 'audio':
-      return (
-        <div className="rounded-2xl bg-ink-3 p-3">
-          <audio controls autoPlay preload="none" src={embed.previewUrl} className="w-full" aria-label={title} />
-          {embed.label && <p className="mt-2 text-xs text-dim">{embed.label}</p>}
-        </div>
-      );
   }
 }

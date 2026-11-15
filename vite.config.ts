@@ -38,7 +38,7 @@ export default defineConfig({
           {
             // Artwork from content providers: cache-first, bounded.
             urlPattern: ({ url }) =>
-              /(^|\.)(ytimg\.com|scdn\.co|image\.tmdb\.org|covers\.openlibrary\.org|mzstatic\.com|tvmaze\.com)$/.test(url.hostname),
+              /(^|\.)(ytimg\.com|scdn\.co|image\.tmdb\.org|covers\.openlibrary\.org|tvmaze\.com)$/.test(url.hostname),
             handler: 'CacheFirst',
             options: {
               cacheName: 'echo-artwork',

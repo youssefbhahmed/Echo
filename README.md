@@ -58,10 +58,9 @@ Legend: ✅ implemented **and tested** · 🟢 implemented, verified manually or
 | | Optional local Ollama (per device, browser → `localhost:11434`) | 🟡 needs Ollama on your machine |
 | Playback | YouTube IFrame Player API (privacy‑enhanced host), respects embedding restrictions | 🟡 needs `YOUTUBE_API_KEY` (normalisation unit‑tested) |
 | | Spotify official embeds (tracks, albums, playlists, shows, episodes) | 🟡 needs Spotify app credentials |
-| | Apple Podcasts official embeds and publisher audio for episodes | ✅ live (keyless) |
-| | 30‑second Apple Music previews (keyless fallback when Spotify isn't configured) | ✅ live, CSP-checked |
+| | Music and podcasts come from Spotify only (no other audio source) | ✅ unit tests (Spotify reported as "unconfigured" until keys are set) |
 | | TMDB official trailers via YouTube embed | 🟡 needs TMDB key |
-| Integrations | Open Library, iTunes/Apple Podcasts, TVmaze (keyless) | ✅ live API integration tests |
+| Integrations | Open Library, TVmaze (keyless) | ✅ live API integration tests |
 | | TMDB, YouTube Data API, Spotify Web API | 🟡 adapters implemented to current docs; need your keys |
 | | Spotify OAuth (PKCE) + playlist creation from collections | 🟡 needs Spotify app + allow-listed users |
 | My Taste | Constellation visualisation, clusters, cross‑media threads, emerging interests, current mood | ✅ e2e (renders) + unit tests (insights) |
@@ -116,7 +115,7 @@ npm run functions:dev
 npm run dev
 ```
 
-Open http://localhost:5173, create an account and go through onboarding. With **no provider keys at all**, books (Open Library), podcasts (Apple), TV series (TVmaze) and music previews (Apple) already work.
+Open http://localhost:5173, create an account and go through onboarding. With **no provider keys at all**, books (Open Library) and TV series (TVmaze) already work. Music and podcasts need Spotify keys; videos need a YouTube key; films need TMDB.
 
 ---
 
@@ -171,11 +170,10 @@ All provider secrets live **only** in Supabase function secrets and never reach 
 | Provider | Used for | Key needed | How to get it |
 |---|---|---|---|
 | **Open Library** | Books | No | — |
-| **Apple iTunes Search / Apple Podcasts** | Podcasts (shows + episodes); music previews fallback | No | — |
 | **TVmaze** | TV series fallback (when TMDB isn't set) | No | — |
 | **TMDB** | Films & series, keywords, similar titles, trailers | Yes (free, non‑commercial) | themoviedb.org → Settings → API → copy the **API Read Access Token** into `TMDB_READ_TOKEN` |
 | **YouTube Data API v3** | Videos, documentaries, interviews | Yes (free quota) | Google Cloud Console → new project → enable *YouTube Data API v3* → Credentials → API key → restrict to that API → `YOUTUBE_API_KEY` |
-| **Spotify Web API** | Songs, albums, playlists, podcasts; playlist creation | Yes | developer.spotify.com → Dashboard → Create app (Web API) → `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`. Redirect URI: `https://xxxx.supabase.co/functions/v1/spotify`. In Development Mode, add each user's Spotify email under *User Management* (max 5). |
+| **Spotify Web API** | Songs, albums, playlists, podcasts (the only music/podcast source); playlist creation | Yes | developer.spotify.com → Dashboard → Create app (Web API) → `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`. Redirect URI: `https://xxxx.supabase.co/functions/v1/spotify`. In Development Mode, add each user's Spotify email under *User Management* (max 5). |
 
 Set them with:
 
@@ -258,7 +256,6 @@ Verify against each provider's current pricing page; these change.
 | Spotify Web API | Free; Development Mode needs Premium owner, 5 users | 429 rate limiting | Extended Quota Mode (application required) |
 | TMDB | Free for non‑commercial use with attribution (shown in Settings → About) | n/a | Commercial licence from TMDB |
 | Open Library | Free, no key; please be polite (ECHO caches 7 days, sends a User-Agent) | throttling | — |
-| iTunes Search | Free, ~20 requests/minute guidance; cached 3 days | throttling | — |
 | TVmaze | Free, CC BY‑SA; rate limited per IP; cached 3 days | 429 | Premium API |
 | LLM providers | Optional; free tiers vary and change often | ECHO falls back to rules | provider pricing |
 
@@ -287,7 +284,7 @@ Verify against each provider's current pricing page; these change.
 | "ECHO can't reach its server" / CORS errors | Functions not deployed, or your site's origin isn't in `ALLOWED_ORIGINS`. Check `/functions/v1/health`. |
 | 401 "session expired" from functions | Sign out/in. If you disabled legacy JWT keys, set `ECHO_SERVICE_KEY`. |
 | No videos | `YOUTUBE_API_KEY` missing or daily quota used (Discover shows a notice). |
-| Music shows "30-second Apple preview" | Spotify isn't configured; set the Spotify secrets. |
+| No music or podcasts | Spotify isn't configured; set `SPOTIFY_CLIENT_ID` and `SPOTIFY_CLIENT_SECRET`. |
 | Spotify "refused … allowlist" | Add the user's Spotify account in the Spotify dashboard (Development Mode). |
 | Magic link/confirmation email never arrives | Supabase's default mailer is heavily rate-limited; configure SMTP or use password sign-in. |
 | Project stopped responding after a quiet week | Supabase Free pauses inactive projects; restore it from the dashboard. |
@@ -298,7 +295,7 @@ Verify against each provider's current pricing page; these change.
 
 ## Known limitations
 
-- **Keyless music is weaker.** Without Spotify, music comes from iTunes song search, which matches titles literally (songs named "Uplifting"). With Spotify, playlist descriptions and a better catalog improve results considerably.
+- **Music and podcasts require Spotify.** By design there is no fallback source; without Spotify keys these two categories are empty and Discover says so.
 - **Concept analysis is lexicon-based.** It is transparent and deterministic but literal: it can miss nuance or be fooled by titles. Embeddings and the optional LLM help; neither is required.
 - **YouTube, TMDB and Spotify adapters are written to current documentation** and unit-tested on representative payloads, but couldn't be exercised live here without keys. Verify with `scripts/smoke-pipeline.ts` after adding keys.
 - **Collaborative filtering** stays dormant until there are ≥ 20 active users. Personal use relies on content-based and semantic signals.
@@ -320,7 +317,7 @@ supabase/
   tests/                     pgTAP RLS tests
   functions/
     _shared/engine/          recommendation engine (pure TS; shared by server + client types)
-    _shared/providers/       YouTube, Spotify, TMDB, TVmaze, Open Library, iTunes adapters
+    _shared/providers/       YouTube, Spotify, TMDB, TVmaze, Open Library adapters
     discover|chat|feedback|profile|catalog|account|spotify|health/   Edge Functions
 scripts/                     dev router, deploy, smoke test, icons, local env
 tests/                       unit (Vitest), integration (Deno), e2e (Playwright)

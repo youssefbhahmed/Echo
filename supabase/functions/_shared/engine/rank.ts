@@ -313,8 +313,8 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
   if (score.collaborative >= 0.3) reasons.push({ kind: 'collaborative', detail: 'Saved by people whose likes overlap with yours' });
 
   if (item.rating !== undefined && item.rating >= 0.72) {
-    const src = item.provider === 'tmdb' ? 'TMDB' : item.provider === 'tvmaze' ? 'TVmaze' : item.provider === 'openlibrary' ? 'Open Library readers' : item.provider === 'itunes' ? 'Apple Podcasts listeners' : item.provider;
-    const scale = item.provider === 'openlibrary' || item.provider === 'itunes' ? `${round(item.rating * 5, 1)}/5` : `${round(item.rating * 10, 1)}/10`;
+    const src = item.provider === 'tmdb' ? 'TMDB' : item.provider === 'tvmaze' ? 'TVmaze' : item.provider === 'openlibrary' ? 'Open Library readers' : item.provider;
+    const scale = item.provider === 'openlibrary' ? `${round(item.rating * 5, 1)}/5` : `${round(item.rating * 10, 1)}/10`;
     reasons.push({ kind: 'quality', detail: `Rated ${scale} by ${src}` });
   }
 

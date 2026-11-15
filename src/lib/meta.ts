@@ -14,7 +14,7 @@ export const KIND_LABEL: Record<ContentKind, string> = {
 };
 
 export const PROVIDER_LABEL: Record<string, string> = {
-  youtube: 'YouTube', spotify: 'Spotify', tmdb: 'TMDB', tvmaze: 'TVmaze', openlibrary: 'Open Library', itunes: 'Apple', podcastindex: 'Podcast Index',
+  youtube: 'YouTube', spotify: 'Spotify', tmdb: 'TMDB', tvmaze: 'TVmaze', openlibrary: 'Open Library', podcastindex: 'Podcast Index',
 };
 
 export function formatDuration(sec?: number): string | null {

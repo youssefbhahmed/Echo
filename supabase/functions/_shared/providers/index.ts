@@ -1,5 +1,4 @@
 import type { Category, ProviderId } from '../types.ts';
-import { itunes } from './itunes.ts';
 import { openLibrary } from './openlibrary.ts';
 import { spotify } from './spotify.ts';
 import { tmdbProvider } from './tmdb.ts';
@@ -13,26 +12,25 @@ export const PROVIDERS: Record<ProviderId, Provider | undefined> = {
   tmdb: tmdbProvider,
   tvmaze,
   openlibrary: openLibrary,
-  itunes,
   podcastindex: undefined,
 };
 
 /**
  * Which providers serve a category, in priority order, given configuration.
- * Keyless fallbacks keep every category usable with zero configuration except YouTube.
+ * Music and podcasts come from Spotify only; books (Open Library) and TV (TVmaze fallback) are keyless.
  */
 export function providersFor(category: Category, env: Env): Provider[] {
   switch (category) {
     case 'youtube':
       return youtube.configured(env) ? [youtube] : [];
     case 'music':
-      return spotify.configured(env) ? [spotify] : [itunes];
+      return spotify.configured(env) ? [spotify] : [];
     case 'screen':
       return tmdbProvider.configured(env) ? [tmdbProvider] : [tvmaze];
     case 'books':
       return [openLibrary];
     case 'podcasts':
-      return spotify.configured(env) ? [itunes, spotify] : [itunes];
+      return spotify.configured(env) ? [spotify] : [];
   }
 }
 

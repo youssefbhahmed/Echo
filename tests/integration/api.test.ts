@@ -54,7 +54,7 @@ Deno.test('ECHO API end-to-end', opts, async (t) => {
   });
 
   await t.step('onboarding seeds the taste profile with real favorites', async () => {
-    const r = await call(alice.token, 'profile', { action: 'onboarding', categories: ['books', 'podcasts'], interests: ['philosophy', 'cosmic'], description: 'slow, melancholic stories about memory', exploration: 0.5, favorites: [favoriteId] });
+    const r = await call(alice.token, 'profile', { action: 'onboarding', categories: ['books', 'screen'], interests: ['philosophy', 'cosmic'], description: 'slow, melancholic stories about memory', exploration: 0.5, favorites: [favoriteId] });
     assertEquals(r.status, 200);
     assert(r.body.model.concepts.philosophy > 1);
     assertEquals(r.body.model.interactionCount, 1);
@@ -65,7 +65,7 @@ Deno.test('ECHO API end-to-end', opts, async (t) => {
 
   let firstRecs: Array<{ item: { id: string; title: string }; explanation: { text: string } }> = [];
   await t.step('discover feed returns personalised, explained recommendations', async () => {
-    const r = await call(alice.token, 'discover', { categories: ['books', 'podcasts'], limit: 6 });
+    const r = await call(alice.token, 'discover', { categories: ['books', 'screen'], limit: 6 });
     assertEquals(r.status, 200, JSON.stringify(r.body));
     firstRecs = r.body.recommendations;
     assert(firstRecs.length >= 3, `got ${firstRecs.length}`);
@@ -82,23 +82,23 @@ Deno.test('ECHO API end-to-end', opts, async (t) => {
     assertEquals(r.body.library.saved, true);
     const after = (await call(alice.token, 'profile', undefined, 'GET')).body.model;
     assertEquals(after.interactionCount, before.interactionCount + 1);
-    const r2 = await call(alice.token, 'discover', { categories: ['books', 'podcasts'], limit: 6 });
+    const r2 = await call(alice.token, 'discover', { categories: ['books', 'screen'], limit: 6 });
     assert(!r2.body.recommendations.some((x: { item: { id: string } }) => x.item.id === target), 'saved item excluded from feed');
   });
 
   let sessionId = '';
   await t.step('chat interprets, remembers statements, and refines', async () => {
-    const r = await call(alice.token, 'chat', { message: 'I love Tarkovsky. Recommend existential philosophy books and podcasts' });
+    const r = await call(alice.token, 'chat', { message: 'I love Tarkovsky. Recommend existential philosophy books and tv series' });
     assertEquals(r.status, 200, JSON.stringify(r.body));
     sessionId = r.body.sessionId;
     assert(r.body.recommendations.length > 0);
     assert(/existential|philosophy/i.test(r.body.reply), r.body.reply);
     const p = (await call(alice.token, 'profile', undefined, 'GET')).body.model;
     assert(p.explicit.likes.includes('Tarkovsky'));
-    const r2 = await call(alice.token, 'chat', { sessionId, message: 'only podcasts' });
+    const r2 = await call(alice.token, 'chat', { sessionId, message: 'only books' });
     assertEquals(r2.status, 200);
-    assertEquals(r2.body.intent.categories, ['podcasts']);
-    assert(r2.body.recommendations.every((x: { item: { category: string } }) => x.item.category === 'podcasts'));
+    assertEquals(r2.body.intent.categories, ['books']);
+    assert(r2.body.recommendations.every((x: { item: { category: string } }) => x.item.category === 'books'));
   });
 
   await t.step('users are isolated', async () => {

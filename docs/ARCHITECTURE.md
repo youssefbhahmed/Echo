@@ -19,7 +19,7 @@ flowchart LR
     CRON[pg_cron cleanup]
   end
   subgraph Providers["Content providers"]
-    YT[YouTube Data API] & SP[Spotify Web API] & TM[TMDB] & TV[TVmaze] & OLB[Open Library] & IT[iTunes / Apple Podcasts]
+    YT[YouTube Data API] & SP[Spotify Web API] & TM[TMDB] & TV[TVmaze] & OLB[Open Library]
   end
   LLM[(Optional OpenAI-compatible LLM)]
 
@@ -43,8 +43,8 @@ flowchart LR
 | **Deterministic concept space first, AI second** | ECHO must work with zero paid inference. A curated lexicon of ~50 concepts (themes, moods, qualities) gives a transparent, explainable semantic layer shared by all media. Embeddings (Supabase's free built-in `gte-small`) and an optional LLM are additive. |
 | **Ranking in Edge Functions, not the browser** | Provider keys stay server-side; caching and quota accounting are shared; collaborative filtering needs cross-user aggregates that must never reach a browser. |
 | **Provider adapters behind one interface** | `Provider { search, resolve?, similar? }` normalised to one `ContentItem` schema. Swapping TMDB for another film source, or adding restaurants/events, means one new adapter plus a category entry. |
-| **Keyless fallbacks** | Open Library, Apple Podcasts/iTunes and TVmaze make every category except YouTube usable before you create any developer account. |
-| **Embeds only for playback** | YouTube IFrame Player (nocookie host), Spotify Embed, Apple Podcasts embed, publisher-provided audio and licensed previews. No stream extraction, ever. |
+| **Spotify-only audio; keyless books & TV** | Music and podcasts come exclusively from Spotify. Open Library and TVmaze make books and series usable before you create any developer account. |
+| **Embeds only for playback** | YouTube IFrame Player (nocookie host) and Spotify Embed. No stream extraction, ever. |
 
 ## Recommendation pipeline
 

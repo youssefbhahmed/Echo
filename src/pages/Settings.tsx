@@ -228,7 +228,7 @@ export default function SettingsPage() {
 
         <Card title="About">
           <p className="text-mist">ECHO v0.1. Discover beyond the algorithm.</p>
-          <p className="text-xs text-dim">Catalog data from YouTube, Spotify, TMDB, TVmaze, Open Library and Apple. This product uses the TMDB API but is not endorsed or certified by TMDB. TV data from TVmaze (CC BY-SA). Playback uses each platform’s official embedded player.</p>
+          <p className="text-xs text-dim">Catalog data from YouTube, Spotify, TMDB, TVmaze and Open Library. This product uses the TMDB API but is not endorsed or certified by TMDB. TV data from TVmaze (CC BY-SA). Playback uses each platform’s official embedded player.</p>
         </Card>
       </div>
     </div>

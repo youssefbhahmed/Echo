@@ -180,8 +180,8 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   const categories = targetCategories(intent, deps.profile, req.categories);
   for (const cat of categories) {
     if (!providersFor(cat, deps.env).length) {
-      const p = PROVIDERS.youtube!;
-      if (cat === 'youtube') statuses.set('youtube', { id: 'youtube', status: 'unconfigured', message: p.setup });
+      const p = cat === 'youtube' ? PROVIDERS.youtube! : PROVIDERS.spotify!;
+      statuses.set(p.id, { id: p.id, status: 'unconfigured', message: p.setup });
     }
   }
   const plan = planRetrieval(intent, deps.profile, categories, { env: deps.env, exploration, hasQuery: effectiveHasQuery, seed: deps.seed }, extraConcepts).filter((q) => !deps.blockedProviders?.has(q.provider.id));

@@ -17,13 +17,11 @@ export type ContentKind =
   | 'podcast'
   | 'episode';
 
-export type ProviderId = 'youtube' | 'spotify' | 'itunes' | 'tmdb' | 'tvmaze' | 'openlibrary' | 'podcastindex';
+export type ProviderId = 'youtube' | 'spotify' | 'tmdb' | 'tvmaze' | 'openlibrary' | 'podcastindex';
 
 export type Embed =
   | { type: 'youtube'; videoId: string }
-  | { type: 'spotify'; uri: string; kind: 'track' | 'album' | 'artist' | 'playlist' | 'show' | 'episode' }
-  | { type: 'applepodcast'; collectionId: string; episodeId?: string }
-  | { type: 'audio'; previewUrl: string; label?: string };
+  | { type: 'spotify'; uri: string; kind: 'track' | 'album' | 'artist' | 'playlist' | 'show' | 'episode' };
 
 /** Normalized catalog item. Every provider adapter maps into this shape. */
 export interface ContentItem {

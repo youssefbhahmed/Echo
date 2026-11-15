@@ -96,7 +96,7 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
     }
   };
 
-  const facts = [KIND_LABEL[item.kind], year(item.releaseDate), formatDuration(item.durationSec), item.rating ? `★ ${item.provider === 'openlibrary' || item.provider === 'itunes' ? (item.rating * 5).toFixed(1) : (item.rating * 10).toFixed(1)}` : null].filter(Boolean);
+  const facts = [KIND_LABEL[item.kind], year(item.releaseDate), formatDuration(item.durationSec), item.rating ? `★ ${item.provider === 'openlibrary' ? (item.rating * 5).toFixed(1) : (item.rating * 10).toFixed(1)}` : null].filter(Boolean);
   const side = !compact && item.category !== 'youtube';
 
   return (

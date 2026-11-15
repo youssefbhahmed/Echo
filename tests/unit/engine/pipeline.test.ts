@@ -12,9 +12,6 @@ function fakeFetch(log: string[]) {
     const url = String(input);
     log.push(url);
     if (url.includes('openlibrary.org')) return new Response(fx('openlibrary.json'));
-    if (url.includes('itunes.apple.com') && url.includes('podcastEpisode')) return new Response(fx('itunes-episode.json'));
-    if (url.includes('itunes.apple.com') && url.includes('media=music')) return new Response(fx('itunes-song.json'));
-    if (url.includes('itunes.apple.com')) return new Response(fx('itunes-podcast.json'));
     if (url.includes('tvmaze.com/singlesearch')) return new Response(JSON.stringify(JSON.parse(fx('tvmaze.json'))[0].show));
     if (url.includes('tvmaze.com')) return new Response(fx('tvmaze.json'));
     return new Response('not found', { status: 404 });
@@ -25,16 +22,23 @@ describe('runPipeline (keyless providers, mocked network)', () => {
   it('runs all steps for a conversational request and returns grounded, real-catalog items', async () => {
     const log: string[] = [];
     const http = createHttp(new MemoryCache(), fakeFetch(log));
-    const res = await runPipeline({ query: 'existential philosophy books and podcasts', limit: 6 }, { env: () => undefined, http, profile: emptyProfile() });
+    const res = await runPipeline({ query: 'existential philosophy books and tv series', limit: 6 }, { env: () => undefined, http, profile: emptyProfile() });
     expect(res.pipeline.map((p) => p.step)).toEqual(['intent', 'retrieval', 'analysis', 'ranking']);
     expect(res.recommendations.length).toBeGreaterThan(0);
-    expect(new Set(res.recommendations.map((r) => r.item.category))).toEqual(new Set(['books', 'podcasts']));
+    expect(new Set(res.recommendations.map((r) => r.item.category))).toEqual(new Set(['books', 'screen']));
     for (const r of res.recommendations) {
       expect(r.item.externalUrl).toMatch(/^https:\/\//);
       expect(r.explanation.text.length).toBeGreaterThan(10);
     }
     expect(res.reply).toMatch(/existential/);
     expect(log.every((u) => !u.includes('googleapis') && !u.includes('spotify'))).toBe(true);
+  });
+
+  it('reports Spotify as unconfigured for music instead of using another source', async () => {
+    const http = createHttp(new MemoryCache(), fakeFetch([]));
+    const res = await runPipeline({ query: 'melancholic piano music', categories: ['music', 'podcasts'] }, { env: () => undefined, http, profile: emptyProfile() });
+    expect(res.recommendations).toEqual([]);
+    expect(res.providers.find((p) => p.id === 'spotify')?.status).toBe('unconfigured');
   });
 
   it('feed mode personalises with the profile and caches provider calls', async () => {
