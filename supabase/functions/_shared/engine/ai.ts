@@ -11,14 +11,32 @@ import { round } from './text.ts';
 export interface AiConfig {
   baseUrl: string;
   model: string;
+  /** Optional separate model for the music curator (spreads per-model rate limits). */
+  musicModel?: string;
   apiKey?: string;
+}
+
+/** Extra body params for reasoning models (keep latency and token use low). */
+export function modelParams(model: string): Record<string, unknown> {
+  return /gpt-oss|deepseek-r1|qwq/i.test(model) ? { reasoning_effort: 'low' } : {};
+}
+
+/** Retry once after a short pause when the provider says we're over the per-minute limit. */
+export async function withRateLimitRetry<T>(fn: () => Promise<T>, waitMs = 2500): Promise<T> {
+  try {
+    return await fn();
+  } catch (e) {
+    if ((e as { kind?: string })?.kind !== 'quota') throw e;
+    await new Promise((r) => setTimeout(r, waitMs));
+    return await fn();
+  }
 }
 
 export function aiConfig(env: Env): AiConfig | null {
   const baseUrl = env('AI_BASE_URL');
   const model = env('AI_MODEL');
   if (!baseUrl || !model) return null;
-  return { baseUrl: baseUrl.replace(/\/$/, ''), model, apiKey: env('AI_API_KEY') };
+  return { baseUrl: baseUrl.replace(/\/$/, ''), model, musicModel: env('AI_MUSIC_MODEL') || undefined, apiKey: env('AI_API_KEY') };
 }
 
 export const INTENT_SYSTEM_PROMPT = `You convert a media-discovery request into JSON. Output ONLY a JSON object with these optional keys:
@@ -141,12 +159,14 @@ export interface MusicPick {
  */
 export async function llmMusicPicks(description: string, cfg: AiConfig, http: HttpClient, opts: { avoid?: string[]; count?: number; cacheKey?: string } = {}): Promise<MusicPick[]> {
   const n = opts.count ?? 12;
-  const res = await http.json<{ choices: Array<{ message: { content: string } }> }>(`${cfg.baseUrl}/chat/completions`, {
+  const model = cfg.musicModel ?? cfg.model;
+  const res = await withRateLimitRetry(() => http.json<{ choices: Array<{ message: { content: string } }> }>(`${cfg.baseUrl}/chat/completions`, {
     init: {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}) },
       body: JSON.stringify({
-        model: cfg.model,
+        model,
+        ...modelParams(model),
         temperature: 0.7,
         response_format: { type: 'json_object' },
         messages: [
@@ -162,11 +182,11 @@ When the description gives a target mix with percentages, follow those proportio
         ],
       }),
     },
-    timeoutMs: 9000,
+    timeoutMs: 14000,
     provider: 'ai',
     cacheKey: opts.cacheKey,
     ttl: opts.cacheKey ? 86400 : undefined,
-  });
+  }));
   const content = res.choices?.[0]?.message?.content ?? '{}';
   const json = JSON.parse(content.replace(/^```(json)?|```$/g, '').trim()) as { items?: unknown[] };
   const str = (v: unknown) => (typeof v === 'string' && v.trim().length > 0 && v.length < 120 ? v.trim() : undefined);

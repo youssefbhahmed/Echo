@@ -121,7 +121,8 @@ export function scoreItem(item: AnalyzedItem, intent: Intent, profile: TasteProf
   let query = 0;
   if (Object.keys(targetPos).length || kw.hits.length || genreHit) {
     const wConcept = Object.keys(targetPos).length ? 0.6 : 0;
-    const wKw = intent.keywords.length ? 0.28 : 0;
+    // A precise topic request makes its words matter more than broad theme similarity.
+    const wKw = intent.keywords.length ? (intent.searchQueries && Object.keys(intent.searchQueries).length ? 0.5 : 0.28) : 0;
     const wGenre = intent.genres.length ? 0.2 : 0;
     const denom = wConcept + wKw + wGenre || 1;
     query = (wConcept * cosine(targetPos, item.concepts) + wKw * kw.score + wGenre * genreHit) / denom;

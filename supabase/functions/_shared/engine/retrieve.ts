@@ -93,7 +93,9 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
     const queries: Array<{ q: string; retrievedFor: string[] }> = [];
     // Metaphorical mood requests ("music like a sunrise") search by concept, not literal words.
     const literalOk = !(intent.intent === 'mood' && (category === 'music' || category === 'podcasts') && themeTop.length >= 2);
-    if (intent.keywords.length && opts.hasQuery && literalOk) {
+    const sq = opts.hasQuery ? intent.searchQueries?.[category] : undefined;
+    if (sq) queries.push({ q: sq, retrievedFor: [] });
+    else if (intent.keywords.length && opts.hasQuery && literalOk) {
       const words = intent.keywords.slice(0, 4).join(' ');
       const fmt = FORMAT_WORD[category] ?? '';
       queries.push({ q: `${words}${documentary && (category === 'youtube' || category === 'podcasts') ? ' documentary' : ''}${fmt}`.trim(), retrievedFor: [] });
@@ -110,9 +112,17 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
       : concepts;
     // Each category starts at a different concept, so together they cover more ground.
     const rotated = opts.hasQuery ? catConcepts : rotate(catConcepts, ci + (opts.seed ?? 0));
+    // A precise topic search ("Ottoman empire documentary") stays on topic: at most one generic theme
+    // search alongside it, and none for YouTube (quota is better spent on the topic itself).
+    const themeBudget = sq ? (category === 'youtube' ? 0 : 1) : Infinity;
+    let themesAdded = 0;
     for (const c of rotated) {
+      if (themesAdded >= themeBudget) break;
       const s = conceptSearch(c, category);
-      if (s) queries.push({ q: s, retrievedFor: [c] });
+      if (s) {
+        queries.push({ q: s, retrievedFor: [c] });
+        themesAdded++;
+      }
     }
     const seen = new Set<string>();
     const unique = queries.filter((q) => q.q && !seen.has(q.q.toLowerCase()) && seen.add(q.q.toLowerCase()));

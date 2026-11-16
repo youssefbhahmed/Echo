@@ -6,12 +6,12 @@ import { CONCEPT_BY_ID, CONCEPTS, MOOD_IDS } from './concepts.ts';
 import { conceptHits, contentTokens, normalize, projectText, round, topKeys } from './text.ts';
 
 const CATEGORY_WORDS: Array<[RegExp, Category[]]> = [
-  [/\b(youtubers?|video essays?|videos?|clips?|vlogs?|channels?|lectures?|talks?|ted)\b/, ['youtube']],
-  [/\b(music|songs?|tracks?|albums?|artists?|bands?|playlists?|tunes|beats|singers?|mix(tape)?)\b/, ['music']],
-  [/\b(films?|movies?|cinema|series|tv|shows?|sitcoms?|miniseries|anime|netflix|directors?)\b/, ['screen']],
-  [/\b(books?|novels?|read(ing)?|authors?|literature|memoirs?|(?<!video )essays?|poetry|poems?|non-?fiction|biograph(y|ies)|graphic novels?)\b/, ['books']],
+  [/\b(youtubers?|video essays?|videos?|vid(e|é)os?|clips?|vlogs?|channels?|cha(i|î)nes?|lectures?|talks?|ted|conf(e|é)rences?)\b/, ['youtube']],
+  [/\b(music|musique|songs?|chansons?|sons|tracks?|titres|morceaux|albums?|artists?|artistes?|bands?|groupes?|playlists?|tunes|beats|singers?|chanteu(r|se)s?|mix(tape)?)\b/, ['music']],
+  [/\b(films?|movies?|cin(e|é)ma|series|s(e|é)ries?|tv|t(e|é)l(e|é)|shows?|sitcoms?|miniseries|anime|netflix|directors?|r(e|é)alisateurs?)\b/, ['screen']],
+  [/\b(books?|livres?|novels?|romans?|read(ing)?|lire|lecture|authors?|auteurs?|literature|litt(e|é)rature|memoirs?|m(e|é)moires|(?<!video )essays?|essais|po(e|é)sie|poetry|poems?|non-?fiction|biograph(y|ies)|graphic novels?)\b/, ['books']],
   [/\b(podcasts?|episodes?|audio shows?|interviews?)\b/, ['podcasts']],
-  [/\b(documentar(y|ies)|docuseries|docs)\b/, ['screen', 'youtube']],
+  [/\b(documentar(y|ies)|documentaires?|docuseries|docs)\b/, ['screen', 'youtube']],
 ];
 
 const LANGS: Record<string, string> = {

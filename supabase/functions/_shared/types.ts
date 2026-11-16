@@ -98,6 +98,8 @@ export interface Intent {
   vague: boolean;
   /** Preference statements detected ("I love Tarkovsky"). */
   statements: PreferenceStatement[];
+  /** Catalog search phrase per category, from the AI interpreter. */
+  searchQueries?: Partial<Record<Category, string>>;
   /** Source filter: only use these providers (e.g. "youtube podcasts"). */
   providers?: ProviderId[];
   /** Which parser produced this intent. */

@@ -204,6 +204,12 @@ npx supabase secrets set TMDB_READ_TOKEN=... YOUTUBE_API_KEY=... SPOTIFY_CLIENT_
 - **Platforms are source filters:** "youtube podcasts" = podcasts from YouTube only; "spotify podcasts" = Spotify only; bare "youtube" = videos, bare "spotify" = music.
 - **Reactions are never lost:** if one can't be sent (offline, expired session), it is kept on the device and retried automatically.
 
+### How ECHO understands requests
+
+With an AI provider configured, every message is interpreted **AI-first** (`engine/understand.ts`): any language, conversation-aware (follow-ups like "only the YouTube ones", "plutôt en français" resolve against the previous request), producing media types, source filters, a precise search phrase per category, themes/moods, exclusions and remembered preferences. The rules parser still runs: it is the fallback when AI is unavailable or rate-limited, and its explicit readings (negations, "doesn't have to be", literal titles) are guardrails the AI cannot override; titles and preferences the user didn't actually write are discarded.
+
+Evaluation (`tests/eval/understanding.ts`, 30 real requests incl. French and follow-ups): **rules alone 19/30, AI-first 29/30** (Groq `qwen/qwen3.8-27b`). Use `AI_MUSIC_MODEL` to run the music curator on a different model (e.g. `openai/gpt-oss-120b`), since free-tier rate limits are per model.
+
 ## Optional AI
 
 ECHO is fully functional without AI. The rules engine (`engine/intent.ts`) parses requests, and the hybrid ranker does the rest.

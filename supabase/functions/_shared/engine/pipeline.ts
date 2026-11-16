@@ -6,7 +6,8 @@ import type { AnalyzedItem, Category, ContentItem, DiscoverRequest, DiscoverResp
 import { PROVIDERS, providersFor } from '../providers/index.ts';
 import { ProviderError, type HttpClient } from '../providers/http.ts';
 import type { Env, Provider } from '../providers/types.ts';
-import { aiConfig, llmEnrichIntent, llmMusicPicks, mergeHint, sanitizeHint } from './ai.ts';
+import { aiConfig, llmMusicPicks, mergeHint, sanitizeHint } from './ai.ts';
+import { applyUnderstanding, llmUnderstand } from './understand.ts';
 import { verifySpotifyPicks } from '../providers/spotify.ts';
 import { musicBrief, topStyles } from '../importer.ts';
 import { familyMix, inBlockedFamily, mixBrief } from './music.ts';
@@ -126,6 +127,8 @@ export function describeIntent(intent: Intent): string {
   const parts: string[] = [];
   const top = topKeys(positivePart(intent.target), 4, 0.2).filter((k) => CONCEPT_BY_ID[k]);
   if (top.length) parts.push(top.map((k) => conceptLabel(k).toLowerCase()).join(' · '));
+  if (intent.providers?.length) parts.push(`from ${intent.providers.join(', ')}`);
+  if (intent.searchQueries && Object.keys(intent.searchQueries).length) parts.push(`searching “${[...new Set(Object.values(intent.searchQueries))].slice(0, 2).join('”, “')}”`);
   if (intent.references.length) parts.push(`in the spirit of ${intent.references.join(', ')}`);
   if (intent.relaxed.length) parts.push(`not necessarily ${[...new Set(intent.relaxed.map((r) => (CONCEPT_BY_ID[r] ? conceptLabel(r).toLowerCase() : r === 'sci-fi' ? 'science fiction' : r)))].join(', ')}`);
   if (intent.excludes.length) parts.push(`avoiding ${intent.excludes.map((r) => (CONCEPT_BY_ID[r] ? conceptLabel(r).toLowerCase() : r)).join(', ')}`);
@@ -143,17 +146,22 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
 
   // ── Step 1: intent ──
   let t = timer();
-  let intent = parseIntent(query, { moods: req.moods, categories: req.categories, exploration: undefined });
-  if (deps.previousIntent && hasQuery) intent = refineIntent(deps.previousIntent, intent);
-  if (req.intentHint) intent = mergeHint(intent, sanitizeHint(req.intentHint, query), 'rules+client-llm');
+  const rulesIntent = parseIntent(query, { moods: req.moods, categories: req.categories, exploration: undefined });
+  const prevIntent = hasQuery ? deps.previousIntent ?? null : null;
+  // Rules-only reading (the fallback), with conversational refinement.
+  let intent = prevIntent ? refineIntent(prevIntent, rulesIntent) : rulesIntent;
   const ai = aiConfig(deps.env);
-  if (ai && deps.useLlm !== false && hasQuery && query.split(/\s+/).length >= 4) {
+  if (ai && deps.useLlm !== false && hasQuery) {
+    // AI-first understanding (any language, conversation-aware), with the rules as guardrails.
     try {
-      intent = await llmEnrichIntent(intent, ai, deps.http);
+      const u = await llmUnderstand(query, prevIntent, ai, deps.http);
+      intent = applyUnderstanding(rulesIntent, u, prevIntent);
+      if (req.categories?.length && !u.categories.length) intent.categories = [...new Set([...intent.categories, ...req.categories])];
     } catch (e) {
-      pipeline.push({ step: 'intent-llm', ms: 0, detail: `LLM unavailable, rules only (${(e as Error).message.slice(0, 80)})` });
+      pipeline.push({ step: 'intent-llm', ms: 0, detail: `AI unavailable, rules only (${(e as Error).message.slice(0, 80)})` });
     }
   }
+  if (req.intentHint) intent = mergeHint(intent, sanitizeHint(req.intentHint, query), 'rules+client-llm');
   const exploration = Math.max(0, Math.min(1, intent.exploration ?? req.exploration ?? deps.profile.exploration ?? 0.4));
   pipeline.push({ step: 'intent', ms: t(), detail: `${intent.intent} via ${intent.source}${describeIntent(intent) ? `: ${describeIntent(intent)}` : ''}` });
 
