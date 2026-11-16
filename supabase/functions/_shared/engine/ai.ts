@@ -125,3 +125,54 @@ export async function llmEnrichIntent(intent: Intent, cfg: AiConfig, http: HttpC
   const json = JSON.parse(content.replace(/^```(json)?|```$/g, '').trim());
   return mergeHint(intent, sanitizeHint(json, intent.rawText), 'rules+llm');
 }
+
+export interface MusicPick {
+  artist: string;
+  track?: string;
+  album?: string;
+}
+
+/**
+ * Ask the LLM for real, acclaimed music matching a description. Only ECHO's own taste words
+ * (and the user's request text) are sent, never catalog/Spotify data. Every pick is then verified
+ * against Spotify before it can be shown, so hallucinated titles are dropped.
+ */
+export async function llmMusicPicks(description: string, cfg: AiConfig, http: HttpClient, opts: { avoid?: string[]; count?: number; cacheKey?: string } = {}): Promise<MusicPick[]> {
+  const n = opts.count ?? 12;
+  const res = await http.json<{ choices: Array<{ message: { content: string } }> }>(`${cfg.baseUrl}/chat/completions`, {
+    init: {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}) },
+      body: JSON.stringify({
+        model: cfg.model,
+        temperature: 0.7,
+        response_format: { type: 'json_object' },
+        messages: [
+          {
+            role: 'system',
+            content: `You are a music curator with deep, eclectic knowledge. Return ONLY JSON: {"items":[{"artist":"...","track":"..."} or {"artist":"...","album":"..."}]}.
+Give ${n} real, existing recordings by acclaimed or cult artists that fit the description. Mix eras, countries and genres; include lesser-known gems alongside classics; at most one item per artist.
+Never suggest generic sleep/meditation/relaxation/study/frequency/stock music, compilations or "best of" collections.
+If the description mentions an arc (from one mood to another), list the items in listening order along that arc.`,
+          },
+          { role: 'user', content: `Description: ${description.slice(0, 600)}${opts.avoid?.length ? `\nAvoid: ${opts.avoid.join(', ').slice(0, 200)}` : ''}` },
+        ],
+      }),
+    },
+    timeoutMs: 9000,
+    provider: 'ai',
+    cacheKey: opts.cacheKey,
+    ttl: opts.cacheKey ? 86400 : undefined,
+  });
+  const content = res.choices?.[0]?.message?.content ?? '{}';
+  const json = JSON.parse(content.replace(/^```(json)?|```$/g, '').trim()) as { items?: unknown[] };
+  const str = (v: unknown) => (typeof v === 'string' && v.trim().length > 0 && v.length < 120 ? v.trim() : undefined);
+  const seen = new Set<string>();
+  return (json.items ?? [])
+    .map((x) => (x && typeof x === 'object' ? (x as Record<string, unknown>) : {}))
+    .map((x) => ({ artist: str(x.artist), track: str(x.track), album: str(x.album) }))
+    .filter((x) => !!x.artist && !!(x.track || x.album))
+    .map((x) => ({ artist: x.artist!, ...(x.track ? { track: x.track } : { album: x.album }) }) as MusicPick)
+    .filter((x) => !seen.has(x.artist.toLowerCase()) && seen.add(x.artist.toLowerCase()))
+    .slice(0, n);
+}

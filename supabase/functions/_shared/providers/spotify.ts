@@ -72,7 +72,8 @@ export const spotify: Provider = {
   configured: (env) => !!(env('SPOTIFY_CLIENT_ID') && env('SPOTIFY_CLIENT_SECRET')),
   async search(p, ctx) {
     const token = await spotifyAppToken(ctx);
-    const types = p.category === 'podcasts' ? ['show', 'episode'] : p.kinds?.length ? p.kinds.filter((k) => ['track', 'album', 'playlist'].includes(k)) : ['track', 'album', 'playlist'];
+    // Music: tracks + albums (user playlists in search results are mostly low-quality); podcasts: shows + episodes.
+    const types = p.category === 'podcasts' ? ['show', 'episode'] : p.kinds?.length ? p.kinds.filter((k) => ['track', 'album', 'playlist'].includes(k)) : ['track', 'album'];
     const genreFilter = p.category === 'music' && p.genres?.length === 1 && /^[a-z\- ]+$/.test(p.genres[0]) ? ` genre:"${p.genres[0]}"` : '';
     // Podcasts use their own market + language (default: US catalogue, English only); music keeps SPOTIFY_MARKET.
     const isPod = p.category === 'podcasts';
@@ -102,3 +103,30 @@ export const spotify: Provider = {
     return mapSpotify(type, data[`${type}s`]?.items?.[0]);
   },
 };
+
+const simplify = (x: string) => x.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
+
+/** Verify AI-suggested picks exist on Spotify (exact track/album + artist match). Unverifiable picks are dropped. */
+export async function verifySpotifyPicks(picks: Array<{ artist: string; track?: string; album?: string }>, ctx: ProviderContext): Promise<ContentItem[]> {
+  const token = await spotifyAppToken(ctx);
+  const market = ctx.env('SPOTIFY_MARKET') ?? 'US';
+  const found = await Promise.all(picks.map(async (pk) => {
+    const type = pk.track ? 'track' : 'album';
+    const q = `${type}:"${(pk.track ?? pk.album)!.replace(/"/g, '')}" artist:"${pk.artist.replace(/"/g, '')}"`;
+    const params = new URLSearchParams({ q, type, limit: '3', market });
+    try {
+      const data = await ctx.http.json<Record<string, { items: unknown[] }>>(`https://api.spotify.com/v1/search?${params}`, {
+        init: { headers: { Authorization: `Bearer ${token}` } }, cacheKey: `spotify:verify:${params}`, ttl: 30 * 86400, provider: 'spotify',
+      });
+      const want = simplify(pk.artist);
+      const hit = (data[`${type}s`]?.items ?? []).find((it) => {
+        const artists = ((it as { artists?: Array<{ name: string }> })?.artists ?? []).map((a) => simplify(a.name));
+        return artists.some((a) => a === want || a.includes(want) || want.includes(a));
+      });
+      return hit ? mapSpotify(type, hit) : null;
+    } catch {
+      return null;
+    }
+  }));
+  return found.filter((x): x is ContentItem => !!x);
+}

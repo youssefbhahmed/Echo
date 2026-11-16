@@ -95,6 +95,8 @@ export function profileView(p: TasteProfile): ProfileView {
   };
 }
 
+export const FUNCTIONAL_MUSIC = /\b(sleep|sleeping|relax(ing|ation)?|meditation|meditative music|frequenc(y|ies)|\d{3}\s?hz|spa music|study (music|beats)|lo-?fi beats|white noise|binaural|healing (music|sounds)|calming music|deep focus|asmr|nature sounds)\b/i;
+
 /** 0..1 heuristic for engagement-bait titles (shouting, "!!", bait phrases). Not applied to books/films. */
 export function clickbaitScore(title: string): number {
   const words = title.split(/\s+/).filter((w) => /[A-Za-z]{3,}/.test(w));
@@ -165,6 +167,15 @@ export function scoreItem(item: AnalyzedItem, intent: Intent, profile: TasteProf
   if (g < -0.4) penalty += 0.2;
   if (durationMismatch(item, intent.duration)) penalty += 0.15;
   penalty += clickbaitScore(item.title) * 0.35;
+  // Stock "mood" filler: a music title that just repeats the search word ("Uplifting", "Cosmic Ambiance").
+  const rb = retrievedBy(item);
+  if (item.category === 'music' && rb && !rb.startsWith('ai:')) {
+    const qWords = normKey(rb).split(' ').filter((w) => w.length >= 5).map((w) => w.slice(0, 5));
+    const tWords = normKey(item.title).split(' ');
+    if (qWords.some((q) => tWords.some((t) => t.startsWith(q)))) penalty += 0.3;
+  }
+  // Functional/stock music (sleep, frequencies, "study beats") unless explicitly requested.
+  if (item.category === 'music' && FUNCTIONAL_MUSIC.test(`${item.title} ${item.creators.join(' ')} ${item.tags.join(' ')}`) && !/\b(sleep|relax|meditat|study|focus|spa|yoga)/i.test(intent.rawText)) penalty += 0.5;
   if (intent.language && item.language && !item.language.toLowerCase().startsWith(intent.language)) penalty += 0.25;
   if (intent.energy === 'low' && (item.concepts.energetic ?? 0) > 0.5) penalty += 0.1;
   if (intent.energy === 'high' && (item.concepts.calm ?? 0) > 0.5) penalty += 0.1;
@@ -286,7 +297,13 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
 
 /** Order picks so the sequence travels along the requested emotional arc. */
 export function sequenceTrajectory<T extends { item: AnalyzedItem }>(items: T[], from: string, to: string): Array<T & { trajectoryStep: number }> {
-  const scored = items.map((x) => ({ x, pos: (x.item.concepts[to] ?? 0) - (x.item.concepts[from] ?? 0) }));
+  // AI picks carry the curator's own arc order (their concepts are only inherited labels).
+  const aiN = Math.max(1, ...items.map((x) => Number(x.item.metadata?.aiOrder ?? 0) + 1));
+  const scored = items.map((x) =>
+    typeof x.item.metadata?.aiOrder === 'number'
+      ? { x, pos: (Number(x.item.metadata.aiOrder) / aiN) * 1.2 - 0.6 }
+      : { x, pos: (x.item.concepts[to] ?? 0) - (x.item.concepts[from] ?? 0) },
+  );
   scored.sort((a, b) => a.pos - b.pos);
   return scored.map((s, i) => ({ ...s.x, trajectoryStep: i }));
 }
@@ -317,6 +334,10 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
   const strong = (cv: ConceptVector, min = 0.25) => Object.keys(cv).filter((k) => !inherited.has(k) && (item.concepts[k] ?? 0) >= min && cv[k] > 0);
   const matchedConcepts = Object.entries(item.concepts).filter(([k, v]) => v >= 0.25 && !inherited.has(k)).sort((a, b) => b[1] - a[1]).map(([k]) => k);
 
+  if (item.metadata?.aiPick) {
+    const forWhat = typeof item.metadata.aiFor === 'string' && item.metadata.aiFor ? item.metadata.aiFor.split(', ').slice(0, 3).join(', ') : '';
+    reasons.push({ kind: ctx.hasQuery ? 'query' : 'profile', detail: ctx.hasQuery ? `Picked by ECHO's AI curator for your request and verified on Spotify` : `Picked by ECHO's AI curator for your ${forWhat || 'taste'} side, verified on Spotify` });
+  }
   const refTitle = ctx.referenceSimilar?.get(item.id);
   if (refTitle) reasons.push({ kind: 'reference', detail: `Listed as similar to ${refTitle} by the catalog provider` });
   else if (ctx.references?.length) {
@@ -331,14 +352,15 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
 
   if (trajectoryStep !== undefined && intent.trajectory && total) {
     const { from, to } = intent.trajectory;
-    const hasFrom = (item.concepts[from] ?? 0) >= 0.25;
-    const hasTo = (item.concepts[to] ?? 0) >= 0.25;
+    const hasFrom = !inherited.has(from) && (item.concepts[from] ?? 0) >= 0.25;
+    const hasTo = !inherited.has(to) && (item.concepts[to] ?? 0) >= 0.25;
     const phase = trajectoryStep < total / 3 ? 'opens' : trajectoryStep >= (2 * total) / 3 ? 'resolves' : 'bridges';
     // Only claim a role in the arc that the item's own metadata supports.
     let detail: string | null = null;
     if (phase === 'opens' && hasFrom) detail = `Opens the arc in a ${conceptPhrase(from)} register`;
     else if (phase === 'resolves' && hasTo) detail = `Lands on the ${conceptPhrase(to)} end of the arc`;
     else if (hasFrom && hasTo) detail = `Bridges ${conceptPhrase(from)} and ${conceptPhrase(to)}`;
+    if (!detail && typeof item.metadata?.aiOrder === 'number') detail = `Placed at this point of the arc by ECHO's AI curator`;
     if (detail) reasons.push({ kind: 'trajectory', detail: `Step ${trajectoryStep + 1} of ${total}: ${detail.charAt(0).toLowerCase()}${detail.slice(1)}` });
   }
 

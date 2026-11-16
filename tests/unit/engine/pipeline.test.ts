@@ -94,3 +94,36 @@ describe('mergeHint guards against model guesses', () => {
     expect(merged.target.awe).toBeGreaterThan(0);
   });
 });
+
+describe('AI music picks', () => {
+  it('only shows LLM music picks that verify on Spotify, and filters stock music', async () => {
+    const calls: string[] = [];
+    const fake = (async (u: string, init?: RequestInit) => {
+      const url = String(u);
+      calls.push(url);
+      if (url.includes('accounts.spotify.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
+      if (url.includes('/chat/completions')) {
+        const body = JSON.parse(String(init?.body));
+        if (/curator/.test(body.messages[0].content)) return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ items: [{ artist: 'Bon Iver', track: 'Holocene' }, { artist: 'Imaginary Band', track: 'Fake Song' }] }) } }] }));
+        return new Response(JSON.stringify({ choices: [{ message: { content: '{}' } }] }));
+      }
+      if (url.includes('/v1/search')) {
+        const q = new URL(url).searchParams.get('q') ?? '';
+        const track = (id: string, name: string, artist: string) => ({ id, name, artists: [{ id: 'a', name: artist }], album: { id: 'al', name: 'Album', images: [] }, duration_ms: 200000, external_urls: { spotify: `https://open.spotify.com/track/${id}` } });
+        if (q.includes('Holocene')) return new Response(JSON.stringify({ tracks: { items: [track('h1', 'Holocene', 'Bon Iver')] } }));
+        if (q.includes('Fake Song')) return new Response(JSON.stringify({ tracks: { items: [track('x', 'Fake Song', 'Someone Else')] } }));
+        return new Response(JSON.stringify({ tracks: { items: [track('s1', 'Deep Sleep 432Hz Frequencies', 'Relaxing Sleep Music'), track('s2', 'Melancholy Hill', 'Gorillaz')] }, albums: { items: [] } }));
+      }
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    const env = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b', AI_BASE_URL: 'https://ai.test/v1', AI_MODEL: 'm' } as Record<string, string>)[n];
+    const res = await runPipeline({ categories: ['music'], moods: ['melancholic'], limit: 5 }, { env, http: createHttp(new MemoryCache(), fake), profile: emptyProfile() });
+    const titles = res.recommendations.map((r) => r.item.title);
+    expect(titles).toContain('Holocene');
+    expect(titles).not.toContain('Fake Song');
+    expect(titles[titles.length - 1]).toBe('Deep Sleep 432Hz Frequencies');
+    const holo = res.recommendations.find((r) => r.item.title === 'Holocene')!;
+    expect(holo.explanation.text).toMatch(/AI curator.*verified on Spotify/);
+    expect(res.pipeline.find((p) => p.step === 'music-ai')?.detail).toMatch(/1\/2/);
+  });
+});

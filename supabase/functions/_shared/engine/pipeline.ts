@@ -6,12 +6,14 @@ import type { AnalyzedItem, Category, ContentItem, DiscoverRequest, DiscoverResp
 import { PROVIDERS, providersFor } from '../providers/index.ts';
 import { ProviderError, type HttpClient } from '../providers/http.ts';
 import type { Env, Provider } from '../providers/types.ts';
-import { aiConfig, llmEnrichIntent, mergeHint, sanitizeHint } from './ai.ts';
+import { aiConfig, llmEnrichIntent, llmMusicPicks, mergeHint, sanitizeHint } from './ai.ts';
+import { verifySpotifyPicks } from '../providers/spotify.ts';
+import { hashKey } from '../providers/http.ts';
 import { analyzeItem } from './analyze.ts';
 import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
 import { parseIntent, refineIntent } from './intent.ts';
 import { rankCandidates, type EvidenceItem, type ReferenceInfo } from './rank.ts';
-import { planRetrieval, targetCategories } from './retrieve.ts';
+import { feedConcepts, planRetrieval, targetCategories } from './retrieve.ts';
 import { positivePart, topKeys } from './text.ts';
 
 export interface PipelineDeps {
@@ -189,6 +191,22 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   const plan = planRetrieval(intent, deps.profile, categories, { env: deps.env, exploration, hasQuery: effectiveHasQuery && !nothingToSearch, seed: deps.seed, mix: req.mix }, extraConcepts).filter((q) => !deps.blockedProviders?.has(q.provider.id));
   for (const id of deps.blockedProviders ?? []) statuses.set(id, { id, status: 'quota', message: 'Daily quota reached; using cached results until it resets.' });
   const callsBefore = deps.http.calls;
+  // Music discovery: Spotify's dev-mode search can't find music by mood or genre (it returns stock
+  // "sleep/ambient" filler), so the optional LLM proposes real artists/recordings for the user's
+  // taste words and every pick is verified on Spotify. Runs in parallel with provider searches.
+  const musicPicks = (async (): Promise<{ items: ContentItem[]; detail: string } | null> => {
+    if (!categories.includes('music') || !ai || deps.useLlm === false || !PROVIDERS.spotify?.configured(deps.env) || deps.blockedProviders?.has('spotify')) return null;
+    const concepts = (effectiveHasQuery ? topKeys(positivePart(intent.target), 5, 0.15) : feedConcepts(deps.profile, exploration, intent.moods, deps.seed ?? 0)).filter((c) => CONCEPT_BY_ID[c]);
+    const words = concepts.map((c) => conceptLabel(c).toLowerCase()).join(', ');
+    const desc = effectiveHasQuery
+      ? `${intent.rawText}${words ? ` (themes: ${words})` : ''}${intent.trajectory ? `; arc from ${intent.trajectory.from} to ${intent.trajectory.to}` : ''}; ${exploration >= 0.6 ? 'favour lesser-known, distinctive artists over chart hits' : exploration <= 0.3 ? 'well-loved classics are welcome' : 'mix beloved classics with lesser-known gems; avoid obvious chart hits'}`
+      : `music for a listener drawn to ${words || 'thoughtful, atmospheric, emotionally rich music'}; exploration level ${Math.round(exploration * 100)}% (higher = less familiar artists)`;
+    const avoid = [...deps.profile.explicit.dislikes, ...intent.excludes.filter((x) => !CONCEPT_BY_ID[x])];
+    const picks = await llmMusicPicks(desc, ai, deps.http, { avoid, count: 16, cacheKey: `ai:music:${await hashKey(`${desc}|${avoid.join(',')}`)}:${(deps.seed ?? 0) % 4}` });
+    const verified = await verifySpotifyPicks(picks, { http: deps.http, env: deps.env });
+    const items = verified.map((i, idx) => ({ ...i, popularity: 0.75, metadata: { ...(i.metadata ?? {}), aiPick: true, aiOrder: idx, aiFor: words, retrievedBy: `ai:${i.creators[0] ?? i.id}`, retrievedFor: concepts.slice(0, 3) } }));
+    return { items, detail: `${verified.length}/${picks.length} AI music picks verified on Spotify` };
+  })().catch((e) => ({ items: [] as ContentItem[], detail: `AI music picks skipped (${(e as Error).message.slice(0, 60)})` }));
   const settled = await Promise.allSettled(plan.map((q) => q.provider.search(q.params, { http: deps.http, env: deps.env })));
   const raw: ContentItem[] = [];
   const quotaErrors: ProviderId[] = [];
@@ -204,6 +222,16 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
       statuses.set(pid, { id: pid, status: kind === 'quota' ? 'quota' : 'error', message: String(e?.message ?? e).slice(0, 200) });
     }
   });
+  const mp = await musicPicks;
+  if (mp) {
+    // Enough verified curator picks → drop Spotify mood-word search results for music (mostly filler);
+    // otherwise they remain as the fallback.
+    if (mp.items.length >= 5) {
+      for (let i = raw.length - 1; i >= 0; i--) if (raw[i].category === 'music' && raw[i].provider === 'spotify') raw.splice(i, 1);
+    }
+    raw.push(...mp.items);
+    pipeline.push({ step: 'music-ai', ms: 0, detail: mp.detail });
+  }
   pipeline.push({ step: 'retrieval', ms: t(), detail: `${plan.length} queries → ${raw.length} items (${deps.http.calls - callsBefore} network calls, rest cached)` });
 
   // ── Steps 3–4: enrichment + semantic analysis ──
