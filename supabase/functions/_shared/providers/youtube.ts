@@ -31,6 +31,7 @@ function decodeEntities(s: string) {
 export function mapYouTubeVideo(v: YTVideo): ContentItem {
   const t = v.snippet.thumbnails ?? {};
   const views = Number(v.statistics?.viewCount ?? 0);
+  const likeRate = views ? Number(v.statistics?.likeCount ?? 0) / views : 0;
   const embeddable = v.status?.embeddable !== false;
   const lang = v.snippet.defaultAudioLanguage ?? v.snippet.defaultLanguage;
   return {
@@ -41,7 +42,8 @@ export function mapYouTubeVideo(v: YTVideo): ContentItem {
     releaseDate: v.snippet.publishedAt?.slice(0, 10), externalUrl: `https://www.youtube.com/watch?v=${v.id}`,
     embed: embeddable ? { type: 'youtube', videoId: v.id } : null,
     playbackNote: embeddable ? undefined : 'The uploader has disabled playback on other sites. Open it on YouTube instead.',
-    popularity: views ? Math.min(1, Math.log10(views + 1) / 8) : undefined,
+    // Reach × engagement: a like rate around 4%+ is strong on YouTube.
+    popularity: views ? Math.min(1, (Math.log10(views + 1) / 7) * (0.6 + 0.4 * Math.min(1, likeRate / 0.04))) : undefined,
     metadata: { views, channelTitle: v.snippet.channelTitle, fetchedAt: new Date().toISOString() },
   };
 }
@@ -57,7 +59,7 @@ export const youtube: Provider = {
   configured: (env) => !!env('YOUTUBE_API_KEY'),
   async search(p, { http, env }) {
     const key = env('YOUTUBE_API_KEY')!;
-    const params = new URLSearchParams({ part: 'snippet', type: 'video', q: p.query, maxResults: String(Math.min(p.limit ?? 15, 25)), videoEmbeddable: 'true', safeSearch: 'moderate' });
+    const params = new URLSearchParams({ part: 'snippet', type: 'video', q: p.query, maxResults: String(Math.min(Math.max(p.limit ?? 15, 20), 25)), videoEmbeddable: 'true', safeSearch: 'moderate' });
     if (p.language) params.set('relevanceLanguage', p.language);
     if (env('YOUTUBE_REGION')) params.set('regionCode', env('YOUTUBE_REGION')!.toUpperCase());
     const dur = p.duration ?? (p.documentary ? 'long' : undefined);
@@ -79,7 +81,10 @@ export const youtube: Provider = {
       if (r.allowed && !r.allowed.includes(region)) return false;
       return !(r.blocked ?? []).includes(region);
     };
-    return tagRetrieval((videos.items ?? []).filter((v) => v.status?.privacyStatus !== 'private' && playable(v)).map(mapYouTubeVideo), p);
+    // Quality floor: no Shorts or tiny clips unless the user asked for something short.
+    const minSec = p.duration === 'short' ? 60 : 180;
+    const substantial = (v: YTVideo) => (parseIsoDuration(v.contentDetails?.duration) ?? 0) >= minSec && !/#shorts?\b/i.test(`${v.snippet.title} ${v.snippet.description ?? ''}`);
+    return tagRetrieval((videos.items ?? []).filter((v) => v.status?.privacyStatus !== 'private' && playable(v) && substantial(v)).map(mapYouTubeVideo), p);
   },
 };
 

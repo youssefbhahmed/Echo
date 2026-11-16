@@ -156,3 +156,18 @@ describe('grounding of inherited evidence', () => {
     expect(rec.explanation.text).toMatch(/Found by searching|Retrieved/);
   });
 });
+
+describe('free-text exclusions and explicit dislikes', () => {
+  const speech = make({ title: 'BELIEVE IN YOURSELF - Powerful Motivational Speech', category: 'youtube', creators: ['Motiversity'], description: 'motivational speech compilation' });
+  const doc = make({ title: 'The Birth of Civilization', category: 'youtube', creators: ['History Channel'], description: 'a documentary about the first cities' });
+  it('penalises items matching a "no X" request', () => {
+    const recs = rankCandidates([speech, doc], parseIntent('no motivational speeches for the videos'), emptyProfile(), { exploration: 0.4, hasQuery: true, limit: 2 });
+    expect(recs[0].item.title).toBe('The Birth of Civilization');
+    expect(recs[1].score.penalty).toBeGreaterThan(0.5);
+  });
+  it('penalises items matching an explicit dislike statement', () => {
+    const p = applyStatement(emptyProfile(), 'motivational speeches', [], -1);
+    const recs = rankCandidates([speech, doc], parseIntent(''), p, { exploration: 0.4, hasQuery: false, limit: 2 });
+    expect(recs[0].item.title).toBe('The Birth of Civilization');
+  });
+});

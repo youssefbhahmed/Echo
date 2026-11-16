@@ -138,6 +138,16 @@ export function scoreItem(item: AnalyzedItem, intent: Intent, profile: TasteProf
   if (cosine(targetNeg, item.concepts) > 0.2) penalty += 0.5;
   const excluded = new Set(intent.excludes.map(normKey));
   if (itemGenres.some((ig) => [...excluded].some((x) => ig.includes(x)))) penalty += 0.5;
+  // Free-text exclusions ("no motivational speeches") and explicit dislikes ("I hate true crime")
+  const itemText = ` ${normalize(`${item.title} ${item.creators.join(' ')} ${item.genres.join(' ')} ${item.tags.slice(0, 25).join(' ')} ${(item.description ?? '').slice(0, 600)}`)} `;
+  const freeTerms = intent.excludes.filter((x) => !CONCEPT_BY_ID[x]).map(normKey).filter((x) => x.length > 2);
+  // Stem match ("speeches" ~ "speech"): every word of the phrase must appear in the item.
+  const has = (phrase: string) => {
+    const words = normKey(phrase).split(' ').filter((w) => w.length > 2);
+    return words.length > 0 && words.every((w) => itemText.includes(` ${w.slice(0, Math.max(4, w.length - 2))}`));
+  };
+  if (freeTerms.some(has)) penalty += 0.8;
+  if (profile.explicit.dislikes.some(has)) penalty += 0.6;
   for (const b of profile.explicit.blockedConcepts) if ((item.concepts[b] ?? 0) >= 0.3) penalty += 0.4;
   if (c < -0.3) penalty += 0.4;
   if (g < -0.4) penalty += 0.2;

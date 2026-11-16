@@ -1,6 +1,8 @@
 // POST /functions/v1/chat — conversational discovery with refinement and memory.
 import { applyContext, applyStatement } from '../_shared/engine/profile.ts';
 import { runPipeline } from '../_shared/engine/pipeline.ts';
+import { CONCEPT_BY_ID } from '../_shared/engine/concepts.ts';
+import { GENRE_WORDS } from '../_shared/engine/intent.ts';
 import { createHttp } from '../_shared/providers/http.ts';
 import { ChatBody } from '../_shared/schemas.ts';
 import type { Intent } from '../_shared/types.ts';
@@ -38,12 +40,18 @@ serve(async (req) => {
   const http = createHttp(new DbCache());
   const result = await runPipeline(
     { query: body.message, categories: body.categories, exploration: body.exploration, limit: 8, intentHint: body.intentHint },
-    { env, http, profile, excludeIds: exclude, evidence, previousIntent, previousResults, blockedProviders: blocked, collaborative: collaborativeFn(db), embed: embedder(), storedEmbeddings },
+    { env, http, profile, excludeIds: exclude, evidence, previousIntent, previousResults, blockedProviders: blocked, collaborative: collaborativeFn(db), embed: embedder(), storedEmbeddings, seed: previousIds.length + Math.floor(Math.random() * 97) },
   );
   await markQuota(result.quotaErrors);
 
   // Memory: explicit statements → long-term profile; expressed mood → short-term context only.
   for (const s of result.intent.statements) profile = applyStatement(profile, s.subject, s.concepts, s.polarity);
+  // "no motivational speeches" → remembered as a long-term dislike (editable in My Taste).
+  const freeExcludes = result.intent.excludes.filter((x) => !CONCEPT_BY_ID[x] && !GENRE_WORDS.includes(x));
+  if (freeExcludes.length) {
+    const phrase = freeExcludes.join(' ').slice(0, 80);
+    profile = { ...profile, explicit: { ...profile.explicit, dislikes: [...new Set([...profile.explicit.dislikes, phrase])].slice(-50) } };
+  }
   const moodTarget = Object.fromEntries(result.intent.moods.map((m) => [m, result.intent.target[m] ?? 0]));
   profile = applyContext(profile, moodTarget);
   await saveProfile(db, userId, profile);

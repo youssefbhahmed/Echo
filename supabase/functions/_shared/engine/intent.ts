@@ -31,6 +31,10 @@ const FILLER = new Set(
   ('feels feel watching listening reading sounds looks seems after before understand learn learning explore discover through serious same feeling feelings gives give vibe vibes mood moods completely totally usual usually preferences preference think would love loved enjoy outside comfort zone surprise new different something someone somewhere either kinda bit lot little good great best amazing nice ones one watch listen read tonight today right now currently starts start starting gradually becomes become ending ends end turns turning while also doesnt dont isnt have has has to be necessarily needn need deep complex light easy short long quick').split(' '),
 );
 
+const SENTIMENT = new Set(['bad', 'good', 'great', 'awful', 'terrible', 'boring', 'cool', 'nice', 'okay', 'ok', 'hate', 'love', 'liked', 'want', 'wanted', 'need', 'needed', 'them', 'those', 'these', 'stuff', 'anymore', 'please', 'thanks', 'thank', 'dont', 'theyre', 'its', 'im', 'ive']);
+const NEG_STOP = new Set(['for', 'in', 'on', 'from', 'please', 'but', 'and', 'or', 'just', 'like', 'because', 'that', 'this', 'when', 'with', 'about', 'anymore', 'thanks', 'today', 'tonight', 'videos', 'video', 'songs', 'music', 'films', 'movies', 'books', 'podcasts', 'series']);
+const CATEGORY_TOKEN = /^(videos?|songs?|music|films?|movies?|books?|podcasts?|series|shows?|tv|documentar(y|ies)|albums?|tracks?|novels?|episodes?|playlists?)$/;
+
 const DESCRIPTIVE_VERBS = /(feel|feels|feeling|felt|sound|sounds|sounding|look|looks|seem|seems|taste|tastes)\s*$/;
 
 function extractReferences(original: string): { refs: string[]; spans: string[] } {
@@ -135,14 +139,19 @@ export function parseIntent(rawText: string, opts: ParseOptions = {}): Intent {
     relaxed.push(...p.concepts, ...p.genres);
     negSpans.push(m[0]);
   }
-  for (const m of text.matchAll(/\b(?:no|not|without|nothing|avoid|except|anything but|never|zero|less)\s+(?:too\s+|very\s+|any\s+|more\s+)?([a-z0-9\- ]{2,30}?)(?=$|\s(?:but|and|or|please|just|like|because|that)\b|[,.;])/g)) {
-    if (negSpans.some((s) => s.includes(m[0]))) continue;
-    if (/^(necessarily|sure|really|that|this|the same|have|need|be)\b/.test(m[1])) continue;
-    const p = phraseToConcepts(m[1]);
-    if (p.concepts.length || p.genres.length) {
-      excludes.push(...p.concepts, ...p.genres);
-      negSpans.push(m[0]);
-    }
+  // "no motivational speeches for the videos" → exclude the 1–4 words after the negator,
+  // stopping at function words; non-concept words become free-text exclusions.
+  for (const m of text.matchAll(/\b(?:no|not|without|nothing|avoid|except|anything but|never|zero|less|no more|stop)\s+(?:too\s+|very\s+|any\s+|more\s+)?((?:[a-z0-9'\-]+\s?){1,4})/g)) {
+    if (negSpans.some((s) => s.includes(m[0].trim()))) continue;
+    const words = m[1].trim().split(/\s+/);
+    const stop = words.findIndex((w) => NEG_STOP.has(w));
+    const phrase = (stop === -1 ? words : words.slice(0, stop)).join(' ');
+    if (!phrase || /^(necessarily|sure|really|that|this|the|same|have|need|be|so|bad|good|like|a|an|longer|one|it|them)$/.test(phrase.split(' ')[0])) continue;
+    const p = phraseToConcepts(phrase);
+    const terms = contentTokens(phrase).filter((t) => !FILLER.has(t) && !CATEGORY_TOKEN.test(t) && t.length > 2);
+    if (!p.concepts.length && !p.genres.length && !terms.length) continue;
+    excludes.push(...p.concepts, ...p.genres, ...(p.concepts.length || p.genres.length ? [] : terms));
+    negSpans.push(m[0].trim().split(/\s+/).slice(0, 1 + (stop === -1 ? words.length : stop) + (m[0].includes(' too ') || m[0].includes(' very ') || m[0].includes(' any ') || m[0].includes(' more ') ? 1 : 0)).join(' '));
   }
 
   // Text used for concept projection excludes negated spans.
@@ -220,8 +229,10 @@ export function parseIntent(rawText: string, opts: ParseOptions = {}): Intent {
 
   // Keywords for provider search (content words, minus filler/categories/negated)
   const negWords = new Set(negSpans.flatMap((s) => s.split(' ')));
+  const excludedWords = new Set(excludes.flatMap((e) => e.split(' ')));
   const keywords = contentTokens(positiveText)
-    .filter((t) => !FILLER.has(t) && !negWords.has(t) && !/^(videos?|songs?|music|films?|movies?|books?|podcasts?|series|shows?|tv|documentar(y|ies)|albums?|tracks?|novels?|episodes?|playlists?)$/.test(t))
+    // Contractions and bare sentiment words ("don't", "they're", "bad") are never search terms.
+    .filter((t) => !FILLER.has(t) && !negWords.has(t) && !excludedWords.has(t) && !t.includes("'") && !SENTIMENT.has(t) && !CATEGORY_TOKEN.test(t))
     .slice(0, 8);
 
   const ordinalRefs = extractOrdinals(text);
@@ -309,7 +320,11 @@ export function refineIntent(prev: Intent, next: Intent): Intent {
     language: next.language ?? prev.language,
     references: prev.references,
     ordinalRefs: next.ordinalRefs,
-    keywords: next.keywords.length ? [...new Set([...prev.keywords.slice(0, 4), ...next.keywords])].slice(0, 8) : prev.keywords,
+    keywords: (() => {
+      const banned = new Set([...prev.excludes, ...next.excludes].flatMap((e) => e.split(' ')));
+      const merged = next.keywords.length ? [...new Set([...prev.keywords.slice(0, 4), ...next.keywords])] : prev.keywords;
+      return merged.filter((k) => !banned.has(k)).slice(0, 8);
+    })(),
     target,
     vague: false,
     statements: next.statements,

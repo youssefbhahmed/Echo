@@ -98,3 +98,19 @@ describe('genre phrases', () => {
     expect(i.relaxed).not.toContain('science');
   });
 });
+
+describe('exclusions in natural phrasing', () => {
+  it('"no motivational speeches for the videos" excludes the topic and never searches for it', () => {
+    const i = parseIntent('no motivational speeches for the videos');
+    expect(i.categories).toEqual(['youtube']);
+    expect(i.excludes).toEqual(expect.arrayContaining(['motivational', 'speeches']));
+    expect(i.keywords).not.toContain('motivational');
+    expect(i.keywords).not.toContain('speeches');
+  });
+  it('a vague negative follow-up does not become a search for "don\'t they\'re bad"', () => {
+    const first = parseIntent('no motivational speeches for the videos');
+    const next = refineIntent(first, parseIntent("I don't need them they're bad"));
+    expect(next.keywords).toEqual([]);
+    expect(next.excludes).toEqual(expect.arrayContaining(['motivational']));
+  });
+});
