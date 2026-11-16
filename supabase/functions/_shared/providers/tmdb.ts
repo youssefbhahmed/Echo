@@ -1,6 +1,7 @@
 // TMDB — free API key for non-commercial use, attribution required.
 // https://developer.themoviedb.org/docs  ("This product uses the TMDB API but is not endorsed or certified by TMDB.")
 import type { ContentItem } from '../types.ts';
+import { fold } from '../engine/text.ts';
 import { tagRetrieval, type Env, type Provider, type ProviderContext } from './types.ts';
 
 export const TMDB_MOVIE_GENRES: Record<number, string> = {
@@ -128,3 +129,12 @@ export const tmdbProvider: Provider = {
     return r.results.map((x) => mapTmdb(x, type as 'movie' | 'tv')).filter((x): x is ContentItem => !!x).slice(0, 15);
   },
 };
+
+/** A person's best-known films and series (TMDB "known for"), from one person search. */
+export async function tmdbPersonWorks(name: string, ctx: ProviderContext): Promise<{ department?: string; works: ContentItem[] }> {
+  const r = await tmdb<{ results: Array<{ name?: string; known_for_department?: string; known_for?: TmdbResult[] }> }>('/search/person', { query: name }, ctx, 30 * 86400);
+  const want = fold(name);
+  const person = (r.results ?? []).find((p) => fold(p.name ?? '') === want) ?? (r.results ?? [])[0];
+  if (!person) return { works: [] };
+  return { department: person.known_for_department, works: (person.known_for ?? []).map((x) => mapTmdb(x)).filter((x): x is ContentItem => !!x) };
+}

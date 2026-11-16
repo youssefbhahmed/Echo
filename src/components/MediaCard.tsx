@@ -7,6 +7,7 @@ import { CATEGORY_META, displayTitle, formatDuration, KIND_LABEL, PROVIDER_LABEL
 import { api } from '../lib/api';
 import { useFeedback, useLibraryMap } from '../hooks/data';
 import { isQueueable, usePlayQueue } from '../lib/player';
+import { ownedInEntityLane } from '../lib/lanes';
 import { EmbedPlayer, YouTubePlayer } from './Player';
 import { CollectionPicker } from './CollectionPicker';
 import { toast } from './Toast';
@@ -341,6 +342,11 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
         </div>
         <h3 className={`mt-1.5 font-display leading-[1.18] font-semibold text-bone [overflow-wrap:anywhere] ${featured ? 'line-clamp-3 text-[26px] md:text-[34px]' : 'line-clamp-3 text-[18px]'}`} title={item.title}>{displayTitle(item)}</h3>
         {item.creators.length > 0 && <p className={`mt-1 truncate text-mist ${featured ? 'text-base' : 'text-[13.5px]'}`}>{item.creators.slice(0, 2).join(', ')}</p>}
+        {ownedInEntityLane(item) && (
+          <p className="mt-1.5 inline-flex items-center gap-1 rounded-full bg-white/[0.06] px-2 py-0.5 text-[11.5px] font-medium text-mist">
+            <Check className="h-3 w-3 text-ember" aria-hidden /> In your library
+          </p>
+        )}
         {(facts.length > 0 || rating) && (
           <p className="mt-1 flex items-center gap-1.5 text-xs text-dim">
             {facts.join(' · ')}

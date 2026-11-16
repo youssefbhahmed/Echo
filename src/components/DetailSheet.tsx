@@ -5,7 +5,7 @@ import type { Recommendation } from '@shared/types.ts';
 import { MediaCard } from './MediaCard';
 
 /** Bottom sheet on phones, centred panel on desktop. Holds the full card: player, why, actions. */
-export function DetailSheet({ rec, onClose, onDismiss, autoPlay }: { rec: Recommendation | null; onClose: () => void; onDismiss?: (id: string) => void; autoPlay?: boolean }) {
+export function DetailSheet({ rec, onClose, onDismiss, autoPlay, source = 'feed' }: { rec: Recommendation | null; onClose: () => void; onDismiss?: (id: string) => void; autoPlay?: boolean; source?: 'feed' | 'chat' }) {
   const closeRef = useRef<HTMLButtonElement>(null);
   useEffect(() => {
     if (!rec) return;
@@ -46,7 +46,7 @@ export function DetailSheet({ rec, onClose, onDismiss, autoPlay }: { rec: Recomm
               <X className="h-5 w-5" />
             </button>
             <div className="p-2 md:p-3 [&>article]:border-0 [&>article]:bg-transparent [&>article]:shadow-none">
-              <MediaCard key={rec.item.id} featured autoPlay={autoPlay} item={rec.item} explanation={rec.explanation} score={rec.score} trajectoryStep={rec.trajectoryStep} source="feed" onPlayStarted={onClose} onDismiss={onDismiss ? (id) => { onDismiss(id); onClose(); } : undefined} />
+              <MediaCard key={rec.item.id} featured autoPlay={autoPlay} item={rec.item} explanation={rec.explanation} score={rec.score} trajectoryStep={rec.trajectoryStep} source={source} onPlayStarted={onClose} onDismiss={onDismiss ? (id) => { onDismiss(id); onClose(); } : undefined} />
             </div>
           </motion.div>
         </motion.div>

@@ -2,6 +2,7 @@
 import { applyContext, applyStatement } from '../_shared/engine/profile.ts';
 import { runPipeline } from '../_shared/engine/pipeline.ts';
 import { CONCEPT_BY_ID } from '../_shared/engine/concepts.ts';
+import { chatPayloadRecs, chatRequest } from '../_shared/engine/chat.ts';
 import { GENRE_WORDS } from '../_shared/engine/intent.ts';
 import { createHttp } from '../_shared/providers/http.ts';
 import { ChatBody } from '../_shared/schemas.ts';
@@ -39,10 +40,12 @@ serve(async (req) => {
   for (const id of previousIds) exclude.add(id);
 
   const http = createHttp(new DbCache());
+  // 12 picks; 20 when the message names an entity (an artist's lanes + the things around them).
   const result = await runPipeline(
-    { query: body.message, categories: body.categories, exploration: body.exploration, limit: 12, intentHint: body.intentHint },
+    chatRequest(body),
     {
-      env, http, profile, excludeIds: exclude, library, evidence, previousIntent, previousResults, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup, collaborative: collaborativeFn(db),
+      env, http, profile, excludeIds: exclude, shownIds: new Set(previousIds), library, evidence, previousIntent, previousResults, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup,
+      collaborative: collaborativeFn(db),
       embed: embedder(), storedEmbeddings, catalogFallback: catalogFallbackFn(userId), seed: previousIds.length + Math.floor(Math.random() * 97),
     },
   );
@@ -65,7 +68,8 @@ serve(async (req) => {
   const ids = recs.map((r) => r.item.id);
   const reply = result.clarifyingQuestion && !recs.length ? result.clarifyingQuestion.text : result.reply ?? '';
   const payload = {
-    recommendations: recs.map((r) => ({ itemId: r.item.id, explanation: r.explanation, score: r.score, trajectoryStep: r.trajectoryStep })),
+    // Each pick's lane / "in your library" / entity fields travel with the message (the catalog row is shared).
+    recommendations: chatPayloadRecs(recs),
     clarifyingQuestion: result.clarifyingQuestion,
     intent: { intent: result.intent.intent, summary: result.pipeline[0]?.detail },
     providers: result.providers,

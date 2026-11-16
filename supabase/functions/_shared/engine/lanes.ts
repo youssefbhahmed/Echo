@@ -2,7 +2,7 @@
 // The taxonomy mirrors the library analysis (scratch csv_analysis.py LANES) and is shared by the
 // importer (lane shares), the curator (briefs), the resolver (era/regional rules) and the fallback.
 // Pure functions, generic words only: no track or artist names live here.
-import type { ContentItem, LaneTag, MusicLane, MusicPolicy, TasteProfile } from '../types.ts';
+import type { ContentItem, EntityTag, LaneTag, MusicLane, MusicPolicy, TasteProfile } from '../types.ts';
 import { inBlockedFamily } from './music.ts';
 import { normalize, normKey, songKey } from './text.ts';
 
@@ -96,6 +96,14 @@ export const MIN_JAZZ_SHARE = 0.06;
 /** Pseudo-lanes: a typed request (chat/search) and a listener with no library yet. */
 export const REQUEST_LANE: LaneTag = { id: 'request', label: 'For your request' };
 export const MIX_LANE: LaneTag = { id: 'mix', label: 'Fresh picks' };
+/** Lanes of a request naming an artist: their own songs ("Eminem") and songs by related artists ("Artists like Eminem"). */
+export const ENTITY_BY_LANE = 'entity-by';
+export const ENTITY_LIKE_LANE = 'entity-like';
+
+/** A lane answering a named artist (labels are per request, so they never go in the shared catalog). */
+export function isEntityLane(id: string | undefined | null): boolean {
+  return id === ENTITY_BY_LANE || id === ENTITY_LIKE_LANE;
+}
 
 /** Normalised genre label for the taxonomy ("Hip-Hop", "hip-hop" → "hip hop"; "R&B" → "r b"; accents stripped). */
 export function laneKey(genre: string): string {
@@ -131,6 +139,18 @@ export function laneTagOf(item: { metadata?: Record<string, unknown> }): LaneTag
   return l && typeof l.id === 'string' && typeof l.label === 'string' ? { id: l.id, label: l.label } : null;
 }
 
+/** The item's entity tag (metadata.entity) when it answers a named entity. */
+export function entityTagOf(item: { metadata?: Record<string, unknown> }): EntityTag | null {
+  const e = item.metadata?.entity as Partial<EntityTag> | undefined;
+  if (!e || typeof e.name !== 'string' || (e.role !== 'by' && e.role !== 'like' && e.role !== 'about')) return null;
+  return { name: e.name, role: e.role, ...(typeof e.note === 'string' && e.note ? { note: e.note } : {}) };
+}
+
+/** A non-music item answering an entity (works, things about it) — music answers sit in entity lanes. */
+export function isEntityExtra(item: { category: string; metadata?: Record<string, unknown> }): boolean {
+  return !!entityTagOf(item) && !(item.category === 'music' && laneTagOf(item));
+}
+
 /** Every lane id this engine writes: the taxonomy lanes plus the request/open pseudo-lanes. */
 export const ENGINE_LANE_IDS: string[] = [...LANES.map((l) => l.id), REQUEST_LANE.id, MIX_LANE.id];
 
@@ -143,11 +163,13 @@ export function isEngineLane(id: string | undefined | null): boolean {
  * Per-user / per-response fields of a recommended item: rebuilt for every response, never stored in the
  * shared catalog (content_items is readable by every signed-in user) nor carried over from it.
  */
-export const PER_USER_METADATA = ['lastShownAt', 'laneEra', 'laneMood', 'aiOrder', 'fallback', 'fallbackTier'] as const;
+export const PER_USER_METADATA = ['lastShownAt', 'laneEra', 'laneMood', 'aiOrder', 'fallback', 'fallbackTier', 'inLibrary', 'entity', 'entityOrder'] as const;
 
+/** Item metadata without per-user / per-request fields (an entity lane tag is per request too). */
 export function withoutPerUser(meta: Record<string, unknown> | undefined): Record<string, unknown> {
   const out = { ...(meta ?? {}) };
   for (const k of PER_USER_METADATA) delete out[k];
+  if (isEntityLane(laneTagOf({ metadata: out })?.id)) delete out.lane;
   return out;
 }
 
@@ -417,6 +439,8 @@ export interface LibrarySongs {
   isrcs: Set<string>;
   /** songKey(artist, title) for every credited artist. */
   songs: Set<string>;
+  /** The library rows' own item ids (an entity lane may show these songs, flagged "In your library"). */
+  ids?: Set<string>;
 }
 
 export function normIsrc(x: unknown): string {
@@ -425,9 +449,10 @@ export function normIsrc(x: unknown): string {
 }
 
 /** Index of library songs (title, credited artists, ISRC when the export had one). */
-export function librarySongIndex(rows: Array<{ title?: string | null; creators?: string[] | null; isrc?: unknown }>): LibrarySongs {
-  const lib: LibrarySongs = { isrcs: new Set(), songs: new Set() };
+export function librarySongIndex(rows: Array<{ id?: string | null; title?: string | null; creators?: string[] | null; isrc?: unknown }>): LibrarySongs {
+  const lib: LibrarySongs = { isrcs: new Set(), songs: new Set(), ids: new Set() };
   for (const r of rows) {
+    if (r.id) lib.ids!.add(r.id);
     const isrc = normIsrc(r.isrc);
     if (isrc) lib.isrcs.add(isrc);
     for (const a of r.creators ?? []) {

@@ -102,8 +102,50 @@ export interface Intent {
   searchQueries?: Partial<Record<Category, string>>;
   /** Source filter: only use these providers (e.g. "youtube podcasts"). */
   providers?: ProviderId[];
+  /** Named people or works the request is about ("eminem", "books by Ursula K. Le Guin"), first = primary. */
+  entities?: Entity[];
   /** Which parser produced this intent. */
   source: 'rules' | 'rules+llm' | 'rules+client-llm';
+}
+
+export const ENTITY_KINDS = ['artist', 'author', 'director', 'actor', 'creator', 'film', 'series', 'book', 'podcast', 'other'] as const;
+export type EntityKind = (typeof ENTITY_KINDS)[number];
+/** by = their own works, like = similar things, about = things about them, all = a bare name (by + like + about). */
+export const ENTITY_WANTS = ['by', 'like', 'about', 'all'] as const;
+export type EntityWant = (typeof ENTITY_WANTS)[number];
+export const WORK_KINDS = ['film', 'series', 'book', 'podcast', 'video'] as const;
+export type WorkKind = (typeof WORK_KINDS)[number];
+
+/** A well-known work related to an entity, in another medium (from the AI interpreter; resolved against catalogs). */
+export interface EntityWork {
+  title: string;
+  kind: WorkKind;
+  /** Release / publication year, when known (checked against the catalog match). */
+  year?: number;
+  /** Author / director, when known (checked against the catalog match). */
+  by?: string;
+  /** How it relates, a few words ("the film based on his life"). */
+  note?: string;
+}
+
+/** A named person or work the user asked about. */
+export interface Entity {
+  /** As the user wrote or meant it, properly capitalised ("Eminem"). */
+  name: string;
+  kind: EntityKind;
+  want: EntityWant;
+  /** Up to 4 related works in other media. */
+  works?: EntityWork[];
+  /** 'rules' = a short query the rules parser could not read otherwise (kind 'other'). */
+  source?: 'llm' | 'rules';
+}
+
+/** Per-item entity tag (item.metadata.entity) on results answering an entity request. */
+export interface EntityTag {
+  name: string;
+  role: 'by' | 'like' | 'about';
+  /** Short reason in plain words ("the film based on his life", "storytelling rap with rapid-fire flow"). */
+  note?: string;
 }
 
 export interface PreferenceStatement {
@@ -238,6 +280,8 @@ export interface DiscoverRequest {
   exploration?: number;
   limit?: number;
   sessionId?: string;
+  /** Limit used instead of `limit` when the request names an entity (chat: 20 instead of 12). */
+  entityLimit?: number;
   /** Feed mix: relative weight per category (0.5 less, 1 normal, 2 more). */
   mix?: Partial<Record<Category, number>>;
   /** Intent produced by an optional client-side LLM (e.g. local Ollama). Validated server-side. */

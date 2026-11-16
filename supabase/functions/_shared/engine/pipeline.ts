@@ -9,13 +9,14 @@ import type { Env, Provider } from '../providers/types.ts';
 import { aiConfig, mergeHint, sanitizeHint } from './ai.ts';
 import { applyUnderstanding, llmUnderstand } from './understand.ts';
 import { curateMusic, fallbackTierOf, laneFallback, laneLooseMusic, musicQuotaFor, planMusic, SEARCH_ORDER, STORED_ORDER, type MusicPlan } from './curator.ts';
-import { laneTagOf, MIX_LANE, type LibrarySongs } from './lanes.ts';
+import { ENTITY_BY_LANE, laneTagOf, MIX_LANE, type LibrarySongs } from './lanes.ts';
+import { entityExtras, entityReply, extrasCap, isArtistEntity, primaryEntity, resolveEntity, type EntityResolution } from './entities.ts';
 import { analyzeItem } from './analyze.ts';
 import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
 import { parseIntent, refineIntent } from './intent.ts';
 import { rankCandidates, type EvidenceItem, type ReferenceInfo } from './rank.ts';
 import { planRetrieval, targetCategories } from './retrieve.ts';
-import { positivePart, topKeys } from './text.ts';
+import { fold, positivePart, topKeys } from './text.ts';
 
 export interface PipelineDeps {
   env: Env;
@@ -24,6 +25,11 @@ export interface PipelineDeps {
   excludeIds?: Set<string>;
   /** The user's liked/saved songs by ISRC and artist|title: never served again under another id. */
   library?: LibrarySongs;
+  /**
+   * Items shown very recently (this conversation's last answer, the feed being replaced): never served
+   * again, even the library songs a named artist's lane may otherwise show.
+   */
+  shownIds?: Set<string>;
   evidence?: EvidenceItem[];
   previousIntent?: Intent | null;
   previousResults?: AnalyzedItem[];
@@ -84,13 +90,38 @@ export function embeddingText(item: ContentItem): string {
   return [item.title, item.genres.join(', '), item.tags.slice(0, 12).join(', '), (item.description ?? '').slice(0, 400)].filter(Boolean).join('. ');
 }
 
+/** Items limit for this request: `entityLimit` when it names an entity (chat: 20), else `limit` (default 12), at most 60. */
+export function requestLimit(req: Pick<DiscoverRequest, 'limit' | 'entityLimit'>, intent: Pick<Intent, 'entities'>): number {
+  const n = intent.entities?.length && req.entityLimit ? req.entityLimit : req.limit ?? 12;
+  return Math.max(1, Math.min(n, 60));
+}
+
 async function resolveReferences(intent: Intent, deps: PipelineDeps, statuses: Map<ProviderId, DiscoverResponse['providers'][number]>) {
   const refs: ReferenceInfo[] = [];
   const refItems: AnalyzedItem[] = [];
   const similar: AnalyzedItem[] = [];
   const similarMap = new Map<string, string>();
+  const entities: EntityResolution[] = [];
+  const onError = (p: Provider, e: unknown) => {
+    if (e instanceof ProviderError) statuses.set(p.id, { id: p.id, status: e.kind === 'quota' ? 'quota' : 'error', message: e.message.slice(0, 160) });
+  };
+  // Named entities are looked up by kind (an artist is never resolved as a book or a show); their works,
+  // similar items and things about them come from entityExtras.
+  for (const [i, e] of (intent.entities ?? []).entries()) {
+    const r = await resolveEntity(e, intent.categories, { env: deps.env, http: deps.http, blocked: deps.blockedProviders }, onError);
+    entities.push(r);
+    // A name of unknown kind the catalog revealed (a song search crediting it → an artist).
+    if (r.kind && intent.entities) intent.entities[i] = { ...e, kind: r.kind };
+    if (!r.item) continue;
+    const a = analyzeItem(r.item);
+    refs.push({ title: a.title, concepts: a.concepts, provider: r.provider ?? a.provider });
+    // "like X": X itself isn't a recommendation; "X" / "by X": it is (shown first, see entityExtras).
+    if (e.want === 'like') refItems.push(a);
+  }
+  const named = new Set((intent.entities ?? []).map((e) => fold(e.name)));
   const order: Category[] = intent.categories.length && !intent.categories.includes('screen') ? [...intent.categories, 'screen', 'books'] : ['screen', 'books', 'music', 'podcasts'];
   for (const title of intent.references) {
+    if (named.has(fold(title))) continue;
     let resolved: ContentItem | null = null;
     let via: Provider | null = null;
     for (const cat of [...new Set(order)]) {
@@ -103,7 +134,7 @@ async function resolveReferences(intent: Intent, deps: PipelineDeps, statuses: M
             break;
           }
         } catch (e) {
-          if (e instanceof ProviderError) statuses.set(p.id, { id: p.id, status: e.kind === 'quota' ? 'quota' : 'error', message: e.message.slice(0, 160) });
+          onError(p, e);
         }
       }
       if (resolved) break;
@@ -144,7 +175,7 @@ async function resolveReferences(intent: Intent, deps: PipelineDeps, statuses: M
       }
     }
   }
-  return { refs, refItems, similar, similarMap };
+  return { refs, refItems, similar, similarMap, entities };
 }
 
 export function describeIntent(intent: Intent): string {
@@ -153,7 +184,10 @@ export function describeIntent(intent: Intent): string {
   if (top.length) parts.push(top.map((k) => conceptLabel(k).toLowerCase()).join(' · '));
   if (intent.providers?.length) parts.push(`from ${intent.providers.join(', ')}`);
   if (intent.searchQueries && Object.keys(intent.searchQueries).length) parts.push(`searching “${[...new Set(Object.values(intent.searchQueries))].slice(0, 2).join('”, “')}”`);
-  if (intent.references.length) parts.push(`in the spirit of ${intent.references.join(', ')}`);
+  const e = primaryEntity(intent);
+  if (e) parts.push(`${e.name} (${e.kind === 'other' ? 'a name' : e.kind}, ${e.want === 'all' ? 'everything' : e.want === 'by' ? 'their own work' : e.want === 'like' ? 'things like it' : 'things about it'})`);
+  const refsShown = intent.references.filter((r) => !intent.entities?.some((x) => fold(x.name) === fold(r)));
+  if (refsShown.length) parts.push(`in the spirit of ${refsShown.join(', ')}`);
   if (intent.relaxed.length) parts.push(`not necessarily ${[...new Set(intent.relaxed.map((r) => (CONCEPT_BY_ID[r] ? conceptLabel(r).toLowerCase() : r === 'sci-fi' ? 'science fiction' : r)))].join(', ')}`);
   if (intent.excludes.length) parts.push(`avoiding ${intent.excludes.map((r) => (CONCEPT_BY_ID[r] ? conceptLabel(r).toLowerCase() : r)).join(', ')}`);
   if (intent.trajectory) parts.push(`moving from ${conceptLabel(intent.trajectory.from).toLowerCase()} to ${conceptLabel(intent.trajectory.to).toLowerCase()}`);
@@ -200,7 +234,10 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
 
   // ── Step 2a: references ──
   t = timer();
-  const { refs, refItems, similar, similarMap } = intent.references.length || intent.ordinalRefs.length ? await resolveReferences(intent, deps, statuses) : { refs: [], refItems: [], similar: [], similarMap: new Map<string, string>() };
+  const needsRefs = intent.references.length || intent.ordinalRefs.length || intent.entities?.length;
+  const { refs, refItems, similar, similarMap, entities: resolvedEntities } = needsRefs
+    ? await resolveReferences(intent, deps, statuses)
+    : { refs: [], refItems: [], similar: [], similarMap: new Map<string, string>(), entities: [] as EntityResolution[] };
   const extraConcepts: string[] = [];
   for (const r of refs) {
     for (const k of topKeys(r.concepts, 4, 0.3)) {
@@ -209,7 +246,10 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
       extraConcepts.push(k);
     }
   }
-  if (intent.references.length || intent.ordinalRefs.length) pipeline.push({ step: 'references', ms: t(), detail: refs.length ? `resolved ${refs.map((r) => `${r.title} (${r.provider})`).join(', ')}` : 'could not resolve references' });
+  if (needsRefs) {
+    const details = [...resolvedEntities.map((r) => r.detail), ...refs.filter((r) => !resolvedEntities.some((x) => x.item?.title === r.title)).map((r) => `${r.title} (${r.provider})`)];
+    pipeline.push({ step: 'references', ms: t(), detail: details.length ? `resolved ${details.join(', ')}` : 'could not resolve references' });
+  }
 
   // ── Step 2b: retrieval ──
   t = timer();
@@ -222,18 +262,32 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   }
   // A follow-up with nothing new to search for ("they're bad") explores fresh themes instead of repeating searches.
   const nothingToSearch = effectiveHasQuery && !intent.keywords.length && !topKeys(positivePart(intent.target), 1, 0.15).length && !intent.references.length && !intent.genres.length;
-  const limit = Math.max(1, Math.min(req.limit ?? 12, 60));
+  const limit = requestLimit(req, intent);
+  // A named entity: an artist is answered in music lanes ("<Artist>", "Artists like <Artist>") by the
+  // curator, and every entity gets a bounded set of items around it in other media (entityExtras).
+  const entity = effectiveHasQuery ? primaryEntity(intent) : null;
+  const artist = entity && isArtistEntity(entity, categories) ? entity : null;
+  const capExtras = entity ? extrasCap(entity, categories) : 0;
+  const curatorPossible = !!ai && deps.useLlm !== false && !!PROVIDERS.spotify?.configured(deps.env);
+  const entityMusic = !!artist && artist.want !== 'about' && categories.includes('music') && curatorPossible;
   // Music is curated by taste lanes: which lanes this refresh serves and how many songs each.
   const searchBlocked = !!deps.blockedProviders?.has('spotify');
-  const musicPlan: MusicPlan | null = categories.includes('music')
-    ? planMusic(deps.profile, { hasQuery: effectiveHasQuery, seed: deps.seed ?? 0, total: musicQuotaFor(categories, limit, req.mix, effectiveHasQuery), text: query, now: deps.now })
+  const musicTotal = entityMusic
+    ? categories.length === 1 ? limit : Math.max(12, limit - (artist!.want === 'all' ? capExtras : 0))
+    : musicQuotaFor(categories, limit, req.mix, effectiveHasQuery);
+  const musicPlan: MusicPlan | null = categories.includes('music') && !(artist && artist.want === 'about')
+    ? planMusic(deps.profile, { hasQuery: effectiveHasQuery, seed: deps.seed ?? 0, total: musicTotal, text: query, now: deps.now, entity: entityMusic ? { name: artist!.name, want: artist!.want as 'by' | 'like' | 'all' } : undefined })
     : null;
   // The curator keeps working while Spotify search is rate-limited: picks resolve via ListenBrainz + single-track lookups.
-  const curatorOn = !!musicPlan && !!ai && deps.useLlm !== false && !!PROVIDERS.spotify?.configured(deps.env);
+  const curatorOn = !!musicPlan && curatorPossible;
   const plan = planRetrieval(intent, deps.profile, categories, { env: deps.env, exploration, hasQuery: effectiveHasQuery && !nothingToSearch, seed: deps.seed, mix: req.mix, budget: (req.limit ?? 12) > 20 ? 18 : 12 }, extraConcepts)
     .filter((q) => !deps.blockedProviders?.has(q.provider.id))
     // When the AI curator runs, Spotify mood-word searches for music are discarded anyway: don't spend calls on them.
-    .filter((q) => !(curatorOn && !effectiveHasQuery && q.provider.id === 'spotify' && q.params.category === 'music'));
+    .filter((q) => !(curatorOn && !effectiveHasQuery && q.provider.id === 'spotify' && q.params.category === 'music'))
+    // A named artist: their music comes from the curator's lanes and everything else from entityExtras;
+    // generic theme searches ("music culture" films, videos) would only bury them. Without the curator,
+    // a music search for the name is the fallback.
+    .filter((q) => !artist || (!entityMusic && q.params.category === 'music'));
   for (const id of deps.blockedProviders ?? []) statuses.set(id, { id, status: 'quota', message: 'Daily quota reached; using cached results until it resets.' });
   const callsBefore = deps.http.calls;
   // Music discovery: Spotify's dev-mode search can't find music by mood or genre (it returns stock
@@ -241,6 +295,11 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   // only) and every pick is resolved and checked on Spotify. Runs in parallel with provider searches.
   let spotifyLimitedSec: number | undefined;
   let spotifyLookupLimitedSec: number | undefined;
+  // The named artist's own lane may bring back songs from the library (flagged), never ones just shown.
+  const libraryIds = deps.library?.ids;
+  const entityExcludeIds = musicPlan?.entity && deps.excludeIds && libraryIds?.size
+    ? new Set([...deps.excludeIds].filter((id) => !libraryIds.has(id) || !!deps.shownIds?.has(id)))
+    : undefined;
   const musicPicks = (async (): Promise<{ items: ContentItem[]; detail: string; perLane: Record<string, number> } | null> => {
     if (!curatorOn || !musicPlan || !ai) return null;
     // Open feed: briefed from the MUSIC taste (+ chosen moods) only; video/book themes never steer songs.
@@ -253,13 +312,21 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     const words = musicConcepts.map((c) => conceptLabel(c).toLowerCase()).join(', ');
     const moods = intent.moods.filter((m) => CONCEPT_BY_ID[m]).map((m) => conceptLabel(m).toLowerCase());
     const r = await curateMusic(musicPlan, {
-      ai, http: deps.http, env: deps.env, profile: deps.profile, intent, words, moods, concepts, excludeIds: deps.excludeIds, library: deps.library, searchBlocked,
+      ai, http: deps.http, env: deps.env, profile: deps.profile, intent, words, moods, concepts, excludeIds: deps.excludeIds, entityExcludeIds, library: deps.library, searchBlocked,
       lookupBlocked: deps.spotifyLookupBlocked, seed: deps.seed ?? 0, now: deps.now,
     });
     if (r.rateLimitedSec !== undefined) spotifyLimitedSec = r.rateLimitedSec;
     if (r.lookupLimitedSec !== undefined) spotifyLookupLimitedSec = r.lookupLimitedSec;
     return r;
   })().catch((e) => ({ items: [] as ContentItem[], detail: `AI music picks skipped (${(e as Error).message.slice(0, 60)})`, perLane: {} as Record<string, number> }));
+  // Items around a named entity in other media (bounded: a few provider calls), in parallel with the rest.
+  const ownResolved = entity ? resolvedEntities.find((r) => fold(r.entity.name) === fold(entity.name))?.item ?? null : null;
+  const extrasP = entity
+    ? entityExtras(entity, {
+      env: deps.env, http: deps.http, blocked: deps.blockedProviders, categories, resolved: ownResolved, cap: capExtras,
+      stored: deps.catalogFallback ? (provider, cats) => deps.catalogFallback!(provider, cats).catch(() => [] as ContentItem[]) : undefined,
+    }).catch((e) => ({ items: [] as ContentItem[], calls: 0, detail: `skipped (${(e as Error).message.slice(0, 60)})` }))
+    : null;
   const settled = await Promise.allSettled(plan.map((q) => q.provider.search(q.params, { http: deps.http, env: deps.env })));
   const raw: ContentItem[] = [];
   const quotaErrors: ProviderId[] = [];
@@ -284,10 +351,16 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   const podcastLanguageOk = (i: ContentItem) => i.category !== 'podcasts' || podLang === 'any' || !i.language || i.language.toLowerCase().startsWith(podLang);
   // YouTube out of daily quota: serve its shelves from the stored, already-verified catalog instead of dropping them.
   const ytCats = categories.filter((c) => c === 'youtube' || c === 'podcasts');
-  if (ytCats.length && deps.catalogFallback && (deps.blockedProviders?.has('youtube') || quotaErrors.includes('youtube'))) {
+  // (A named artist's videos come from entityExtras, which only keeps stored videos that name them.)
+  if (ytCats.length && !artist && deps.catalogFallback && (deps.blockedProviders?.has('youtube') || quotaErrors.includes('youtube'))) {
     const fb = (await deps.catalogFallback('youtube', ytCats).catch(() => [] as ContentItem[])).filter(podcastLanguageOk);
     raw.push(...fb);
     pipeline.push({ step: 'fallback', ms: 0, detail: `YouTube quota reached: ${fb.length} stored videos/episodes used instead` });
+  }
+  const extras = extrasP ? await extrasP : null;
+  if (extras && entity) {
+    raw.push(...extras.items);
+    pipeline.push({ step: 'entity', ms: 0, detail: extras.detail });
   }
   const mp = await musicPicks;
   if (mp) {
@@ -317,7 +390,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   }
   const spotifyDown = searchBlocked || quotaErrors.includes('spotify');
   // Spotify search rate-limited: podcasts come from stored, already-verified Spotify shows/episodes.
-  if (categories.includes('podcasts') && deps.catalogFallback && spotifyDown) {
+  if (categories.includes('podcasts') && !artist && deps.catalogFallback && spotifyDown) {
     const fb = (await deps.catalogFallback('spotify', ['podcasts']).catch(() => [] as ContentItem[])).filter(podcastLanguageOk);
     raw.push(...fb);
     pipeline.push({ step: 'fallback', ms: 0, detail: `Spotify rate-limited: ${fb.length} stored podcasts added` });
@@ -325,7 +398,8 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   // Lanes the curator left short: stored songs that fit the lane and pass its rules (never tracks failing era/regional rules).
   // Songs shown again on a short music-only page (tier 3) are let through the ranker's recently-shown exclusion.
   const reshown = new Set<string>();
-  if (musicPlan && deps.catalogFallback) {
+  // (An artist's lanes are theirs: stored songs from other requests never pad them.)
+  if (musicPlan && !musicPlan.entity && deps.catalogFallback) {
     const have = mp?.perLane ?? {};
     const open = musicPlan.order.reduce((s, id) => s + Math.max(0, (musicPlan.targets[id] ?? 0) - (have[id] ?? 0)), 0);
     // Distinct songs: several searches often return the same track.
@@ -399,10 +473,13 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
 
   // ── Steps 5–7: ranking, diversity, explanation ──
   t = timer();
+  // Let through the ranker's exclusions: songs shown again on a short music page, and library songs the
+  // named artist's own lane brought back (flagged "In your library").
+  const allowed = new Set([...reshown, ...candidates.filter((c) => laneTagOf(c)?.id === ENTITY_BY_LANE && c.metadata?.inLibrary === true).map((c) => c.id)]);
   const recommendations = rankCandidates(candidates, intent, deps.profile, {
     exploration,
     hasQuery: effectiveHasQuery,
-    excludeIds: reshown.size && deps.excludeIds ? new Set([...deps.excludeIds].filter((id) => !reshown.has(id))) : deps.excludeIds,
+    excludeIds: allowed.size && deps.excludeIds ? new Set([...deps.excludeIds].filter((id) => !allowed.has(id))) : deps.excludeIds,
     referenceIds: new Set(refItems.map((r) => r.id)),
     referenceSimilar: similarMap,
     references: refs,
@@ -413,6 +490,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     mix: req.mix,
     now: deps.now,
     musicLanes: musicPlan ? rankLanePlan(musicPlan, candidates) : undefined,
+    entityBlock: entity ? { cap: capExtras } : undefined,
   });
   pipeline.push({ step: 'ranking', ms: t(), detail: `exploration ${Math.round(exploration * 100)}% · ${recommendations.length} picks after diversity` });
 
@@ -421,7 +499,10 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   if (hasQuery) {
     const cats = [...new Set(recommendations.map((r) => r.item.category))].map((c) => CATEGORY_NOUN[c]);
     const desc = describeIntent(intent);
-    if (!recommendations.length) {
+    if (entity && recommendations.length) {
+      reply = entityReply(entity, recommendations);
+      if (intent.statements.length) reply += ` Noted for your taste profile: ${intent.statements.map((st) => `${st.polarity > 0 ? 'you like' : "you don't like"} ${st.subject}`).join('; ')}.`;
+    } else if (!recommendations.length) {
       const unconfigured = [...statuses.values()].filter((s) => s.status === 'unconfigured' || s.status === 'error' || s.status === 'quota');
       reply = `I couldn't find real catalog matches for that${unconfigured.length ? ` (${unconfigured.map((u) => `${u.id}: ${u.status}`).join(', ')})` : ''}. Try rephrasing or widening the categories.`;
     } else {

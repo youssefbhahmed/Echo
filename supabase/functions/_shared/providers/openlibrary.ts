@@ -1,7 +1,8 @@
 // Open Library — free, no key. https://openlibrary.org/developers/api
 // Search results include rich subject lists, which feed the concept analysis.
 import type { ContentItem } from '../types.ts';
-import { tagRetrieval, type Provider } from './types.ts';
+import { fold } from '../engine/text.ts';
+import { tagRetrieval, type Provider, type ProviderContext } from './types.ts';
 
 const FIELDS = 'key,title,author_name,first_publish_year,subject,cover_i,language,number_of_pages_median,ratings_average,ratings_count,edition_count,first_sentence';
 const LANG3: Record<string, string> = { en: 'eng', fr: 'fre', es: 'spa', de: 'ger', it: 'ita', pt: 'por', ja: 'jpn', ru: 'rus', zh: 'chi', ar: 'ara' };
@@ -61,3 +62,13 @@ export const openLibrary: Provider = {
     return d ? mapOpenLibraryDoc(d) : null;
   },
 };
+
+/** An author's best-known works (most editions first), only books that credit them. One search call. */
+export async function openLibraryAuthorWorks(name: string, { http }: ProviderContext, limit = 12): Promise<ContentItem[]> {
+  const params = new URLSearchParams({ author: name, fields: FIELDS, sort: 'editions', limit: String(Math.min(limit, 30)) });
+  const data = await http.json<{ docs: OLDoc[] }>(`https://openlibrary.org/search.json?${params}`, { cacheKey: `ol:author:${params}`, ttl: 7 * 86400, provider: 'openlibrary', timeoutMs: 9000 });
+  const want = fold(name);
+  return (data.docs ?? [])
+    .filter((d) => d.title && (d.author_name ?? []).some((a) => fold(a) === want || (want.length >= 4 && fold(a).includes(want))))
+    .map(mapOpenLibraryDoc);
+}

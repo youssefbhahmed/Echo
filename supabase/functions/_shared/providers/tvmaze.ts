@@ -2,7 +2,8 @@
 // Keyless fallback for TV series when TMDB is not configured.
 import type { ContentItem } from '../types.ts';
 import { stripHtml } from './http.ts';
-import { tagRetrieval, type Provider } from './types.ts';
+import { fold } from '../engine/text.ts';
+import { tagRetrieval, type Provider, type ProviderContext } from './types.ts';
 
 interface TVShow {
   id: number; url: string; name: string; language?: string; genres?: string[]; averageRuntime?: number; runtime?: number; premiered?: string;
@@ -42,3 +43,14 @@ export const tvmaze: Provider = {
     }
   },
 };
+
+/** Series a person acted in (cast) or made (crew), from TVmaze's people search: two calls. */
+export async function tvmazePersonShows(name: string, ctx: ProviderContext, role: 'cast' | 'crew' = 'cast'): Promise<ContentItem[]> {
+  const people = await ctx.http.json<Array<{ person: { id: number; name: string } }>>(`https://api.tvmaze.com/search/people?q=${encodeURIComponent(name)}`, { cacheKey: `tvm:people:${name.toLowerCase()}`, ttl: 30 * 86400, provider: 'tvmaze' });
+  const want = fold(name);
+  const person = (people ?? []).find((p) => fold(p.person?.name ?? '') === want)?.person;
+  if (!person) return [];
+  const credits = await ctx.http.json<Array<{ _embedded?: { show?: TVShow } }>>(`https://api.tvmaze.com/people/${person.id}/${role}credits?embed=show`, { cacheKey: `tvm:${role}:${person.id}`, ttl: 30 * 86400, provider: 'tvmaze' });
+  const seen = new Set<number>();
+  return (credits ?? []).map((c) => c._embedded?.show).filter((s): s is TVShow => !!s && !seen.has(s.id) && !!seen.add(s.id)).sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0)).map(mapTvShow);
+}

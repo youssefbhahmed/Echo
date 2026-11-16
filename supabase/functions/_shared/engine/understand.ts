@@ -5,11 +5,12 @@
 // parser (intent.ts) still runs first: it is the fallback when AI is unavailable, and its explicit
 // readings (negations, "doesn't have to be", literal titles) act as guardrails the LLM cannot override.
 // Only the user's own words are sent — never catalog data.
-import { CATEGORIES, type Category, type Intent, type PreferenceStatement, type ProviderId } from '../types.ts';
+import { CATEGORIES, ENTITY_KINDS, ENTITY_WANTS, WORK_KINDS, type Category, type Entity, type EntityKind, type EntityWant, type EntityWork, type Intent, type PreferenceStatement, type ProviderId, type WorkKind } from '../types.ts';
 import type { HttpClient } from '../providers/http.ts';
 import { modelParams, withRateLimitRetry, type AiConfig } from './ai.ts';
 import { CONCEPT_BY_ID, CONCEPT_IDS, MOOD_IDS } from './concepts.ts';
-import { contentTokens, round } from './text.ts';
+import { entityMedia } from './entities.ts';
+import { contentTokens, fold, round } from './text.ts';
 
 const PROVIDER_IDS = ['youtube', 'spotify', 'tmdb', 'openlibrary', 'tvmaze'] as const;
 
@@ -24,6 +25,7 @@ Read the user's message (any language: English, French, Arabic…) and, if given
  "excludeTerms": short phrases the user does NOT want that are not concept ids (e.g. "motivational speeches", "french pop", "true crime").
  "relaxed": concept ids the user says are optional ("doesn't have to be sci-fi").
  "references": titles or creators the user explicitly names, exactly as written. Never invent.
+ "entities": named people or works the message is about, at most 3, [] if none. Each: {"name": the name as the user meant it, properly capitalised; "kind": one of ${JSON.stringify(ENTITY_KINDS)} ("artist" = a musician or band, "creator" = a YouTuber or online creator); "want": "by" (their own work: "songs by X", "X's books") | "like" (similar things: "songs like X", "films like X") | "about" (things about them: "X documentary", "X interview") | "all" (a bare name with nothing else: "eminem", "kendrick lamar", "dune"); "works": up to 4 well-known works about it or closely tied to it in OTHER media than its own, each {"title": official title, "kind": one of ${JSON.stringify(WORK_KINDS)}, "year": release year, "by": author or director, "note": 3-8 words on how it relates}, [] when you know none for sure, never invented}. Example: "eminem" → {"name":"Eminem","kind":"artist","want":"all","works":[{"title":"8 Mile","kind":"film","year":2002,"by":"Curtis Hanson","note":"the film based on his early life"},{"title":"The Way I Am","kind":"book","year":2008,"by":"Eminem","note":"his illustrated memoir"}]}. A bare name is not a stated medium: leave "categories" [] for it.
  "exploration": 0.9 if they want unfamiliar/surprising things, 0.1 if they want familiar/comfort picks, otherwise null.
  "trajectory": {"from": moodId, "to": moodId} only if they describe a mood arc; mood ids: ${JSON.stringify(MOOD_IDS)}. Otherwise null.
  "duration": "short" | "medium" | "long" only if stated, else null.
@@ -32,7 +34,7 @@ Read the user's message (any language: English, French, Arabic…) and, if given
  "rejectPrevious": true if the user says the previous results were bad/wrong.
  "remember": long-term preferences the user explicitly states about themselves, e.g. "I hate horror", "j'adore Stromae" → [{"polarity":1|-1,"subject":"..."}]. [] otherwise.
 }
-Do not recommend anything. Use only the listed ids.`;
+Do not recommend anything ("works" only describe a named entity). Use only the listed ids.`;
 
 export interface Understanding {
   categories: Category[];
@@ -43,6 +45,7 @@ export interface Understanding {
   excludeTerms: string[];
   relaxed: string[];
   references: string[];
+  entities: Entity[];
   exploration?: number;
   trajectory?: { from: string; to: string };
   duration?: Intent['duration'];
@@ -54,6 +57,77 @@ export interface Understanding {
 
 const str = (v: unknown, max = 80) => (typeof v === 'string' && v.trim() ? v.trim().slice(0, max) : undefined);
 const strs = (v: unknown, n = 8, max = 80) => (Array.isArray(v) ? v.map((x) => str(x, max)).filter((x): x is string => !!x).slice(0, n) : []);
+
+/** Edit distance (small strings only). */
+function editDistance(a: string, b: string): number {
+  if (Math.abs(a.length - b.length) > 3) return 99;
+  let prev = Array.from({ length: b.length + 1 }, (_, j) => j);
+  for (let i = 1; i <= a.length; i++) {
+    const cur = [i];
+    for (let j = 1; j <= b.length; j++) cur[j] = Math.min(prev[j] + 1, cur[j - 1] + 1, prev[j - 1] + (a[i - 1] === b[j - 1] ? 0 : 1));
+    prev = cur;
+  }
+  return prev[b.length];
+}
+
+/**
+ * Did the user write this name (any case/accents, or a small misspelling of each of its words:
+ * "kendrik lamar" → "Kendrick Lamar")? The model may correct spelling and capitalisation, never invent.
+ */
+export function nameInText(name: string, text: string): boolean {
+  const n = fold(name);
+  if (!n || n.length < 2) return false;
+  if (fold(text).includes(n)) return true;
+  const words = text.split(/[\s,;:!?.]+/).map(fold).filter(Boolean);
+  const parts = name.split(/[\s\-]+/).map(fold).filter((p) => p.length >= 2);
+  return parts.length > 0 && parts.every((p) => words.some((w) => w[0] === p[0] && editDistance(w, p) <= (p.length >= 6 ? 2 : 1)));
+}
+
+const KIND_ALIAS: Record<string, EntityKind> = {
+  musician: 'artist', rapper: 'artist', singer: 'artist', band: 'artist', group: 'artist', dj: 'artist', producer: 'artist', composer: 'artist',
+  writer: 'author', novelist: 'author', poet: 'author', filmmaker: 'director', youtuber: 'creator', streamer: 'creator', channel: 'creator',
+  movie: 'film', documentary: 'film', show: 'series', tv: 'series', 'tv series': 'series', novel: 'book', memoir: 'book', album: 'other', song: 'other',
+};
+const WORK_ALIAS: Record<string, WorkKind> = { movie: 'film', documentary: 'film', show: 'series', tv: 'series', 'tv series': 'series', novel: 'book', memoir: 'book', biography: 'book', youtube: 'video' };
+
+function entityKind(v: unknown): EntityKind {
+  const k = typeof v === 'string' ? v.trim().toLowerCase() : '';
+  return (ENTITY_KINDS as readonly string[]).includes(k) ? (k as EntityKind) : KIND_ALIAS[k] ?? 'other';
+}
+
+function sanitizeWorks(v: unknown): EntityWork[] {
+  const out: EntityWork[] = [];
+  const clean = (x: unknown, max: number) => str(x, max)?.replace(/[\u0000-\u001f]/g, ' ').trim();
+  for (const raw of Array.isArray(v) ? v : []) {
+    const w = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+    const title = clean(w.title, 100);
+    const k = typeof w.kind === 'string' ? w.kind.trim().toLowerCase() : '';
+    const kind = (WORK_KINDS as readonly string[]).includes(k) ? (k as WorkKind) : WORK_ALIAS[k];
+    if (!title || !kind) continue;
+    if (out.some((o) => fold(o.title) === fold(title))) continue;
+    const year = typeof w.year === 'number' && Number.isInteger(w.year) && w.year > 1800 && w.year < 2100 ? w.year : typeof w.year === 'string' && /^\d{4}$/.test(w.year) ? Number(w.year) : undefined;
+    const by = clean(w.by, 60);
+    const note = clean(w.note, 80);
+    out.push({ title, kind, ...(year ? { year } : {}), ...(by ? { by } : {}), ...(note ? { note } : {}) });
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
+/** The model's named entities, kept only when the user actually wrote the name. */
+export function sanitizeEntities(v: unknown, text: string): Entity[] {
+  const out: Entity[] = [];
+  for (const raw of Array.isArray(v) ? v : []) {
+    const e = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+    const name = str(e.name, 80)?.replace(/^["'“”«»]+|["'“”«»]+$/g, '').trim();
+    if (!name || !nameInText(name, text) || out.some((o) => fold(o.name) === fold(name))) continue;
+    const want = typeof e.want === 'string' && (ENTITY_WANTS as readonly string[]).includes(e.want) ? (e.want as EntityWant) : 'all';
+    const works = sanitizeWorks(e.works);
+    out.push({ name, kind: entityKind(e.kind), want, ...(works.length ? { works } : {}), source: 'llm' });
+    if (out.length >= 3) break;
+  }
+  return out;
+}
 
 /** Validate the model's output against ECHO's vocabulary and the user's actual words. */
 export function sanitizeUnderstanding(raw: unknown, text: string): Understanding {
@@ -91,6 +165,7 @@ export function sanitizeUnderstanding(raw: unknown, text: string): Understanding
     relaxed: strs(h.relaxed).filter((c) => CONCEPT_BY_ID[c]),
     // References must literally appear in the user's text: the model may not invent titles.
     references: strs(h.references, 3).filter((r) => r.length > 1 && lower.includes(r.toLowerCase())),
+    entities: sanitizeEntities(h.entities, text),
     exploration: typeof h.exploration === 'number' && isFinite(h.exploration) && (h.exploration >= 0.8 || h.exploration <= 0.2) ? h.exploration : undefined,
     trajectory,
     duration: h.duration === 'short' || h.duration === 'medium' || h.duration === 'long' ? h.duration : undefined,
@@ -128,7 +203,12 @@ export function applyUnderstanding(rules: Intent, u: Understanding, prev: Intent
   }
   for (const k of Object.keys(target)) if (Math.abs(target[k]) < 0.05) delete target[k];
 
-  const categories = u.categories.length ? u.categories : follow && !rules.categories.length ? prev!.categories : rules.categories;
+  let categories = u.categories.length ? u.categories : follow && !rules.categories.length ? prev!.categories : rules.categories;
+  // Named people/works: this message's, or (a follow-up like "only books") the previous request's.
+  const entities = u.entities.length ? u.entities : follow ? prev!.entities : undefined;
+  // A bare name ("eminem") states no medium: show it in its own medium and the media that tell its story.
+  const primary = entities?.[0];
+  if (primary && !follow && primary.want === 'all' && !rules.categories.length && !rules.providers?.length && !u.providers.length) categories = entityMedia(primary.kind) ?? categories;
   const providers = u.providers.length ? u.providers : rules.providers?.length ? rules.providers : follow && !u.categories.length ? prev!.providers : undefined;
   const excludes = [...new Set([...rules.excludes, ...excludeConcepts, ...u.excludeTerms, ...(follow ? prev!.excludes : [])])];
   const searchWords = [...new Set(Object.values(u.search).flatMap((q) => contentTokens(q ?? '')))].filter((w) => w.length > 2);
@@ -138,11 +218,12 @@ export function applyUnderstanding(rules: Intent, u: Understanding, prev: Intent
   const references = rules.references.length ? rules.references : u.references;
   const statements = [...rules.statements, ...u.remember.filter((r) => !rules.statements.some((s) => s.subject.toLowerCase() === r.subject.toLowerCase()))];
   const exploration = rules.exploration ?? u.exploration ?? (follow ? prev!.exploration : undefined);
-  const hasSignal = categories.length > 0 || Object.keys(u.search).length > 0 || Object.keys(target).length > 0 || references.length > 0 || rules.ordinalRefs.length > 0 || u.rejectPrevious || statements.length > 0;
+  const hasSignal = categories.length > 0 || Object.keys(u.search).length > 0 || Object.keys(target).length > 0 || references.length > 0 || rules.ordinalRefs.length > 0 || u.rejectPrevious || statements.length > 0 || !!entities?.length;
   let kind: Intent['intent'] = rules.intent;
   if (kind === 'discover') {
     if ((exploration ?? 0) >= 0.8) kind = 'explore';
-    else if (references.length) kind = 'similar';
+    // A bare name ("eminem") is not a "like X" request just because the model echoed it as a reference.
+    else if (primary ? primary.want === 'like' : references.length) kind = 'similar';
     else if (trajectory || (moods.length && !themes.length)) kind = 'mood';
   }
   return {
@@ -157,6 +238,7 @@ export function applyUnderstanding(rules: Intent, u: Understanding, prev: Intent
     excludes,
     relaxed,
     references,
+    entities: entities?.length ? entities : undefined,
     trajectory,
     duration: rules.duration ?? (u.duration && DUR_WORDS.test(text) ? u.duration : follow ? prev!.duration : undefined),
     language: rules.language ?? (u.language && LANG_WORDS.test(text) ? u.language : follow ? prev!.language : undefined),
@@ -170,7 +252,9 @@ export function applyUnderstanding(rules: Intent, u: Understanding, prev: Intent
 
 function summarizePrevious(prev: Intent): string {
   const top = Object.entries(prev.target).filter(([, v]) => v > 0).sort((a, b) => b[1] - a[1]).slice(0, 4).map(([k]) => k);
-  return JSON.stringify({ request: prev.rawText.slice(-300), categories: prev.categories, providers: prev.providers ?? [], search: prev.searchQueries ?? {}, concepts: top, excludes: prev.excludes });
+  // Entity names are the user's own words (the model normalised their spelling); works are not repeated.
+  const entities = (prev.entities ?? []).map((e) => ({ name: e.name, kind: e.kind, want: e.want }));
+  return JSON.stringify({ request: prev.rawText.slice(-300), categories: prev.categories, providers: prev.providers ?? [], search: prev.searchQueries ?? {}, concepts: top, excludes: prev.excludes, ...(entities.length ? { entities } : {}) });
 }
 
 /** Ask the LLM to interpret the message (with the previous request as context). */

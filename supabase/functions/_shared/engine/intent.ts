@@ -1,9 +1,9 @@
 // Pipeline step 1 — interpret a natural-language request into structured signals.
 // Deterministic rules + the concept lexicon. An optional LLM can enrich the
 // result (see ai.ts) but this parser alone is enough to drive the pipeline.
-import { CATEGORIES, type Category, type ConceptVector, type Intent, type PreferenceStatement, type ProviderId } from '../types.ts';
+import { CATEGORIES, type Category, type ConceptVector, type Entity, type Intent, type PreferenceStatement, type ProviderId } from '../types.ts';
 import { CONCEPT_BY_ID, CONCEPTS, MOOD_IDS } from './concepts.ts';
-import { conceptHits, contentTokens, normalize, projectText, round, topKeys } from './text.ts';
+import { conceptHits, contentTokens, normalize, projectText, round, tokenize, topKeys } from './text.ts';
 
 const CATEGORY_WORDS: Array<[RegExp, Category[]]> = [
   [/\b(youtubers?|video essays?|videos?|vid(e|é)os?|clips?|vlogs?|channels?|cha(i|î)nes?|lectures?|talks?|ted|conf(e|é)rences?)\b/, ['youtube']],
@@ -34,6 +34,27 @@ const FILLER = new Set(
 const SENTIMENT = new Set(['bad', 'good', 'great', 'awful', 'terrible', 'boring', 'cool', 'nice', 'okay', 'ok', 'hate', 'love', 'liked', 'want', 'wanted', 'need', 'needed', 'them', 'those', 'these', 'stuff', 'anymore', 'please', 'thanks', 'thank', 'dont', 'theyre', 'its', 'im', 'ive']);
 const NEG_STOP = new Set(['for', 'in', 'on', 'from', 'please', 'but', 'and', 'or', 'just', 'like', 'because', 'that', 'this', 'when', 'with', 'about', 'anymore', 'thanks', 'today', 'tonight', 'videos', 'video', 'songs', 'music', 'films', 'movies', 'books', 'podcasts', 'series']);
 const CATEGORY_TOKEN = /^(videos?|songs?|music|films?|movies?|books?|podcasts?|series|shows?|tv|documentar(y|ies)|albums?|tracks?|novels?|episodes?|playlists?)$/;
+
+// Small talk and refinement words: never read as a name.
+const CHATTER = new Set(
+  ('hmm hm hmmm hi hello hey yo sup thanks thank ok okay yes yeah yep no nope lol help test testing what why how who where when idk nothing anything something everything more less again please sure cool nice wow great good bad shorter longer only just another other others next back stop same different random surprise whatever play listen watch read show give tell find recommend suggest new old best top music songs videos films movies books podcasts series stuff things').split(' '),
+);
+
+/**
+ * Rules fallback (AI unavailable): a short message (1–4 words) the rules can't read as a concept, genre,
+ * mood, medium or anything else is probably a name ("eminem", "kendrick lamar"): a candidate entity of
+ * unknown kind, everything about it.
+ */
+export function candidateEntity(original: string): Entity | null {
+  const name = original.trim().replace(/^[\s"'“”«»]+|[\s"'“”«».!?,;:]+$/g, '').replace(/\s+/g, ' ');
+  const words = name.split(' ').filter(Boolean);
+  if (!words.length || words.length > 4 || name.length < 3 || name.length > 60) return null;
+  if (/[?]/.test(original) || !/\p{L}/u.test(name)) return null;
+  const tokens = tokenize(name);
+  if (!tokens.length || tokens.every((t) => CHATTER.has(t) || FILLER.has(t) || SENTIMENT.has(t))) return null;
+  if (CHATTER.has(tokens[0])) return null;
+  return { name, kind: 'other', want: 'all', source: 'rules' };
+}
 
 const DESCRIPTIVE_VERBS = /(feel|feels|feeling|felt|sound|sounds|sounding|look|looks|seem|seems|taste|tastes)\s*$/;
 
@@ -257,17 +278,23 @@ export function parseIntent(rawText: string, opts: ParseOptions = {}): Intent {
   else if (/\b(understand|learn|explain|teach|origins? of|how (?:does|did|do)|why (?:does|did|do)|history of|introduction to)\b/.test(text)) kind = 'learn';
   else if (moods.length && (/\b(feel|feeling|mood|vibe|i'm|im|sad|happy|nostalgic)\b/.test(text) || trajectory)) kind = 'mood';
 
-  const vague =
-    original.trim().length > 0 &&
+  // Nothing else read: a short message is probably a name (see candidateEntity).
+  const unread =
     typedCategories === 0 &&
     providers.length === 0 &&
     Object.keys(target).length === 0 &&
     refs.length === 0 &&
     ordinalRefs.length === 0 &&
     genres.length === 0 &&
-    keywords.length < 2 &&
     exploration === undefined &&
-    statements.length === 0;
+    statements.length === 0 &&
+    !trajectory &&
+    !language &&
+    !excludes.length &&
+    !relaxed.length;
+  const entity = unread ? candidateEntity(original) : null;
+
+  const vague = original.trim().length > 0 && unread && keywords.length < 2 && !entity;
 
   for (const k of Object.keys(target)) target[k] = round(target[k]);
 
@@ -293,6 +320,7 @@ export function parseIntent(rawText: string, opts: ParseOptions = {}): Intent {
     vague,
     statements,
     providers: providers.length ? providers : undefined,
+    ...(entity ? { entities: [entity] } : {}),
     source: 'rules',
   };
 }
@@ -302,6 +330,7 @@ export function refineIntent(prev: Intent, next: Intent): Intent {
   const text = normalize(next.rawText);
   const isFreshRequest =
     next.references.length > 0 ||
+    !!next.entities?.length ||
     (next.keywords.length >= 3 && !/^(more|less|only|just|shorter|longer|but|and|now|what about|how about|instead)\b/.test(text));
   if (isFreshRequest) return next;
 

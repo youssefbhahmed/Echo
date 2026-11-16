@@ -292,11 +292,11 @@ export async function recentMusic(userId: string, opts: { asOf?: number; days?: 
  * a liked song resolved under another id (single vs album vs deluxe) isn't served as a discovery.
  */
 export async function librarySongs(db: SupabaseClient, userId: string): Promise<LibrarySongs> {
-  type Row = { content_items: { title?: string; creators?: string[]; metadata?: Record<string, unknown> } | null };
+  type Row = { item_id: string; content_items: { title?: string; creators?: string[]; metadata?: Record<string, unknown> } | null };
   const rows = await pagedRows<Row>((f, t) =>
     db.from('library_items').select('item_id, content_items(title, creators, metadata)').eq('user_id', userId).like('item_id', 'spotify:track:%').or('status.eq.consumed,saved.eq.true,liked.eq.true')
       .order('item_id').range(f, t) as unknown as PromiseLike<{ data: Row[] | null }>, 10_000);
-  return librarySongIndex(rows.map((r) => r.content_items).filter((c): c is NonNullable<Row['content_items']> => !!c).map((c) => ({ title: c.title, creators: c.creators, isrc: c.metadata?.isrc })));
+  return librarySongIndex(rows.map((r) => ({ id: r.item_id, title: r.content_items?.title, creators: r.content_items?.creators, isrc: r.content_items?.metadata?.isrc })));
 }
 
 /** Items the user disliked or finished — never recommend them again. */

@@ -16,6 +16,7 @@ export const DiscoverBody = z.object({
   intentHint: z.record(z.string(), z.unknown()).optional(),
 });
 
+/** Chat picks per answer are fixed server-side (engine/chat.ts: 12, or 20 when the message names an entity). */
 export const ChatBody = z.object({
   sessionId: z.string().uuid().optional(),
   message: z.string().min(1).max(1000),

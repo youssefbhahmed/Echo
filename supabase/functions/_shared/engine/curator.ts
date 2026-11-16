@@ -4,16 +4,16 @@
 import type { Category, ContentItem, Intent, MusicLane, MusicPolicy, TasteProfile } from '../types.ts';
 import type { HttpClient } from '../providers/http.ts';
 import type { Env } from '../providers/types.ts';
-import { resolveSpotifyPicks, type SpotifyPick } from '../providers/spotify.ts';
+import { artistMatches, resolveSpotifyPicks, type ResolveResult, type SpotifyPick } from '../providers/spotify.ts';
 import { musicBrief } from '../importer.ts';
-import { llmMusicPicks, type AiConfig, type CuratorBrief, type CuratorLane } from './ai.ts';
+import { llmMusicPicks, type AiConfig, type CuratorBrief, type CuratorLane, type MusicPick } from './ai.ts';
 import {
-  chooseLanes, DEFAULT_MIN_YEAR, effectiveLanes, eraFloor, isEngineLane, LANE_BY_ID, laneBlocked, laneKey, laneOfGenre, laneOfGenres, laneReject, laneTag, laneTagOf, laneTargets, MIX_LANE, mixLane,
-  moodPhrase, musicPolicy, popularityPhrase, REQUEST_LANE, withoutPerUser, type LaneRuleContext, type LibrarySongs,
+  chooseLanes, DEFAULT_MIN_YEAR, effectiveLanes, ENTITY_BY_LANE, ENTITY_LIKE_LANE, eraFloor, inLibrary, isEngineLane, LANE_BY_ID, LANES, laneBlocked, laneKey, laneOfGenre, laneOfGenres, laneReject, laneTag,
+  laneTagOf, laneTargets, MIX_LANE, mixLane, moodPhrase, musicPolicy, popularityPhrase, REQUEST_LANE, VERSION_RE, withoutPerUser, type LaneRuleContext, type LibrarySongs,
 } from './lanes.ts';
 import { CONCEPT_BY_ID } from './concepts.ts';
 import { categoryQuotas } from './rank.ts';
-import { normKey } from './text.ts';
+import { normKey, songKey, splitArtist } from './text.ts';
 
 export interface MusicRules {
   /** Release-era rules (lane era, regional ≥ 2015). Off when the user asked for older music. */
@@ -34,6 +34,11 @@ export interface MusicPlan {
   total: number;
   policy: MusicPolicy;
   rules: MusicRules;
+  /**
+   * A request naming an artist (request sub-modes): lane "entity-by" = their own songs, "entity-like" =
+   * songs by closely related artists. want 'all' serves both (by first), split ~50/50.
+   */
+  entity?: { name: string; want: 'by' | 'like' | 'all' };
 }
 
 const OLD_RE = /\b(old(ies)?|old school|classics?|vintage|retro|throwback|golden age|traditional|timeless|(19|20)?[0-9]0'?s|19\d\d|sixties|seventies|eighties|nineties)\b/i;
@@ -62,11 +67,42 @@ function requestLane(rules: MusicRules, now: Date): MusicLane {
   };
 }
 
+/** A lane answering a named artist: any era (the era rule is off for an artist the user named; the 'like' lane keeps the regional 2015+ rule per song). */
+function entityLane(id: string, label: string, now: Date): MusicLane {
+  return {
+    id, label, share: 1, descriptors: [], era: { from: 1900, to: year(now) }, energy: NaN, danceability: NaN, valence: NaN,
+    popularity: { p25: NaN, p50: NaN, p75: NaN }, regional: false, genres: [], source: 'default',
+  };
+}
+
+/** Songs shown per entity lane: two lanes split the music ~50/50 (at least 6 each); one lane takes up to 16. */
+export function entityTargets(want: 'by' | 'like' | 'all', total: number): { by: number; like: number } {
+  if (want === 'all') {
+    const by = Math.max(6, Math.ceil(total / 2));
+    return { by, like: Math.max(6, total - by) };
+  }
+  const n = Math.max(6, Math.min(16, total));
+  return want === 'by' ? { by: n, like: 0 } : { by: 0, like: n };
+}
+
+/** Songs asked from the curator for an entity lane (~14; more for a bigger single lane). */
+export const entityAsk = (target: number) => (target <= 8 ? 14 : Math.min(22, target + 6));
+
 /** Which lanes this refresh serves and how many songs each (min 3 per lane; fewer lanes for small quotas). */
-export function planMusic(profile: TasteProfile, opts: { hasQuery: boolean; seed: number; total: number; text?: string; now?: Date }): MusicPlan | null {
+export function planMusic(
+  profile: TasteProfile,
+  opts: { hasQuery: boolean; seed: number; total: number; text?: string; now?: Date; entity?: { name: string; want: 'by' | 'like' | 'all' } },
+): MusicPlan | null {
   const now = opts.now ?? new Date();
   if (opts.total <= 0) return null;
   const policy = musicPolicy(profile);
+  if (opts.hasQuery && opts.entity) {
+    const { name, want } = opts.entity;
+    const t = entityTargets(want, opts.total);
+    const lanes = [...(t.by ? [entityLane(ENTITY_BY_LANE, name, now)] : []), ...(t.like ? [entityLane(ENTITY_LIKE_LANE, `Artists like ${name}`, now)] : [])];
+    const targets = Object.fromEntries(lanes.map((l) => [l.id, l.id === ENTITY_BY_LANE ? t.by : t.like]));
+    return { mode: 'request', entity: { name, want }, lanes, order: lanes.map((l) => l.id), targets, total: t.by + t.like, policy, rules: requestRules(opts.text) };
+  }
   if (opts.hasQuery) {
     const rules = requestRules(opts.text);
     return { mode: 'request', lanes: [requestLane(rules, now)], order: [REQUEST_LANE.id], targets: { [REQUEST_LANE.id]: opts.total }, total: opts.total, policy, rules };
@@ -107,6 +143,7 @@ export function buildBrief(plan: MusicPlan, profile: TasteProfile, ctx: { intent
         regionalMinYear: plan.rules.era ? plan.policy.regionalMinYear : undefined,
         vocals: plan.rules.vocals,
         familiar: plan.rules.familiar,
+        offLanguages: offLanguages(profile, intent?.rawText ?? '', intent?.language),
       },
       avoid: [...new Set(avoid)],
     };
@@ -147,6 +184,11 @@ export interface CurateDeps {
   /** Concept ids items are retrieved for (weak, inherited evidence for ranking). */
   concepts?: string[];
   excludeIds?: Set<string>;
+  /**
+   * The "<Artist>" lane of an entity request: like excludeIds, but songs the user already has may come
+   * back (ranked after the rest, flagged "In your library") unless they were just shown.
+   */
+  entityExcludeIds?: Set<string>;
   /** Liked/saved songs by ISRC and artist|title (a liked song never comes back under another id). */
   library?: LibrarySongs;
   /** Spotify search is rate-limited: resolve via cache, ListenBrainz and single-track lookups only. */
@@ -214,13 +256,99 @@ export function styleFitsLane(label: string, laneId: string): boolean {
   return def.re.test(k) || !!def.broad?.test(k) || !!LANE_ALSO[laneId]?.test(k);
 }
 
+// ───────────── regional languages in requests ─────────────
+
+/** Arabic rap & pop and Maghreb fusion are one language scene (same "maghreb" family). */
+const regionKey = (id: string) => (id === 'maghreb-fusion' ? 'arabic-pop' : id);
+const REGION_LANGUAGE: Record<string, string> = { french: 'French', 'arabic-pop': 'Arabic' };
+
+/** Regional lanes (French, Arabic & Maghreb) this listener switched off in My Taste. */
+export function blockedRegions(profile: TasteProfile): string[] {
+  return [...new Set(LANES.filter((l) => l.regional && laneBlocked({ id: l.id }, profile)).map((l) => regionKey(l.id)))];
+}
+
+const NEGATED = /\b(no|not|without|except|avoid|never|sans|pas d[e']?|aucun\w*|ni)\s+(\S+\s+)?\S+/g;
+
+/** Regional scenes the request itself asks for: its words ("rap français", "moroccan rap") or the content language it asked for. */
+export function askedRegions(text: string, language?: string): Set<string> {
+  const out = new Set<string>();
+  const k = laneKey(text).replace(NEGATED, ' ');
+  for (const l of LANES) if (l.regional && l.re.test(k)) out.add(regionKey(l.id));
+  if (language === 'fr') out.add('french');
+  if (language === 'ar') out.add('arabic-pop');
+  return out;
+}
+
+/** Lyrics languages to tell the curator to leave out: switched off and not asked for ("French", "Arabic"). */
+export function offLanguages(profile: TasteProfile, text: string, language?: string): string[] {
+  const asked = askedRegions(text, language);
+  return blockedRegions(profile).filter((r) => !asked.has(r)).map((r) => REGION_LANGUAGE[r]).filter(Boolean);
+}
+
+/** The regional scene of a curator pick: its lyrics language first, then its own style label. */
+export function pickRegion(p: Pick<MusicPick, 'lang' | 'lane' | 'genre'>): string | null {
+  const byLang = regionalLaneOfLanguage(p.lang);
+  if (byLang) return regionKey(byLang);
+  for (const g of [p.genre, p.lane]) {
+    const id = g ? laneOfGenre(g) : null;
+    if (id && LANE_BY_ID[id]?.regional) return regionKey(id);
+  }
+  return null;
+}
+
+/**
+ * Owner rules for French / Arabic / Maghreb picks in a typed request (by the curator's own language and
+ * style labels, since Spotify track lookups carry no genres): dropped when that scene is switched off,
+ * unless the request asks for it or names an artist of that scene (`named`); otherwise at most `cap` of them.
+ */
+export function regionalPicks<T extends Pick<MusicPick, 'lang' | 'lane' | 'genre'>>(picks: T[], o: { blocked: string[]; asked: Set<string>; named?: string | null; cap: number }): { kept: T[]; dropped: number } {
+  const kept: T[] = [];
+  let dropped = 0;
+  let regional = 0;
+  for (const p of picks) {
+    const r = pickRegion(p);
+    const wanted = !!r && (o.asked.has(r) || o.named === r);
+    if (r && !wanted && (o.blocked.includes(r) || regional >= o.cap)) {
+      dropped++;
+      continue;
+    }
+    if (r && !wanted) regional++;
+    kept.push(p);
+  }
+  return { kept, dropped };
+}
+
+/** The scene most of these picks belong to, when more than half do (an artist the user named is "regional" by their songs). */
+export function majorityRegion(picks: Array<Pick<MusicPick, 'lang' | 'lane' | 'genre'>>): string | null {
+  const counts = new Map<string, number>();
+  for (const p of picks) {
+    const r = pickRegion(p);
+    if (r) counts.set(r, (counts.get(r) ?? 0) + 1);
+  }
+  for (const [r, n] of counts) if (n * 2 > picks.length) return r;
+  return null;
+}
+
+/** Style labels of a pick (the curator's words), used for the blocked-style rule when the catalog has no genres. */
+const pickLabels = (p: Pick<MusicPick, 'lane' | 'genre'> | undefined) => [p?.genre, p?.lane].filter((x): x is string => !!x);
+
 /** Brief → curator → resolve on Spotify → items tagged with their lane, in the curator's order. */
 export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<CurateResult> {
+  if (plan.entity) return curateEntityMusic(plan, deps);
   const brief = buildBrief(plan, deps.profile, { intent: deps.intent, words: deps.words, moods: deps.moods });
-  const picks = await llmMusicPicks(brief, deps.ai, deps.http, { seed: deps.seed ?? 0 });
+  let picks = await llmMusicPicks(brief, deps.ai, deps.http, { seed: deps.seed ?? 0 });
+  let regionalDropped = 0;
+  if (plan.mode === 'request') {
+    const r = regionalPicks(picks, {
+      blocked: blockedRegions(deps.profile), asked: askedRegions(deps.intent?.rawText ?? '', deps.intent?.language), cap: Math.max(1, Math.round(plan.total * plan.policy.regionalShare)),
+    });
+    picks = r.kept;
+    regionalDropped = r.dropped;
+  }
   const byId = new Map(plan.lanes.map((l) => [l.id, l]));
   const byLabel = new Map(plan.lanes.map((l) => [normKey(l.label), l.id]));
   const style = new Map<SpotifyPick, string | undefined>();
+  const source = new Map<SpotifyPick, MusicPick>();
   const spicks: SpotifyPick[] = [];
   let offStyle = 0;
   for (const p of picks) {
@@ -256,15 +384,19 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
     }
     const sp: SpotifyPick = { artist: p.artist, track: p.track, laneId, ...(p.feat?.length ? { feat: p.feat } : {}) };
     style.set(sp, plan.mode === 'request' ? p.lane : undefined);
+    source.set(sp, p);
     spicks.push(sp);
   }
   const rules = laneRules(plan, deps.profile, deps.excludeIds, deps.now, deps.library);
   // A request's songs follow the regional rule when their style (or the request) is French / Arabic / Maghreb.
   const requestText = deps.intent?.rawText ?? '';
-  const ruleLane = (pk: SpotifyPick) => (plan.mode === 'request' ? ruleLaneFor(plan, [style.get(pk), requestText], deps.now) : byId.get(pk.laneId)!);
+  // Its lyrics language counts too ("French" → the regional rule), and its style labels stand in for the
+  // genres Spotify track lookups don't carry, so blocked styles are caught before a song is accepted.
+  const ruleLane = (pk: SpotifyPick) => (plan.mode === 'request' ? ruleLaneFor(plan, [style.get(pk), source.get(pk)?.lang, requestText], deps.now) : byId.get(pk.laneId)!);
   const need = Object.fromEntries(plan.order.map((id) => [id, (plan.targets[id] ?? 3) + 2]));
   const res = await resolveSpotifyPicks(spicks, { http: deps.http, env: deps.env }, {
-    allowSearch: !deps.searchBlocked && !deps.lookupBlocked, allowLookups: !deps.lookupBlocked, need, excludeIds: deps.excludeIds, accept: (item, pk) => laneReject(item, ruleLane(pk), rules),
+    allowSearch: !deps.searchBlocked && !deps.lookupBlocked, allowLookups: !deps.lookupBlocked, need, excludeIds: deps.excludeIds,
+    accept: (item, pk) => laneReject(item.genres.length ? item : { ...item, genres: pickLabels(source.get(pk)) }, ruleLane(pk), rules),
   });
   const perLane: Record<string, number> = {};
   const items = res.items.map((r) => {
@@ -288,9 +420,148 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
       },
     } as ContentItem;
   });
-  const rejected = [...(offStyle ? [`off-lane style ${offStyle}`] : []), ...Object.entries(res.stats.rejected).map(([k, v]) => `${k} ${v}`)].join(', ');
+  const rejected = [...(offStyle ? [`off-lane style ${offStyle}`] : []), ...(regionalDropped ? [`regional language ${regionalDropped}`] : []), ...Object.entries(res.stats.rejected).map(([k, v]) => `${k} ${v}`)].join(', ');
   const detail = `${items.length}/${picks.length} curator picks resolved for ${plan.mode === 'request' ? 'the request' : plan.lanes.map((l) => l.label).join(' · ')} (cache ${res.stats.cached}, ListenBrainz ${res.stats.listenbrainz}, search ${res.stats.searched}${deps.searchBlocked ? ' blocked' : ''}${deps.lookupBlocked ? ', lookups blocked: cache only' : ''}${rejected ? `; rejected: ${rejected}` : ''})`;
   return { items, detail, rateLimitedSec: res.rateLimitedSec, lookupLimitedSec: res.lookupLimitedSec, perLane };
+}
+
+// ───────────── a request naming an artist ─────────────
+
+const SKIT_RE = /\b(skit|interlude)\b/i;
+const EMPTY_RESOLVE: ResolveResult = { items: [], stats: { cached: 0, listenbrainz: 0, searched: 0, unresolved: 0, rejected: {} } };
+
+/** The pick's main artist is the named artist (any credit form: "Eminem feat. Dido" counts as Eminem). */
+const isNamed = (name: string, p: Pick<MusicPick, 'artist' | 'feat'>) => artistMatches(name, [splitArtist(p.artist).main]) || (p.feat ?? []).some((f) => artistMatches(name, [f]));
+
+/**
+ * Entity request sub-modes: two curator calls in parallel, each resolved on Spotify under its own rules.
+ *  - "<Artist>" (entity-by): that artist's songs, signature songs and deeper cuts, any era; the named
+ *    artist must be on every track; songs already in the library may come back, ranked after the others and
+ *    flagged metadata.inLibrary; no regional / blocked-style rule (the user named them).
+ *  - "Artists like <Artist>" (entity-like): one song each by different related artists, never the named
+ *    artist; the owner's rules hold: switched-off languages/styles dropped (by the curator's language and
+ *    style labels) unless asked for or the named artist belongs to that scene, regional songs 2015+ and
+ *    capped, versions/compilations, library and recently shown songs excluded. Each carries the curator's
+ *    short "why".
+ */
+async function curateEntityMusic(plan: MusicPlan, deps: CurateDeps): Promise<CurateResult> {
+  const e = plan.entity!;
+  const text = deps.intent?.rawText ?? e.name;
+  const byLane = plan.lanes.find((l) => l.id === ENTITY_BY_LANE);
+  const likeLane = plan.lanes.find((l) => l.id === ENTITY_LIKE_LANE);
+  const blocked = blockedRegions(deps.profile);
+  const asked = askedRegions(text, deps.intent?.language);
+  const avoid = [...deps.profile.explicit.dislikes, ...(deps.intent?.excludes ?? []).filter((x) => !CONCEPT_BY_ID[x])].map((x) => x.trim()).filter(Boolean);
+  const base = { text, vocals: plan.rules.vocals, familiar: plan.rules.familiar };
+  const notes: string[] = [];
+  const ask = async (brief: CuratorBrief, label: string) => {
+    try {
+      return await llmMusicPicks(brief, deps.ai, deps.http, { seed: deps.seed ?? 0 });
+    } catch (err) {
+      notes.push(`${label} curator failed (${String((err as Error)?.message ?? err).slice(0, 60)})`);
+      return [] as MusicPick[];
+    }
+  };
+  const [byRaw, likeRaw] = await Promise.all([
+    byLane ? ask({ request: { ...base, count: entityAsk(plan.targets[byLane.id]), entity: { name: e.name, mode: 'by' } } }, 'by') : Promise.resolve([] as MusicPick[]),
+    likeLane
+      ? ask({
+        request: {
+          ...base, count: entityAsk(plan.targets[likeLane.id]), entity: { name: e.name, mode: 'like' }, background: deps.profile.music ? musicBrief(deps.profile.music, { styles: false }) : undefined,
+          regionalMinYear: plan.policy.regionalMinYear, offLanguages: offLanguages(deps.profile, text, deps.intent?.language),
+        },
+        avoid: [...new Set(avoid)],
+      }, 'like')
+      : Promise.resolve([] as MusicPick[]),
+  ]);
+  const byPicks = byRaw.filter((p) => isNamed(e.name, p));
+  // The named artist's own scene (by their songs' language/style), so "artists like <a French rapper>" may be French.
+  const named = majorityRegion(byPicks.length ? byPicks : likeRaw);
+  const notSelf = likeRaw.filter((p) => !isNamed(e.name, p));
+  const likeTarget = likeLane ? plan.targets[likeLane.id] : 0;
+  const reg = regionalPicks(notSelf, { blocked, asked, named, cap: Math.max(1, Math.round(likeTarget * plan.policy.regionalShare)) });
+
+  const source = new Map<SpotifyPick, MusicPick>();
+  const toSpotify = (p: MusicPick, laneId: string): SpotifyPick => {
+    const sp: SpotifyPick = { artist: p.artist, track: p.track, laneId, ...(p.feat?.length ? { feat: p.feat } : {}) };
+    source.set(sp, p);
+    return sp;
+  };
+  const bySp = byLane ? byPicks.map((p) => toSpotify(p, byLane.id)) : [];
+  const likeSp = likeLane ? reg.kept.map((p) => toSpotify(p, likeLane.id)) : [];
+  const rules = laneRules(plan, deps.profile, deps.excludeIds, deps.now, deps.library);
+  const ctx = { http: deps.http, env: deps.env };
+  const common = { allowSearch: !deps.searchBlocked && !deps.lookupBlocked, allowLookups: !deps.lookupBlocked, maxSearches: 4 };
+  const byExclude = deps.entityExcludeIds ?? deps.excludeIds;
+  const [byRes, likeRes] = await Promise.all([
+    bySp.length
+      ? resolveSpotifyPicks(bySp, ctx, {
+        ...common, excludeIds: byExclude,
+        accept: (item) => {
+          if (!artistMatches(e.name, item.creators)) return 'other artist';
+          if (byExclude?.has(item.id)) return 'excluded';
+          if (VERSION_RE.test(item.title) || SKIT_RE.test(item.title)) return 'version';
+          if (item.metadata?.albumType === 'compilation') return 'compilation';
+          return null;
+        },
+      })
+      : Promise.resolve(EMPTY_RESOLVE),
+    likeSp.length
+      ? resolveSpotifyPicks(likeSp, ctx, {
+        ...common, excludeIds: deps.excludeIds, need: { [likeLane!.id]: likeTarget + 2 },
+        accept: (item, pk) => {
+          if (artistMatches(e.name, item.creators)) return 'named artist';
+          const p = source.get(pk);
+          return laneReject(item.genres.length ? item : { ...item, genres: pickLabels(p) }, { ...likeLane!, regional: !!(p && pickRegion(p)) }, rules);
+        },
+      })
+      : Promise.resolve(EMPTY_RESOLVE),
+  ]);
+
+  const perLane: Record<string, number> = {};
+  const items: ContentItem[] = [];
+  const seenSongs = new Set<string>();
+  for (const [lane, res] of [[byLane, byRes], [likeLane, likeRes]] as const) {
+    if (!lane) continue;
+    for (const r of res.items) {
+      // The same recording under two picks ("Lose Yourself" / "Lose Yourself - From 8 Mile") only once.
+      const key = songKey(r.item.creators[0] ?? '', r.item.title) || r.item.id;
+      if (seenSongs.has(key)) continue;
+      seenSongs.add(key);
+      const p = source.get(r.pick);
+      const owned = lane.id === ENTITY_BY_LANE && (inLibrary(r.item, deps.library) || !!deps.library?.ids?.has(r.item.id));
+      perLane[lane.id] = (perLane[lane.id] ?? 0) + 1;
+      items.push({
+        ...r.item,
+        genres: r.item.genres.length ? r.item.genres : p?.lane ? [p.lane] : [],
+        metadata: {
+          ...(r.item.metadata ?? {}),
+          lane: laneTag(lane),
+          aiPick: true,
+          // Songs the user already has come after the ones they don't, in the curator's order.
+          aiOrder: (owned ? 1000 : 0) + r.index,
+          ...(lane.id === ENTITY_BY_LANE ? { inLibrary: owned } : {}),
+          entity: { name: e.name, role: lane.id === ENTITY_BY_LANE ? 'by' : 'like', ...(lane.id === ENTITY_LIKE_LANE && p?.why ? { note: p.why } : {}) },
+          resolvedVia: r.via,
+          retrievedBy: `ai:${r.pick.artist}`,
+          retrievedFor: (deps.concepts ?? []).slice(0, 3),
+        },
+      } as ContentItem);
+    }
+  }
+  const stat = (res: ResolveResult) => `cache ${res.stats.cached}, ListenBrainz ${res.stats.listenbrainz}, search ${res.stats.searched}`;
+  const rej = (res: ResolveResult, extra: Array<[string, number]>) => {
+    const all = [...extra.filter(([, n]) => n > 0), ...Object.entries(res.stats.rejected)].map(([k, v]) => `${k} ${v}`).join(', ');
+    return all ? `; rejected: ${all}` : '';
+  };
+  const parts = [
+    byLane ? `${e.name}: ${perLane[byLane.id] ?? 0}/${byRaw.length} (${stat(byRes)}${rej(byRes, [['other artist', byRaw.length - byPicks.length]])})` : '',
+    likeLane ? `${likeLane.label}: ${perLane[likeLane.id] ?? 0}/${likeRaw.length} (${stat(likeRes)}${rej(likeRes, [['named artist', likeRaw.length - notSelf.length], ['regional language', reg.dropped]])})` : '',
+  ].filter(Boolean);
+  const detail = `${items.length}/${byRaw.length + likeRaw.length} curator picks resolved for ${parts.join(' · ')}${deps.searchBlocked ? ', search blocked' : ''}${deps.lookupBlocked ? ', lookups blocked: cache only' : ''}${notes.length ? `; ${notes.join('; ')}` : ''}`;
+  const rateLimitedSec = Math.max(byRes.rateLimitedSec ?? -1, likeRes.rateLimitedSec ?? -1);
+  const lookupLimitedSec = Math.max(byRes.lookupLimitedSec ?? -1, likeRes.lookupLimitedSec ?? -1);
+  return { items, detail, perLane, ...(rateLimitedSec >= 0 ? { rateLimitedSec } : {}), ...(lookupLimitedSec >= 0 ? { lookupLimitedSec } : {}) };
 }
 
 // ───────────── music fallback (stored songs for short lanes) ─────────────

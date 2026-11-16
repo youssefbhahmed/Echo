@@ -1,8 +1,9 @@
 import { motion } from 'motion/react';
-import { AudioLines, Heart, Info, Play } from 'lucide-react';
+import { AudioLines, Check, Heart, Info, Play } from 'lucide-react';
 import { isQueueable, usePlayQueue } from '../lib/player';
 import type { Recommendation } from '@shared/types.ts';
 import { CATEGORY_META, displayTitle, KIND_LABEL } from '../lib/meta';
+import { ownedInEntityLane } from '../lib/lanes';
 import { useLibraryMap } from '../hooks/data';
 import { Artwork } from './MediaCard';
 
@@ -69,6 +70,11 @@ export function Tile({ rec, onOpen, onPlay, onWatch, className = '' }: { rec: Re
         <span className="text-dim"> · </span>
         <span style={{ color: meta.color }}>{KIND_LABEL[item.kind]}</span>
       </p>
+      {ownedInEntityLane(item) && (
+        <p className="mt-1 inline-flex items-center gap-1 text-[11.5px] font-medium text-mist">
+          <Check className="h-3 w-3 text-ember" aria-hidden /> In your library
+        </p>
+      )}
     </motion.button>
   );
 }

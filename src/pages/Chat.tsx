@@ -3,18 +3,21 @@ import { useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'motion/react';
 import { ArrowUp, Compass, History, Landmark, Mic2, Music2, Orbit, Plus, Sunrise } from 'lucide-react';
-import type { AnalyzedItem, Explanation, ScoreBreakdown } from '@shared/types.ts';
+import type { Recommendation } from '@shared/types.ts';
+import type { ChatPayloadRec } from '@shared/engine/chat.ts';
 import { api } from '../lib/api';
+import { restoreRecs } from '../lib/chat';
 import { supabase } from '../lib/supabase';
 import { localIntentHint } from '../lib/ollama';
 import { dbToItem, type DbItem } from '../hooks/data';
-import { MediaCard } from '../components/MediaCard';
+import { ChatAnswer } from '../components/ChatAnswer';
+import { DetailSheet } from '../components/DetailSheet';
 import { EchoMark, Listening } from '../components/Echo';
 import { PageHeader } from '../components/Shell';
 import { toast } from '../components/Toast';
 
-interface Rec { item: AnalyzedItem; explanation: Explanation; score?: ScoreBreakdown; trajectoryStep?: number }
-interface Msg { role: 'user' | 'assistant'; content: string; recs?: Rec[]; clarify?: { text: string; options: string[] } | null; summary?: string }
+interface Msg { role: 'user' | 'assistant'; content: string; recs?: Recommendation[]; clarify?: { text: string; options: string[] } | null; summary?: string }
+
 
 const REFINEMENTS = ['More like the first one', 'More adventurous', 'Only books', 'Only music', 'Shorter', 'Less dark'];
 
@@ -37,6 +40,9 @@ export default function Chat() {
   const [showHistory, setShowHistory] = useState(false);
   const endRef = useRef<HTMLDivElement>(null);
   const autoSent = useRef(false);
+  const [open, setOpenState] = useState<{ rec: Recommendation; play: boolean } | null>(null);
+  const openRec = (rec: Recommendation) => setOpenState({ rec, play: false });
+  const watchRec = (rec: Recommendation) => setOpenState({ rec, play: true });
 
   const sessions = useQuery({
     queryKey: ['chat-sessions'],
@@ -87,19 +93,19 @@ export default function Chat() {
     setShowHistory(false);
     const { data, error } = await supabase.from('chat_messages').select('role, content, payload').eq('session_id', id).order('created_at');
     if (error) return toast(error.message, 'error');
-    const ids = [...new Set((data ?? []).flatMap((m) => ((m.payload as { recommendations?: Array<{ itemId: string }> })?.recommendations ?? []).map((r) => r.itemId)))];
+    const ids = [...new Set((data ?? []).flatMap((m) => ((m.payload as { recommendations?: ChatPayloadRec[] })?.recommendations ?? []).map((r) => r.itemId)))];
     const { data: items } = ids.length ? await supabase.from('content_items').select('*').in('id', ids) : { data: [] as DbItem[] };
     const byId = new Map((items ?? []).map((i) => [i.id as string, dbToItem(i as DbItem)]));
     setSessionId(id);
     setMessages(
       (data ?? []).map((m) => {
-        const p = (m.payload ?? {}) as { recommendations?: Array<{ itemId: string; explanation: Explanation; score: ScoreBreakdown; trajectoryStep?: number }>; clarifyingQuestion?: Msg['clarify']; intent?: { summary?: string } };
+        const p = (m.payload ?? {}) as { recommendations?: ChatPayloadRec[]; clarifyingQuestion?: Msg['clarify']; intent?: { summary?: string } };
         return {
           role: m.role as Msg['role'],
           content: m.content,
           summary: p.intent?.summary,
           clarify: p.clarifyingQuestion,
-          recs: (p.recommendations ?? []).filter((r) => byId.has(r.itemId)).map((r) => ({ item: byId.get(r.itemId)!, explanation: r.explanation, score: r.score, trajectoryStep: r.trajectoryStep })),
+          recs: restoreRecs(p.recommendations, byId),
         };
       }),
     );
@@ -171,13 +177,7 @@ export default function Chat() {
                   )}
                 </div>
               </div>
-              {m.recs && m.recs.length > 0 && (
-                <div className="mt-4 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                  {m.recs.map((r) => (
-                    <MediaCard key={r.item.id} item={r.item} explanation={r.explanation} score={r.score} trajectoryStep={r.trajectoryStep} source="chat" />
-                  ))}
-                </div>
-              )}
+              {m.recs && m.recs.length > 0 && <ChatAnswer recs={m.recs} answerKey={String(i)} onOpen={openRec} onWatch={watchRec} />}
             </motion.div>
           ),
         )}
@@ -218,6 +218,7 @@ export default function Chat() {
           <button disabled={busy || !input.trim()} className="grid h-11 w-11 shrink-0 place-items-center rounded-2xl bg-ember text-ink disabled:opacity-40" aria-label="Send"><ArrowUp className="h-5 w-5" /></button>
         </div>
       </form>
+      <DetailSheet rec={open?.rec ?? null} autoPlay={open?.play} source="chat" onClose={() => setOpenState(null)} />
     </div>
   );
 }

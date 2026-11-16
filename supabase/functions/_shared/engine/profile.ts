@@ -5,6 +5,7 @@ import type { AnalyzedItem, Category, ConceptVector, FeedbackType, TasteProfile 
 import { CONCEPT_BY_ID } from './concepts.ts';
 import { normKey, projectText, round } from './text.ts';
 import { FAMILIES, familyOf } from './music.ts';
+import { isEntityLane } from './lanes.ts';
 
 export const CAP = 3;
 const LONG_HALF_LIFE_DAYS = 120;
@@ -208,7 +209,8 @@ export function applyFeedback(
   }
   const categories = { ...p.categories, [item.category]: bounded(p.categories[item.category] ?? 0, lr * s * 0.5) };
   const laneId = isMusic ? (item.metadata?.lane as { id?: unknown } | undefined)?.id : undefined;
-  const laneFeedback = typeof laneId === 'string' && LANE_SIGNAL[type] !== undefined
+  // A named artist's lanes are per request ("Eminem"), not a taste lane to learn a bias for.
+  const laneFeedback = typeof laneId === 'string' && !isEntityLane(laneId) && LANE_SIGNAL[type] !== undefined
     ? { ...(p.laneFeedback ?? {}), [laneId]: round(Math.max(-1, Math.min(1, (p.laneFeedback?.[laneId] ?? 0) + LANE_SIGNAL[type]!))) }
     : p.laneFeedback;
 

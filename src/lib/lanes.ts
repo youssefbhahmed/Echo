@@ -44,3 +44,20 @@ export function songsLabel(n: number): string {
 export function laneDomId(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'for-you';
 }
+
+/** The named artist's own lane in an Echo AI answer ("Eminem"), where library songs may appear. */
+export const ENTITY_BY_LANE = 'entity-by';
+
+/** A song in that lane the user already has: tiles and cards say "In your library". */
+export function ownedInEntityLane(item: { metadata?: Record<string, unknown> | null }): boolean {
+  return item.metadata?.inLibrary === true && laneOf(item)?.id === ENTITY_BY_LANE;
+}
+
+/**
+ * An Echo AI answer: music grouped by lane (listening order kept, lanes in order of appearance), then
+ * everything else in its ranked order.
+ */
+export function splitAnswer<T>(list: T[], itemOf: (x: T) => { category: string; metadata?: Record<string, unknown> | null }): { lanes: LaneGroup<T>[]; others: T[] } {
+  const music = list.filter((x) => itemOf(x).category === 'music');
+  return { lanes: groupByLane(music, itemOf), others: list.filter((x) => itemOf(x).category !== 'music') };
+}

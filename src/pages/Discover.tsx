@@ -9,6 +9,7 @@ import { dbToItem, useProfile, useRecent } from '../hooks/data';
 import { Artwork } from '../components/MediaCard';
 import { Tile } from '../components/Tile';
 import { Shelf } from '../components/Shelf';
+import { PlayAll } from '../components/PlayAll';
 import { DetailSheet } from '../components/DetailSheet';
 import { Wordmark } from '../components/Echo';
 import { isQueueable, usePlayQueue } from '../lib/player';
@@ -20,15 +21,6 @@ import { groupByLane, laneDomId, laneOf, songsLabel, type LaneGroup } from '../l
 function greeting() {
   const h = new Date().getHours();
   return h < 5 ? 'Still up' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
-}
-
-/** "Play all" for a shelf or lane: plays its songs in order. */
-function PlayAll({ onClick }: { onClick: () => void }) {
-  return (
-    <button type="button" onClick={onClick} className="inline-flex h-9 items-center gap-1.5 rounded-full bg-bone px-4 text-[13px] font-semibold text-ink transition-transform active:scale-95">
-      <Play className="h-3.5 w-3.5 fill-current" aria-hidden /> Play all
-    </button>
-  );
 }
 
 /** A single-category page needs this many picks before the top one becomes the hero. */
@@ -235,7 +227,7 @@ export default function Discover() {
                     id={`shelf-music-${gi}-${laneDomId(g.key)}`}
                     title={laneTitle(g)}
                     subtitle={laneSubtitle(g)}
-                    action={g.items.some((r) => isQueueable(r.item)) ? <PlayAll onClick={() => playLane(g)} /> : undefined}
+                    action={g.items.some((r) => isQueueable(r.item)) ? <PlayAll label={laneTitle(g)} onClick={() => playLane(g)} /> : undefined}
                   >
                     {g.items.map((r, i) => <Tile key={r.item.id} rec={r} onOpen={setOpen} onWatch={watch} onPlay={() => playLane(g, i)} />)}
                   </Shelf>
@@ -246,7 +238,7 @@ export default function Discover() {
                     id={`shelf-${c}`}
                     title={SHELF_TITLE[c]}
                     subtitle={tunedSubtitle(items.length)}
-                    action={items.some((r) => isQueueable(r.item)) ? <PlayAll onClick={() => player.playQueue(items.map((r) => r.item), 0)} /> : undefined}
+                    action={items.some((r) => isQueueable(r.item)) ? <PlayAll label={SHELF_TITLE[c]} onClick={() => player.playQueue(items.map((r) => r.item), 0)} /> : undefined}
                   >
                     {items.map((r, i) => <Tile key={r.item.id} rec={r} onOpen={setOpen} onWatch={watch} onPlay={() => player.playQueue(items.map((x) => x.item), i)} />)}
                   </Shelf>,
@@ -262,7 +254,7 @@ export default function Discover() {
                     <h2 id={hid} className="font-display text-[22px] leading-tight md:text-[26px]">{laneTitle(g)}</h2>
                     <p className="mt-0.5 text-[13px] text-mist">{laneSubtitle(g)}</p>
                   </div>
-                  {g.items.some((r) => isQueueable(r.item)) && <PlayAll onClick={() => playLane(g)} />}
+                  {g.items.some((r) => isQueueable(r.item)) && <PlayAll label={laneTitle(g)} onClick={() => playLane(g)} />}
                 </div>
                 <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5">
                   {g.items.map((r, i) => <Tile key={r.item.id} rec={r} onOpen={setOpen} onWatch={watch} onPlay={() => playLane(g, i)} className="!w-auto" />)}

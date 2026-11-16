@@ -155,8 +155,10 @@ export interface MusicPick {
   lane?: string;
   /** Feed: the song's own main style in a few words, as the curator sees it (checked against the lane). */
   genre?: string;
-  /** Feed: main language of the lyrics (French/Arabic songs only ever fill their own regional lane). */
+  /** Main language of the lyrics (French/Arabic songs only ever fill their own regional lane, or are dropped when switched off). */
   lang?: string;
+  /** "Artists like X" lane: 3-8 words on what the song shares with X (the curator's words about its own pick). */
+  why?: string;
 }
 
 /** One lane of the listener's taste, described in generic words only (never track/artist names). */
@@ -187,6 +189,13 @@ export interface CuratorRequest {
   regionalMinYear?: number;
   vocals: boolean;
   familiar: boolean;
+  /**
+   * A request naming an artist: 'by' = that artist's own songs (any era, signature songs + deeper cuts);
+   * 'like' = songs by other artists closely related in sound, scene and era.
+   */
+  entity?: { name: string; mode: 'by' | 'like' };
+  /** Lyrics languages the listener switched off ("French", "Arabic or Maghreb") that the request doesn't ask for. */
+  offLanguages?: string[];
 }
 
 export interface CuratorBrief {
@@ -202,10 +211,61 @@ const NEVER_STOCK = 'never novelty, meme, comedy, parody, children\'s, sleep, me
 /** How each song is named: main artist, clean official title, featured artists apart (catalog matching needs the full credit). */
 const CREDIT_RULE = '"artist" is the main credited artist only; "track" is the official song title WITHOUT any "(feat. …)", "(with …)" or version part; "feat" lists the officially credited featured artists ([] when none).';
 
+const LANG_RULE = '"lang" is the main language of the lyrics (e.g. English, French, Arabic, Spanish).';
+
+/** "No French-language songs (the listener switched them off)…" for the languages switched off, '' when none. */
+function offLanguageRule(off: string[] | undefined, unless?: string): string {
+  if (!off?.length) return '';
+  return `No ${off.join(' or ')}-language songs: the listener switched them off${unless ? ` (unless ${unless} is a ${off.join(' or ')}-language artist)` : ''}.`;
+}
+
+/**
+ * Prompts for a request naming an artist (sub-modes of a request): their own songs ('by'), or songs by
+ * closely related artists ('like'). Only the user's text and the artist's name as the user wrote it
+ * (spelling normalised by the interpreter) are sent.
+ */
+export function entityCuratorPrompt(r: CuratorRequest, e: { name: string; mode: 'by' | 'like' }, avoidLine = ''): { system: string; user: string } {
+  const name = e.name;
+  if (e.mode === 'by') {
+    const rules = [
+      `List ${r.count} real, officially released songs by ${name} that are on Spotify: their signature songs and biggest hits plus fan-favourite deeper cuts and album tracks, from any era of their career.`,
+      `${name} is the main credited artist of every song.`,
+      'Original studio versions only: no live, remix, sped-up, slowed, cover, karaoke, instrumental, skit or interlude tracks, and no compilations or "best of" collections.',
+      'Order them for a good first listen: a few signature songs first, then deeper cuts, alternating eras and energy.',
+      'Never invent a title: give fewer songs rather than one you are not sure exists.',
+      CREDIT_RULE,
+      LANG_RULE,
+    ];
+    return {
+      system: `You are ECHO's music curator. Return ONLY JSON: {"items":[{"artist":"<main artist>","track":"<official title>","feat":["<featured artist>"],"lane":"<the song's style, 1-3 words>","lang":"<main language of the lyrics>"}]}.\n${rules.map((x) => `- ${x}`).join('\n')}`,
+      user: `Artist: ${name}\nRequest: ${r.text.slice(0, 500)}`,
+    };
+  }
+  const rules = [
+    `Give ${r.count} real, officially released songs that are on Spotify, by ${r.count} DIFFERENT artists closely related to ${name} in sound, style, scene and era: peers, collaborators, artists ${name} influenced or was influenced by.`,
+    `Never a song by ${name} or featuring ${name}.`,
+    `"why" is 3-8 plain words on what the song shares with ${name} (e.g. "storytelling rap with rapid-fire flow"), never a list of names.`,
+    r.vocals ? 'Songs with vocals, in their original studio version: no live, remix, sped-up, slowed, cover, karaoke or instrumental versions.' : '',
+    r.regionalMinYear ? `French, Arabic or Maghreb songs only from ${r.regionalMinYear} on (modern, never traditional or classic-era recordings).` : '',
+    offLanguageRule(r.offLanguages, name),
+    r.familiar ? 'Familiar like the listener\'s own library: artists well known in that scene and their best-known songs, a couple of bigger hits; never obscure, avant-garde or experimental.' : '',
+    'One song per artist; never an artist or style listed under "avoid".',
+    'Order them for a smooth listening flow.',
+    `${NEVER_STOCK.charAt(0).toUpperCase()}${NEVER_STOCK.slice(1)}.`,
+    CREDIT_RULE,
+    LANG_RULE,
+  ].filter(Boolean);
+  return {
+    system: `You are ECHO's music curator. Return ONLY JSON: {"items":[{"artist":"<main artist>","track":"<official title>","feat":["<featured artist>"],"lane":"<the song's own style, 1-3 words>","lang":"<main language of the lyrics>","why":"<3-8 words: what it shares with ${name}>"}]}.\n${rules.map((x) => `- ${x}`).join('\n')}`,
+    user: `Artist: ${name}\nRequest: ${r.text.slice(0, 500)}${r.background ? `\nListener background: ${r.background.slice(0, 400)}` : ''}${avoidLine}`,
+  };
+}
+
 /** System + user messages for the music curator. Pure: tests check what is (and isn't) sent. */
 export function curatorPrompt(brief: CuratorBrief): { system: string; user: string } {
   const avoid = (brief.avoid ?? []).map((a) => a.trim()).filter(Boolean).slice(0, 20);
   const avoidLine = avoid.length ? `\nAvoid: ${avoid.join(', ').slice(0, 300)}` : '';
+  if (brief.request?.entity) return entityCuratorPrompt(brief.request, brief.request.entity, avoidLine);
   if (brief.request) {
     const r = brief.request;
     const rules = [
@@ -213,13 +273,15 @@ export function curatorPrompt(brief: CuratorBrief): { system: string; user: stri
       r.vocals ? 'Songs with vocals, in their original studio version: no live, remix, sped-up, slowed, cover, karaoke or instrumental versions.' : '',
       r.fromYear ? `Songs first released in or after ${r.fromYear}${r.regionalMinYear ? `; French, Arabic or Maghreb songs only from ${r.regionalMinYear} on (modern, never traditional or classic-era recordings)` : ''}.` : '',
       r.familiar ? 'Familiar like the listener\'s own library: songs well known in their scene, mostly mid-popularity with a couple of bigger hits; never obscure, avant-garde or experimental.' : '',
+      offLanguageRule(r.offLanguages),
       'One song per artist; never an artist or style listed under "avoid".',
       'If the request describes an arc (from one mood to another), list the songs in listening order along it; otherwise order them for a smooth listening flow.',
       `${NEVER_STOCK.charAt(0).toUpperCase()}${NEVER_STOCK.slice(1)}.`,
       CREDIT_RULE,
+      LANG_RULE,
     ].filter(Boolean);
     return {
-      system: `You are ECHO's music curator. Return ONLY JSON: {"items":[{"artist":"<main artist>","track":"<official title>","feat":["<featured artist>"],"lane":"<short style label, e.g. afro house>"}]}.\n${rules.map((x) => `- ${x}`).join('\n')}`,
+      system: `You are ECHO's music curator. Return ONLY JSON: {"items":[{"artist":"<main artist>","track":"<official title>","feat":["<featured artist>"],"lane":"<short style label, e.g. afro house>","lang":"<main language of the lyrics>"}]}.\n${rules.map((x) => `- ${x}`).join('\n')}`,
       user: `Request: ${r.text.slice(0, 500)}${r.themes ? `\nThemes: ${r.themes}` : ''}${r.arc ? `\nArc: ${r.arc}` : ''}${r.background ? `\nListener background: ${r.background.slice(0, 400)}` : ''}${avoidLine}`,
     };
   }
@@ -296,7 +358,8 @@ export async function llmMusicPicks(brief: CuratorBrief, cfg: AiConfig, http: Ht
     // Per-minute token limits are per model: a rate-limited music model hands over to the general one.
     res = await withRateLimitRetry(() => ask(cfg.model));
   }
-  return parseMusicPicks(res.choices?.[0]?.message?.content ?? '{}', total + 6);
+  // An artist's own songs share one artist: one song per TITLE there, one per artist everywhere else.
+  return parseMusicPicks(res.choices?.[0]?.message?.content ?? '{}', total + 6, { perArtist: brief.request?.entity?.mode !== 'by' });
 }
 
 /**
@@ -340,8 +403,17 @@ export function parseFeat(v: unknown, artist: string): string[] {
   return out;
 }
 
-/** Validate the curator's JSON: real-looking artist + track, one song per artist. */
-export function parseMusicPicks(content: string, max = 60): MusicPick[] {
+/** "why" from the curator: a few plain words, no quotes or line breaks; undefined when empty or a ramble. */
+function parseWhy(v: unknown): string | undefined {
+  if (typeof v !== 'string') return undefined;
+  const w = v.replace(/[\u0000-\u001f"“”]/g, ' ').replace(/\s+/g, ' ').trim().replace(/[.!]+$/, '');
+  const words = w.split(' ').filter(Boolean).length;
+  return w && words >= 2 && words <= 12 && w.length <= 80 ? w : undefined;
+}
+
+/** Validate the curator's JSON: real-looking artist + track, one song per artist (per title with perArtist: false). */
+export function parseMusicPicks(content: string, max = 60, opts: { perArtist?: boolean } = {}): MusicPick[] {
+  const perArtist = opts.perArtist !== false;
   const json = { items: curatorItems(content) };
   const str = (v: unknown, n = 120) => (typeof v === 'string' && v.trim().length > 0 && v.length < n ? v.trim() : undefined);
   const seen = new Set<string>();
@@ -351,14 +423,15 @@ export function parseMusicPicks(content: string, max = 60): MusicPick[] {
     const artist = str(x.artist);
     const track = str(x.track);
     if (!artist || !track) continue;
-    const key = artist.toLowerCase();
+    const key = perArtist ? artist.toLowerCase() : `${artist.toLowerCase()}|${track.toLowerCase().replace(/\s*[([].*$/, '').trim()}`;
     if (seen.has(key)) continue;
     seen.add(key);
     const lane = str(x.lane, 60) ?? str(x.style, 60);
     const genre = str(x.genre, 60);
     const lang = str(x.lang, 40) ?? str(x.language, 40);
     const feat = parseFeat(x.feat ?? x.featuring, artist);
-    out.push({ artist, track, ...(feat.length ? { feat } : {}), ...(lane ? { lane: lane.toLowerCase() } : {}), ...(genre ? { genre } : {}), ...(lang ? { lang } : {}) });
+    const why = parseWhy(x.why);
+    out.push({ artist, track, ...(feat.length ? { feat } : {}), ...(lane ? { lane: lane.toLowerCase() } : {}), ...(genre ? { genre } : {}), ...(lang ? { lang } : {}), ...(why ? { why } : {}) });
     if (out.length >= max) break;
   }
   return out;

@@ -36,7 +36,7 @@ serve(async (req) => {
   const result = await runPipeline(
     { query: body.query, categories: body.categories, moods: body.moods, exploration: body.exploration, limit: body.limit ?? 12, intentHint: body.intentHint, mix: body.mix },
     {
-      env, http, profile, excludeIds: exclude, reshowable, library, evidence, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup, collaborative: collaborativeFn(db), embed: embedder(),
+      env, http, profile, excludeIds: exclude, shownIds: new Set([...(body.exclude ?? []), ...recent.shown]), reshowable, library, evidence, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup, collaborative: collaborativeFn(db), embed: embedder(),
       // The feed's own clock (when it was first served) keeps lane fill and explanations identical on a re-fetch.
       storedEmbeddings, catalogFallback: catalogFallbackFn(userId, { asOf }), seed, now: new Date(asOf),
     },

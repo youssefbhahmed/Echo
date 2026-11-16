@@ -3,9 +3,9 @@ import type { AnalyzedItem, Category, ConceptVector, Explanation, Intent, Recomm
 import { conceptPhrase, CONCEPT_BY_ID } from './concepts.ts';
 import { creatorKeys, genreKeys } from './profile.ts';
 import { familyOf, inBlockedFamily } from './music.ts';
-import { laneTagOf, laneTargets, MIX_LANE, REQUEST_LANE, yearOf } from './lanes.ts';
+import { ENTITY_BY_LANE, ENTITY_LIKE_LANE, entityTagOf, isEntityExtra, laneTagOf, laneTargets, MIX_LANE, REQUEST_LANE, yearOf } from './lanes.ts';
 import { itemWorld } from './worlds.ts';
-import { contentTokens, cosine, denseCosine, negativePart, normalize, normKey, positivePart, round } from './text.ts';
+import { contentTokens, cosine, denseCosine, negativePart, normalize, normKey, positivePart, round, songKey } from './text.ts';
 
 export interface EvidenceItem {
   id: string;
@@ -43,6 +43,11 @@ export interface RankContext {
   now?: Date;
   /** Music lanes of this response: shelf order and songs per lane (items carry metadata.lane). */
   musicLanes?: LanePlan;
+  /**
+   * A request naming an entity: its music lanes come first, then up to `cap` items around it in other
+   * media (metadata.entity, in metadata.entityOrder), then everything else by score.
+   */
+  entityBlock?: { cap: number };
 }
 
 export interface LanePlan {
@@ -387,12 +392,53 @@ export function laneExplanation(item: AnalyzedItem, now = new Date()): Explanati
   return out;
 }
 
+const capFirst = (x: string) => (x ? `${x.charAt(0).toUpperCase()}${x.slice(1)}` : x);
+
+/**
+ * Reasons for an item answering a named entity: "<Artist> — not in your library yet" / "In your library"
+ * for their songs, "Like <Artist>: <the curator's short why>" for related songs, and "<title> — <how it
+ * relates>" for works and things about them. null for any other item.
+ */
+export function entityExplanation(item: AnalyzedItem): Explanation['reasons'] | null {
+  const tag = entityTagOf(item);
+  if (!tag) return null;
+  const lane = item.category === 'music' ? laneTagOf(item)?.id : undefined;
+  const y = yearOf(item.releaseDate);
+  if (lane === ENTITY_BY_LANE) {
+    const owned = item.metadata?.inLibrary === true;
+    return [
+      { kind: 'reference', detail: owned ? `${tag.name} — in your library` : `${tag.name} — not in your library yet` },
+      ...(y ? [{ kind: 'context' as const, detail: `Released ${y}` }] : []),
+    ];
+  }
+  if (lane === ENTITY_LIKE_LANE || (item.category === 'music' && tag.role === 'like')) {
+    return [
+      { kind: 'reference', detail: `Like ${tag.name}: ${tag.note ?? 'same scene and era, picked by ECHO\'s AI curator and verified on Spotify'}` },
+      ...(y ? [{ kind: 'context' as const, detail: `Released ${y}` }] : []),
+    ];
+  }
+  const note = tag.note ?? (tag.role === 'about' ? `about ${tag.name}` : tag.role === 'by' ? `by ${tag.name}` : `like ${tag.name}`);
+  const reasons: Explanation['reasons'] = [{ kind: 'reference', detail: tag.role === 'like' ? capFirst(note) : `${item.title} — ${note}` }];
+  if (item.rating !== undefined && item.rating >= 0.72) {
+    const src = item.provider === 'tmdb' ? 'TMDB' : item.provider === 'tvmaze' ? 'TVmaze' : item.provider === 'openlibrary' ? 'Open Library readers' : item.provider;
+    const scale = item.provider === 'openlibrary' ? `${round(item.rating * 5, 1)}/5` : `${round(item.rating * 10, 1)}/10`;
+    reasons.push({ kind: 'quality', detail: `Rated ${scale} by ${src}` });
+  }
+  return reasons;
+}
+
 /**
  * Build a grounded explanation. Every clause is derived from (a) concepts found
  * in the item's own provider metadata, (b) the parsed request, or (c) the
  * user's recorded profile/feedback. Nothing is invented.
  */
 export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHits?: string[] }, intent: Intent, profile: TasteProfile, view: ProfileView, ctx: RankContext, trajectoryStep?: number, total?: number): Explanation {
+  // Answers to a named entity say how they relate to it, never "because you liked <some other song>".
+  const entityReasons = entityExplanation(item);
+  if (entityReasons) {
+    const text = `${entityReasons.slice(0, 2).map((r) => r.detail).join('. ')}.`;
+    return { text, reasons: entityReasons, matchedConcepts: [] };
+  }
   const reasons: Explanation['reasons'] = [];
   // Claims about an item's qualities only use concepts found in its OWN metadata (not ones inherited from the search query).
   const inherited = new Set(Array.isArray(item.metadata?.inheritedConcepts) ? (item.metadata!.inheritedConcepts as string[]) : []);
@@ -515,8 +561,9 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
     seen.add(item.id);
     if (ctx.excludeIds?.has(item.id) || ctx.referenceIds?.has(item.id)) continue;
     if (intent.providers?.length && !intent.providers.includes(item.provider) && intent.categories.includes(item.category)) continue;
-    // Music videos belong to the music side; the Videos feed doesn't fill up with songs unless asked.
-    if (item.category === 'youtube' && item.genres.includes('Music') && !(ctx.hasQuery && intent.keywords.some((k) => /music|song|concert|album|clip/.test(k)))) continue;
+    // Music videos belong to the music side; the Videos feed doesn't fill up with songs unless asked
+    // (a video about an artist the user named, an interview filed under "Music", is what they asked for).
+    if (item.category === 'youtube' && item.genres.includes('Music') && !isEntityExtra(item) && !(ctx.hasQuery && intent.keywords.some((k) => /music|song|concert|album|clip/.test(k)))) continue;
     scored.push({ item, score: scoreItem(item, intent, profile, views[domainOf(item.category)], ctx) });
   }
   scored.sort((a, b) => b.score.total - a.score.total);
@@ -537,7 +584,14 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
     rest = scored.filter((s) => !laneOf(s) && !(s.item.category === 'music' && creatorKeys(s.item).some((k) => blockArtists.has(k))));
     if (quotas) quotas.set('music', Math.max(0, (quotas.get('music') ?? 0) - block.length));
   }
-  let restPicked: Array<Scored & { trajectoryStep?: number }> = diversify(rest, Math.max(0, limit - block.length), ctx.exploration, cats.size > 1, {
+  // Items around a named entity (its works, things about it): in their own order, after its music lanes.
+  let extras: Scored[] = [];
+  if (ctx.entityBlock) {
+    const order = (s: Scored) => (typeof s.item.metadata?.entityOrder === 'number' ? (s.item.metadata.entityOrder as number) : 1e6);
+    extras = rest.filter((s) => isEntityExtra(s.item) && s.score.penalty < 1).sort((a, b) => order(a) - order(b)).slice(0, Math.max(0, Math.min(ctx.entityBlock.cap, limit - block.length)));
+    rest = rest.filter((s) => !isEntityExtra(s.item));
+  }
+  let restPicked: Array<Scored & { trajectoryStep?: number }> = diversify(rest, Math.max(0, limit - block.length - extras.length), ctx.exploration, cats.size > 1, {
     quotas,
     // Big feeds can take a few more from one search (each search is a different theme).
     perQuery: intent.trajectory ? 4 : limit > 20 ? 3 : 2,
@@ -546,7 +600,8 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
   });
   if (intent.trajectory) restPicked = sequenceTrajectory(restPicked, intent.trajectory.from, intent.trajectory.to);
   let picked: Array<Scored & { trajectoryStep?: number }> = restPicked;
-  if (block.length) {
+  if (ctx.entityBlock) picked = [...block, ...extras, ...restPicked];
+  else if (block.length) {
     // The lane block sits where its best song would rank among the rest.
     const best = Math.max(...block.map((b) => b.score.total));
     const at = intent.trajectory ? 0 : restPicked.findIndex((p) => p.score.total < best);
@@ -588,12 +643,20 @@ export function assembleLaneBlock<T extends { item: AnalyzedItem; score: ScoreBr
   const out: T[] = [];
   for (const id of plan.order) {
     const want = plan.targets[id] ?? 0;
-    const lane = items.filter((x) => laneTagOf(x.item)?.id === id && x.score.penalty < 0.5).sort((a, b) => aiOrderOf(a.item) - aiOrderOf(b.item) || b.score.total - a.score.total);
+    // A named artist's own lane is all theirs: one song per recording instead of one per artist, and
+    // no style/taste penalty (the user asked for this artist by name).
+    const own = id === ENTITY_BY_LANE;
+    const lane = items.filter((x) => laneTagOf(x.item)?.id === id && (own || x.score.penalty < 0.5)).sort((a, b) => aiOrderOf(a.item) - aiOrderOf(b.item) || b.score.total - a.score.total);
+    const songs = new Set<string>();
     let n = 0;
     for (const x of lane) {
       if (n >= want || out.length >= limit) break;
       const ck = creatorKeys(x.item);
-      if (ck.some((k) => used.has(k))) continue;
+      if (own) {
+        const song = songKey(x.item.creators[0] ?? '', x.item.title) || x.item.id;
+        if (songs.has(song)) continue;
+        songs.add(song);
+      } else if (ck.some((k) => used.has(k))) continue;
       ck.forEach((k) => used.add(k));
       out.push(x);
       n++;

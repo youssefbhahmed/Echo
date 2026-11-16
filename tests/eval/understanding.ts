@@ -40,6 +40,12 @@ const CASES: Case[] = [
   { q: 'long YouTube documentaries about the Ottoman empire', expect: (i) => (only(i, 'youtube') && i.duration === 'long' && (i.target.history ?? 0) > 0 ? null : 'youtube long history') },
   { q: 'music for running', expect: (i) => (only(i, 'music') && ((i.target.energetic ?? 0) > 0 || i.energy === 'high') ? null : 'energetic music') },
   { q: 'hmm', expect: (i) => (i.vague ? null : 'vague') },
+  // Named entities (kind + what the user wants of them)
+  { q: 'eminem', expect: (i) => (i.entities?.[0]?.kind === 'artist' && i.entities[0].want === 'all' && (i.entities[0].works ?? []).some((w) => /8 mile/i.test(w.title)) ? null : 'artist, all, works incl. 8 Mile') },
+  { q: 'songs like kendrick lamar', expect: (i) => (i.entities?.[0]?.kind === 'artist' && i.entities[0].want === 'like' && only(i, 'music') ? null : 'artist, like, music') },
+  { q: 'eminem documentary', expect: (i) => (i.entities?.[0]?.want === 'about' && !has(i, 'music') ? null : 'artist, about, no music') },
+  { q: 'books by ursula le guin', expect: (i) => (i.entities?.[0]?.kind === 'author' && i.entities[0].want === 'by' && only(i, 'books') ? null : 'author, by, books') },
+  { q: 'dune', expect: (i) => (['film', 'book', 'series', 'other'].includes(i.entities?.[0]?.kind ?? '') && i.entities?.[0]?.want === 'all' ? null : 'work, all') },
 ];
 
 const ai = aiConfig((n) => Deno.env.get(n));
