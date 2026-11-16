@@ -63,6 +63,8 @@ export interface SpotifyPlayerState {
   isPlaying: boolean;
   progressMs: number;
   durationMs: number;
+  /** Spotify's shuffle setting (absent from older function versions). */
+  shuffle?: boolean;
   device: { id: string; name: string; type: string } | null;
   track: { uri: string; id: string; name: string; artists: string[]; artworkUrl: string | null } | null;
 }
@@ -96,6 +98,6 @@ export const api = {
   spotifyPlaylist: (name: string, itemIds: string[]) => call<{ playlistUrl: string; added: number }>('spotify', { action: 'create-playlist', name, itemIds }),
   spotifyPlayerState: () => call<SpotifyPlayerState>('spotify', { action: 'player-state' }),
   spotifyDevices: () => call<{ devices: SpotifyDevice[] }>('spotify', { action: 'devices' }),
-  spotifyPlay: (body: { uris: string[]; offset: number; deviceId?: string }) => call<{ ok: true; device: SpotifyPlayerState['device'] }>('spotify', { action: 'play', ...body }),
+  spotifyPlay: (body: { uris: string[]; offset: number; deviceId?: string; shuffle?: boolean }) => call<{ ok: true; device: SpotifyPlayerState['device'] }>('spotify', { action: 'play', ...body }),
   spotifyControl: (action: SpotifyControl) => call<{ ok: true }>('spotify', { action }),
 };

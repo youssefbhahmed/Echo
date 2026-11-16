@@ -22,6 +22,8 @@ interface Props {
   featured?: boolean;
   /** Start the player immediately (one tap from a tile). */
   autoPlay?: boolean;
+  /** Spotify mode: a song started in ECHO's player bar (the detail sheet closes so the bar and its prompts show). */
+  onPlayStarted?: () => void;
 }
 
 /** Hero artwork width by shape: posters stay narrow, squares medium, videos wide. */
@@ -96,7 +98,7 @@ function MenuItem({ icon: Icon, children, onClick, href }: { icon: React.Compone
   );
 }
 
-export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard({ item, explanation, score, trajectoryStep, source = 'feed', onDismiss, featured, autoPlay }, ref) {
+export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard({ item, explanation, score, trajectoryStep, source = 'feed', onDismiss, featured, autoPlay, onPlayStarted }, ref) {
   const lib = useLibraryMap().get(item.id);
   const feedback = useFeedback();
   const player = usePlayQueue();
@@ -110,6 +112,11 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
   const meta = CATEGORY_META[item.category];
   const playable = !!item.embed;
   const canTrailer = item.provider === 'tmdb';
+  // Full songs (Spotify Premium connected) play in the user's Spotify app through ECHO's player bar.
+  const remoteSong = playable && player.mode === 'spotify' && isQueueable(item);
+  const isCurrent = remoteSong && player.currentId === item.id;
+  const remotePlaying = isCurrent && player.playing;
+  const showPause = playing || remotePlaying;
   const send = (type: Parameters<typeof feedback.mutate>[0]['type'], rating?: number) => feedback.mutate({ item, type, rating, source });
 
   useEffect(() => {
@@ -132,8 +139,13 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
   }, [feedback, item, source]);
 
   const togglePlay = async () => {
-    // Full songs (Spotify Premium connected): play in the user's Spotify app through ECHO's player bar.
-    if (playable && player.mode === 'spotify' && isQueueable(item)) return player.playQueue([item], 0);
+    if (remoteSong) {
+      // The song in the bar: pause or resume it (never restart it, never replace its lane queue).
+      if (isCurrent) return player.togglePlay();
+      player.playItem(item);
+      onPlayStarted?.();
+      return;
+    }
     if (playable) return setPlaying((p) => !p);
     if (!canTrailer) return;
     if (trailer !== undefined) return setPlaying((p) => !p && !!trailer);
@@ -174,10 +186,10 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
             <button
               type="button"
               onClick={togglePlay}
-              aria-label={playing ? `Close player for ${item.title}` : playable ? `Play ${item.title}` : `Watch the trailer of ${item.title}`}
+              aria-label={playing ? `Close player for ${item.title}` : remotePlaying ? `Pause ${item.title}` : playable ? `Play ${item.title}` : `Watch the trailer of ${item.title}`}
               className="absolute right-2 bottom-2 grid h-11 w-11 place-items-center rounded-full bg-bone text-ink shadow-[0_8px_24px_-6px_rgba(0,0,0,0.6)] transition-transform duration-150 hover:scale-105 active:scale-95"
             >
-              {playing ? <Pause className="h-[18px] w-[18px] fill-current" /> : canTrailer && !playable ? <Film className="h-[18px] w-[18px]" /> : <Play className="ml-0.5 h-[18px] w-[18px] fill-current" />}
+              {showPause ? <Pause className="h-[18px] w-[18px] fill-current" /> : canTrailer && !playable ? <Film className="h-[18px] w-[18px]" /> : <Play className="ml-0.5 h-[18px] w-[18px] fill-current" />}
             </button>
           )}
         </div>
@@ -251,8 +263,8 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
         {featured && (
           playable || canTrailer ? (
             <button type="button" onClick={togglePlay} className="mr-1.5 inline-flex h-11 shrink-0 items-center gap-2 rounded-full bg-bone px-4 text-sm font-semibold text-ink shadow-[0_10px_30px_-12px_rgba(239,232,220,0.5)] transition-transform active:scale-95">
-              {playing ? <Pause className="h-4 w-4 fill-current" aria-hidden /> : canTrailer && !playable ? <Film className="h-4 w-4" aria-hidden /> : <Play className="h-4 w-4 fill-current" aria-hidden />}
-              {playing ? 'Close player' : canTrailer && !playable ? 'Watch trailer' : 'Play'}
+              {showPause ? <Pause className="h-4 w-4 fill-current" aria-hidden /> : canTrailer && !playable ? <Film className="h-4 w-4" aria-hidden /> : <Play className="h-4 w-4 fill-current" aria-hidden />}
+              {playing ? 'Close player' : remotePlaying ? 'Pause' : canTrailer && !playable ? 'Watch trailer' : 'Play'}
             </button>
           ) : (
             <a href={item.externalUrl} target="_blank" rel="noreferrer" onClick={() => send('open')} className="mr-1.5 inline-flex h-11 shrink-0 items-center gap-2 rounded-full bg-bone px-4 text-sm font-semibold text-ink transition-transform active:scale-95">

@@ -46,11 +46,19 @@ export function canPlayFrom(s: { connected: boolean; scope?: string | null; canP
 /** Moving on within this long after a song starts counts as a skip. */
 export const SKIP_WINDOW_MS = 30_000;
 
+/**
+ * How long "quick" lasts for a song of `durationMs`: 30 s, but never more than half of it, so moving on near the end
+ * of a 30-second preview (the embed without a Spotify sign-in) is not a skip.
+ */
+export function skipWindowMs(durationMs?: number | null): number {
+  return typeof durationMs === 'number' && durationMs > 0 ? Math.min(SKIP_WINDOW_MS, durationMs / 2) : SKIP_WINDOW_MS;
+}
+
 /** True when leaving a song now is a quick skip. `progressMs` (the real position) wins over wall-clock time. */
-export function isQuickSkip(startedAt: number | undefined, now: number, progressMs?: number | null): boolean {
+export function isQuickSkip(startedAt: number | undefined, now: number, progressMs?: number | null, durationMs?: number | null): boolean {
   if (startedAt === undefined) return false;
   const elapsed = typeof progressMs === 'number' && progressMs >= 0 ? progressMs : now - startedAt;
-  return elapsed < SKIP_WINDOW_MS;
+  return elapsed < skipWindowMs(durationMs);
 }
 
 /**
@@ -76,10 +84,10 @@ export class ListenTracker<T extends { id: string }> {
   }
 
   /** The user moved on from the playing item. Returns it when a 'skip' should be recorded (once per item). */
-  left(now: number, progressMs?: number | null): T | null {
+  left(now: number, progressMs?: number | null, durationMs?: number | null): T | null {
     const cur = this.now;
     this.now = null;
-    if (!cur || this.skipped.has(cur.item.id) || !isQuickSkip(cur.at, now, progressMs)) return null;
+    if (!cur || this.skipped.has(cur.item.id) || !isQuickSkip(cur.at, now, progressMs, durationMs)) return null;
     this.skipped.add(cur.item.id);
     return cur.item;
   }
@@ -108,6 +116,32 @@ export function classifyPlayerError(code: string | undefined, status?: number): 
     default:
       return status === 0 ? 'network' : 'other';
   }
+}
+
+/** Same songs in the same order (a shelf tapped again while it is the queue). */
+export function sameQueue(a: ReadonlyArray<{ id: string }>, b: ReadonlyArray<{ id: string }>): boolean {
+  return a.length === b.length && a.every((x, i) => x.id === b[i].id);
+}
+
+/** Player-state polling: often while music plays or a tap awaits confirmation, rarely when paused or idle, then not at all. */
+export const POLL_MS = 4000;
+export const IDLE_POLL_MS = 20_000;
+export const MAX_IDLE_POLLS = 6;
+
+/**
+ * Milliseconds until the next player-state poll, or null to stop (a tap or coming back to the app starts it again).
+ * Spotify's rate limit is shared by the whole app, so an open but idle ECHO must not keep spending it.
+ *  - a command awaits confirmation → POLL_MS
+ *  - playing → POLL_MS, or just after the song should end when that is sooner (to pick up the next song)
+ *  - paused / nothing playing → IDLE_POLL_MS, and stop after MAX_IDLE_POLLS such polls in a row
+ */
+export function nextPollDelay(s: { isPlaying: boolean; progressMs: number; durationMs: number } | null | undefined, idlePolls: number, pending = false): number | null {
+  if (pending) return POLL_MS;
+  if (s?.isPlaying) {
+    const untilEnd = s.durationMs > 0 ? s.durationMs - s.progressMs + 1000 : POLL_MS;
+    return Math.max(1000, Math.min(POLL_MS, untilEnd));
+  }
+  return idlePolls >= MAX_IDLE_POLLS ? null : IDLE_POLL_MS;
 }
 
 /** Current position, advancing locally between polls while playing. */

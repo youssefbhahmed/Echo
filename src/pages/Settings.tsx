@@ -239,13 +239,13 @@ export default function SettingsPage() {
                   </ul>
                   <div className="flex flex-wrap items-center gap-3">
                     {!spotify.canPlay && (
-                      <button type="button" onClick={() => connectSpotify('/settings')} className="inline-flex min-h-10 items-center rounded-full bg-tide px-4 text-xs font-semibold text-ink">Reconnect Spotify</button>
+                      <button type="button" onClick={() => connectSpotify('/settings')} className="inline-flex min-h-11 items-center rounded-full bg-tide px-4 text-xs font-semibold text-ink">Reconnect Spotify</button>
                     )}
-                    <button type="button" onClick={() => api.spotifyDisconnect().then(() => spotify.refetch(), (e: Error) => toast(e.message, 'error'))} className="min-h-10 text-xs text-dim hover:text-danger">Disconnect</button>
+                    <button type="button" onClick={() => api.spotifyDisconnect().then(() => spotify.refetch(), (e: Error) => toast(e.message, 'error'))} className="min-h-11 text-xs text-dim hover:text-danger">Disconnect</button>
                   </div>
                 </div>
               ) : (
-                <button type="button" onClick={() => connectSpotify('/settings')} className="mt-2 inline-flex min-h-10 items-center rounded-full bg-tide px-4 text-xs font-semibold text-ink">Connect Spotify</button>
+                <button type="button" onClick={() => connectSpotify('/settings')} className="mt-2 inline-flex min-h-11 items-center rounded-full bg-tide px-4 text-xs font-semibold text-ink">Connect Spotify</button>
               )}
             </div>
           </div>

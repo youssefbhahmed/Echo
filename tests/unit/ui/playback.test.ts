@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canPlayFrom, classifyPlayerError, formatClock, isQuickSkip, ListenTracker, livePosition, openInSpotifyUrl, queueWindow, SKIP_WINDOW_MS, spotifyUri } from '../../../src/lib/playback';
+import { canPlayFrom, classifyPlayerError, formatClock, IDLE_POLL_MS, isQuickSkip, ListenTracker, livePosition, MAX_IDLE_POLLS, nextPollDelay, openInSpotifyUrl, POLL_MS, queueWindow, sameQueue, SKIP_WINDOW_MS, skipWindowMs, spotifyUri } from '../../../src/lib/playback';
 
 // Synthetic 22-character Spotify ids.
 const sid = (n: number) => `T${String(n).padStart(21, '0')}`;
@@ -64,6 +64,26 @@ describe('skip within 30 seconds', () => {
     expect(isQuickSkip(0, 5_000, 45_000)).toBe(false);
   });
 
+  it('never counts the end of a 30-second preview as a skip', () => {
+    expect(skipWindowMs(undefined)).toBe(SKIP_WINDOW_MS);
+    expect(skipWindowMs(200_000)).toBe(SKIP_WINDOW_MS);
+    expect(skipWindowMs(30_000)).toBe(15_000);
+    // Next at 0:29 of a 30 s preview: listened almost entirely.
+    expect(isQuickSkip(0, 29_000, 29_000, 30_000)).toBe(false);
+    // Next at 0:08 of a preview: a real skip.
+    expect(isQuickSkip(0, 8_000, 8_000, 30_000)).toBe(true);
+    // Full songs keep the 30 s window.
+    expect(isQuickSkip(0, 29_000, 29_000, 200_000)).toBe(true);
+  });
+
+  it('passes the duration through the tracker', () => {
+    const t = new ListenTracker<{ id: string }>();
+    t.started({ id: 'p' }, 0);
+    expect(t.left(29_000, 29_000, 30_000)).toBeNull();
+    t.started({ id: 'q' }, 30_000);
+    expect(t.left(35_000, 5_000, 30_000)?.id).toBe('q');
+  });
+
   it('records one play per item and one skip per item', () => {
     const t = new ListenTracker<{ id: string }>();
     const a = { id: 'a' };
@@ -125,5 +145,36 @@ describe('position', () => {
     expect(livePosition({ isPlaying: false, progressMs: 1000, durationMs: 200_000, at: 0 }, 4000)).toBe(1000);
     expect(livePosition({ isPlaying: true, progressMs: 199_000, durationMs: 200_000, at: 0 }, 9000)).toBe(200_000);
     expect(formatClock(83_500)).toBe('1:23');
+  });
+});
+
+describe('sameQueue', () => {
+  it('compares ids in order', () => {
+    expect(sameQueue([{ id: 'a' }, { id: 'b' }], [{ id: 'a' }, { id: 'b' }])).toBe(true);
+    expect(sameQueue([{ id: 'a' }, { id: 'b' }], [{ id: 'b' }, { id: 'a' }])).toBe(false);
+    expect(sameQueue([{ id: 'a' }], [{ id: 'a' }, { id: 'b' }])).toBe(false);
+    expect(sameQueue([], [])).toBe(true);
+  });
+});
+
+describe('nextPollDelay', () => {
+  const playing = { isPlaying: true, progressMs: 10_000, durationMs: 200_000 };
+  const paused = { isPlaying: false, progressMs: 10_000, durationMs: 200_000 };
+
+  it('polls often while a tap awaits confirmation or music plays', () => {
+    expect(nextPollDelay(paused, 3, true)).toBe(POLL_MS);
+    expect(nextPollDelay(playing, 0)).toBe(POLL_MS);
+  });
+
+  it('checks right after the song should end when that is sooner', () => {
+    expect(nextPollDelay({ isPlaying: true, progressMs: 198_500, durationMs: 200_000 }, 0)).toBe(2500);
+    expect(nextPollDelay({ isPlaying: true, progressMs: 200_000, durationMs: 200_000 }, 0)).toBe(1000);
+  });
+
+  it('slows down when paused or idle, then stops', () => {
+    expect(nextPollDelay(paused, 1)).toBe(IDLE_POLL_MS);
+    expect(nextPollDelay(null, 1)).toBe(IDLE_POLL_MS);
+    expect(nextPollDelay(paused, MAX_IDLE_POLLS)).toBeNull();
+    expect(IDLE_POLL_MS).toBeGreaterThanOrEqual(15_000);
   });
 });

@@ -119,11 +119,14 @@ export function useFeedback() {
     mutationFn: (v: { item: AnalyzedItem; type: FeedbackType; rating?: number; source?: 'feed' | 'chat' | 'library'; silent?: boolean }) =>
       api.feedback({ itemId: v.item.id, type: v.type, rating: v.rating, context: { source: v.source } }),
     onMutate: async (v) => {
-      await qc.cancelQueries({ queryKey: ['library'] });
-      const prev = qc.getQueryData<LibraryRow[]>(['library']);
       const patch: Partial<LibraryRow> | null =
         v.type === 'like' ? { liked: true } : v.type === 'unlike' ? { liked: null } : v.type === 'dislike' ? { liked: false, saved: false } : v.type === 'save' ? { saved: true } : v.type === 'unsave' ? { saved: false } : v.type === 'rate' ? { rating: v.rating ?? null } : v.type === 'consumed' ? { status: 'consumed' } : null;
-      if (patch && prev) {
+      // Nothing to show optimistically (play, skip, open…): leave an in-flight library refetch alone (e.g. the
+      // focus refetch that runs while the player records a 'play' on return to the app).
+      if (!patch) return { prev: undefined };
+      await qc.cancelQueries({ queryKey: ['library'] });
+      const prev = qc.getQueryData<LibraryRow[]>(['library']);
+      if (prev) {
         const exists = prev.some((r) => r.item_id === v.item.id);
         qc.setQueryData<LibraryRow[]>(['library'], exists ? prev.map((r) => (r.item_id === v.item.id ? { ...r, ...patch } : r)) : prev);
       }

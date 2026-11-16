@@ -46,8 +46,13 @@ const song = (n: number): AnalyzedItem => {
 const songs = [song(1), song(2), song(3)];
 
 function Harness() {
-  const { playQueue } = usePlayQueue();
-  return <button type="button" onClick={() => playQueue(songs, 0)}>start</button>;
+  const { playQueue, playItem } = usePlayQueue();
+  return (
+    <>
+      <button type="button" onClick={() => playQueue(songs, 0)}>start</button>
+      <button type="button" onClick={() => playItem(songs[1])}>pick-2</button>
+    </>
+  );
 }
 
 function mount() {
@@ -166,5 +171,132 @@ describe('player modes', () => {
     expect(h.api.spotifyStatus).not.toHaveBeenCalled();
     expect(screen.getByTitle('Now playing: Song 1')).toBeInTheDocument();
     expect(screen.queryByText(/Connect Spotify/)).toBeNull();
+  });
+});
+
+const uris = songs.map((s) => (s.embed as { uri: string }).uri);
+const state = (over: Record<string, unknown> = {}) => ({ isPlaying: true, progressMs: 2000, durationMs: 200_000, device: { id: 'd1', name: 'My phone', type: 'Smartphone' }, track: { uri: uris[0], id: 'x', name: 'Song 1', artists: ['Artist 1'], artworkUrl: null }, ...over });
+
+async function started() {
+  mount();
+  await flush(10);
+  fireEvent.click(screen.getByText('start'));
+  await flush(10);
+}
+
+describe('failed taps', () => {
+  it('rate limited: the bar stops showing a playing song, says so, and waits out Retry-After', async () => {
+    h.api.spotifyPlay.mockRejectedValueOnce(new h.ApiError(429, 'Spotify is busy right now. Try again in a moment.', 'rate_limited', 30));
+    await started();
+    expect(screen.getByRole('button', { name: 'Play' })).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: 'Pause' })).toBeNull();
+    expect(screen.getByText('Spotify is busy right now. Try again in a moment.')).toBeInTheDocument();
+    await flush(20_000);
+    expect(h.api.spotifyPlayerState).not.toHaveBeenCalled();
+  });
+
+  it('restricted: tells the user instead of silently doing nothing', async () => {
+    h.api.spotifyPlay.mockRejectedValueOnce(new h.ApiError(409, 'Spotify did not allow that right now.', 'restricted'));
+    await started();
+    expect(screen.getByText('Spotify can’t play on that device right now.')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Play' })).toBeInTheDocument();
+  });
+
+  it('a failed pause shows the song as still playing', async () => {
+    await started();
+    await flush(1600);
+    h.api.spotifyControl.mockRejectedValueOnce(new h.ApiError(429, 'Spotify is busy right now. Try again in a moment.', 'rate_limited', 5));
+    fireEvent.click(screen.getByRole('button', { name: 'Pause' }));
+    await flush(10);
+    expect(h.api.spotifyControl).toHaveBeenCalledWith('pause');
+    expect(screen.getByRole('button', { name: 'Pause' })).toBeInTheDocument();
+    expect(screen.getByText('Spotify is busy right now. Try again in a moment.')).toBeInTheDocument();
+  });
+});
+
+describe('the queue that is already playing', () => {
+  it('tapping the playing song again neither restarts it nor replaces its lane', async () => {
+    await started();
+    await flush(1600);
+    fireEvent.click(screen.getByText('start'));
+    await flush(10);
+    expect(h.api.spotifyPlay).toHaveBeenCalledTimes(1);
+    // A song already in the queue is jumped to, keeping the whole lane queued.
+    fireEvent.click(screen.getByText('pick-2'));
+    await flush(10);
+    expect(h.api.spotifyPlay).toHaveBeenCalledTimes(2);
+    expect(h.api.spotifyPlay).toHaveBeenLastCalledWith({ uris, offset: 1 });
+  });
+
+  it('with Spotify’s shuffle on, Next replays the lane in ECHO’s order instead of a random song', async () => {
+    h.api.spotifyPlayerState.mockImplementation(async () => state({ shuffle: true }));
+    await started();
+    await flush(1600);
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await flush(10);
+    expect(h.api.spotifyControl).not.toHaveBeenCalledWith('next');
+    expect(h.api.spotifyPlay).toHaveBeenLastCalledWith({ uris, offset: 1 });
+  });
+
+  it('tells the function when shuffle is known to be off (no extra Spotify call)', async () => {
+    h.api.spotifyPlayerState.mockImplementation(async () => state({ shuffle: false }));
+    await started();
+    await flush(1600);
+    fireEvent.click(screen.getByText('pick-2'));
+    await flush(10);
+    expect(h.api.spotifyPlay).toHaveBeenLastCalledWith({ uris, offset: 1, shuffle: false });
+  });
+});
+
+describe('polling', () => {
+  it('slows down when nothing plays and then stops, instead of every 4 s forever', async () => {
+    h.api.spotifyPlayerState.mockImplementation(async () => state({ isPlaying: false }));
+    await started();
+    await flush(12 * 60_000);
+    const calls = h.api.spotifyPlayerState.mock.calls.length;
+    expect(calls).toBeGreaterThan(0);
+    expect(calls).toBeLessThanOrEqual(10); // 4 s polling would be 180
+    await flush(10 * 60_000);
+    expect(h.api.spotifyPlayerState).toHaveBeenCalledTimes(calls);
+    // Coming back to the app checks again.
+    await act(async () => {
+      document.dispatchEvent(new Event('visibilitychange'));
+    });
+    await flush(10);
+    expect(h.api.spotifyPlayerState).toHaveBeenCalledTimes(calls + 1);
+  });
+});
+
+describe('reconnect', () => {
+  const permission = 'Full songs need one more Spotify permission';
+
+  it('one failed background check is confirmed before full songs end', async () => {
+    h.api.spotifyPlayerState.mockRejectedValueOnce(new h.ApiError(409, 'Reconnect Spotify to keep playing full songs.', 'reconnect'));
+    await started();
+    await flush(1600);
+    await flush(1600);
+    expect(h.api.spotifyPlayerState).toHaveBeenCalledTimes(2);
+    expect(screen.queryByText(permission)).toBeNull();
+    expect(screen.getByText('on My phone')).toBeInTheDocument();
+  });
+
+  it('a confirmed reconnect shows the banner', async () => {
+    h.api.spotifyPlayerState.mockRejectedValue(new h.ApiError(409, 'Reconnect Spotify to keep playing full songs.', 'reconnect'));
+    await started();
+    await flush(1600);
+    await flush(1600);
+    await flush(10);
+    expect(screen.getByText(permission)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Reconnect' })).toBeInTheDocument();
+  });
+
+  it('a fresh status showing a renewed link lifts the block', async () => {
+    h.api.spotifyPlayerState.mockRejectedValue(new h.ApiError(409, 'Reconnect Spotify to keep playing full songs.', 'reconnect'));
+    await started();
+    await flush(1600);
+    h.status = { ...h.status, since: '2026-11-16T10:00:00Z' }; // another request refreshed the tokens meanwhile
+    await flush(1600);
+    await flush(10);
+    expect(screen.queryByText(permission)).toBeNull();
   });
 });

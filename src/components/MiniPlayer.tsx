@@ -50,7 +50,7 @@ function useNow(interval: number | null): number {
 }
 
 export function MiniPlayer() {
-  const { current, mode } = usePlayer();
+  const { current, mode, notice } = usePlayer();
   const card = useRef<HTMLDivElement>(null);
   const [showQueue, setShowQueue] = useState(false);
   const open = !!current;
@@ -67,7 +67,8 @@ export function MiniPlayer() {
           animate={{ y: 0, opacity: 1 }}
           exit={{ y: 40, opacity: 0 }}
           transition={{ duration: 0.3, ease: [0.22, 1, 0.36, 1] }}
-          className="fixed inset-x-2 bottom-[calc(env(safe-area-inset-bottom)+4.4rem)] z-40 md:right-6 md:bottom-5 md:left-[17.5rem]"
+          // Under the detail sheet (z-50) normally; above it while a notice needs the user (e.g. "Open Spotify").
+          className={`fixed inset-x-2 bottom-[calc(env(safe-area-inset-bottom)+4.4rem)] md:right-6 md:bottom-5 md:left-[17.5rem] ${notice ? 'z-[60]' : 'z-40'}`}
           role="region"
           aria-label="Music player"
         >
@@ -162,15 +163,16 @@ function NoteRow() {
   }
   if (!text) return null;
   return (
-    <div className="flex items-center gap-2 border-b border-line py-1 pr-1 pl-3.5 text-[12.5px]" role="status">
+    <div className="flex min-h-11 items-center gap-1 border-b border-line pl-3.5 text-[12.5px]" role="status">
       <p className={`min-w-0 flex-1 truncate ${warn ? 'text-amber' : 'text-mist'}`}>{text}</p>
       {action && (
-        <button type="button" onClick={action.onClick} className="inline-flex h-9 shrink-0 items-center rounded-full bg-tide px-3.5 text-[12.5px] font-semibold text-ink transition-transform active:scale-95">
-          {action.label}
+        // A 44px tap target around a compact pill (the row stays one slim line).
+        <button type="button" onClick={action.onClick} className="group/act grid h-11 shrink-0 place-items-center pr-1 pl-1.5">
+          <span className="inline-flex h-9 items-center rounded-full bg-tide px-3.5 text-[12.5px] font-semibold text-ink transition-transform group-active/act:scale-95">{action.label}</span>
         </button>
       )}
       {dismiss && (
-        <button type="button" onClick={dismissNotice} aria-label="Dismiss" className="grid h-9 w-9 shrink-0 place-items-center rounded-full text-dim hover:text-bone">
+        <button type="button" onClick={dismissNotice} aria-label="Dismiss" className="grid h-11 w-11 shrink-0 place-items-center rounded-full text-dim hover:text-bone">
           <X className="h-4 w-4" />
         </button>
       )}
@@ -219,6 +221,10 @@ function SpotifyBar({ queueOpen, onQueue }: { queueOpen: boolean; onQueue: () =>
           <span className="mt-1 flex min-w-0 items-center gap-1 text-[11.5px] leading-tight text-tide">
             <DeviceIcon type={device?.type} />
             <span className="truncate">{where}</span>
+            {/* Phones have no room for a Close button: this shows that a tap opens the queue (which holds Close player). */}
+            <span className="ml-auto flex shrink-0 items-center gap-0.5 pl-1.5 text-dim tabular-nums sm:hidden" aria-hidden>
+              <ListMusic className="h-3.5 w-3.5" /> {index + 1}/{queue.length}
+            </span>
           </span>
         </span>
       </button>
@@ -275,7 +281,7 @@ function PreviewBar({ queueOpen, onQueue }: { queueOpen: boolean; onQueue: () =>
       const { isPaused, duration, position } = data.payload;
       const t = track.current;
       const { current: item, feedback: fb, advance: goNext, previewProgress: report } = live.current;
-      if (item) report(item, !isPaused, position);
+      if (item) report(item, !isPaused, position, duration);
       if (!isPaused && position > 0 && !t.played && item) {
         t.played = true;
         fb.mutate({ item, type: 'play', source: 'feed' });

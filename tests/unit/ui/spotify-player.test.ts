@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canPlayWith, IDLE_STATE, mapDevices, mapPlayerState, mapSpotifyError, pickDevice, PLAYABLE_URI, retryAfterSeconds, SCOPES } from '../../../supabase/functions/spotify/player.ts';
+import { canPlayWith, IDLE_STATE, mapDevices, mapPlayerState, mapSpotifyError, pickDevice, PLAYABLE_URI, retryAfterSeconds, SCOPES, shuffleOffPath } from '../../../supabase/functions/spotify/player.ts';
 
 // Synthetic Spotify-shaped payloads (no real catalog data).
 const ID = 'A'.repeat(22);
@@ -110,7 +110,7 @@ describe('mapPlayerState', () => {
       },
     });
     expect(s).toEqual({
-      isPlaying: true, progressMs: 61_000, durationMs: 210_000,
+      isPlaying: true, progressMs: 61_000, durationMs: 210_000, shuffle: false,
       device: { id: 'ph1', name: 'Phone', type: 'Smartphone' },
       track: { uri: `spotify:track:${ID}`, id: ID, name: 'Synthetic Song', artists: ['Artist One', 'Artist Two'], artworkUrl: 'https://i.example/300' },
     });
@@ -122,8 +122,22 @@ describe('mapPlayerState', () => {
     expect(s.device).toBeNull();
   });
 
+  it('reports Spotify’s shuffle setting (it would scramble a lane)', () => {
+    expect(mapPlayerState({ is_playing: true, shuffle_state: true, item: null }).shuffle).toBe(true);
+    expect(mapPlayerState({ is_playing: true, shuffle_state: false, item: null }).shuffle).toBe(false);
+    expect(mapPlayerState({ is_playing: true, item: null }).shuffle).toBe(false);
+  });
+
   it('survives ads and odd payloads', () => {
     expect(mapPlayerState({ is_playing: true, item: null, currently_playing_type: 'ad' }).track).toBeNull();
     expect(mapPlayerState('nope')).toEqual(IDLE_STATE);
+  });
+});
+
+describe('shuffleOffPath', () => {
+  it('turns shuffle off on the given device, else on the active one', () => {
+    expect(shuffleOffPath()).toBe('/me/player/shuffle?state=false');
+    expect(shuffleOffPath(null)).toBe('/me/player/shuffle?state=false');
+    expect(shuffleOffPath('ph 1')).toBe('/me/player/shuffle?state=false&device_id=ph%201');
   });
 });

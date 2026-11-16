@@ -99,11 +99,18 @@ export interface PlayerState {
   isPlaying: boolean;
   progressMs: number;
   durationMs: number;
+  /** Spotify's shuffle setting (it persists from the user's Spotify app and would scramble ECHO's lane order). */
+  shuffle: boolean;
   device: { id: string; name: string; type: string } | null;
   track: PlayerTrack | null;
 }
 
-export const IDLE_STATE: PlayerState = { isPlaying: false, progressMs: 0, durationMs: 0, device: null, track: null };
+export const IDLE_STATE: PlayerState = { isPlaying: false, progressMs: 0, durationMs: 0, shuffle: false, device: null, track: null };
+
+/** PUT path that turns shuffle off, so a queue plays in ECHO's order (on `deviceId` when known, else the active device). */
+export function shuffleOffPath(deviceId?: string | null): string {
+  return `/me/player/shuffle?state=false${deviceId ? `&device_id=${encodeURIComponent(deviceId)}` : ''}`;
+}
 
 type Image = { url?: unknown; width?: unknown };
 
@@ -122,7 +129,7 @@ const num = (v: unknown) => (typeof v === 'number' && Number.isFinite(v) && v >=
 /** GET /v1/me/player → ECHO's compact state. A 204 (nothing playing) arrives here as null. */
 export function mapPlayerState(raw: unknown): PlayerState {
   if (!raw || typeof raw !== 'object') return IDLE_STATE;
-  const r = raw as { is_playing?: unknown; progress_ms?: unknown; device?: Record<string, unknown> | null; item?: Record<string, unknown> | null };
+  const r = raw as { is_playing?: unknown; progress_ms?: unknown; shuffle_state?: unknown; device?: Record<string, unknown> | null; item?: Record<string, unknown> | null };
   const item = r.item && typeof r.item === 'object' ? r.item : null;
   let track: PlayerTrack | null = null;
   if (item && typeof item.uri === 'string') {
@@ -144,6 +151,7 @@ export function mapPlayerState(raw: unknown): PlayerState {
     isPlaying: r.is_playing === true,
     progressMs: num(r.progress_ms),
     durationMs: num(item?.duration_ms),
+    shuffle: r.shuffle_state === true,
     device: d ? { id: typeof d.id === 'string' ? d.id : '', name: typeof d.name === 'string' && d.name ? d.name : 'Spotify', type: typeof d.type === 'string' ? d.type : '' } : null,
     track,
   };
