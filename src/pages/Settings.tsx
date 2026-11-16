@@ -29,6 +29,7 @@ export default function SettingsPage() {
   const { data } = useProfile();
   const qc = useQueryClient();
   const [name, setName] = useState('');
+  const [newPassword, setNewPassword] = useState('');
   const [local, setLocal] = useState<LocalAiSettings>(getLocalAi());
   const [localStatus, setLocalStatus] = useState<string | null>(null);
   const [installEvt, setInstallEvt] = useState<BeforeInstallPromptEvent | null>(null);
@@ -125,6 +126,20 @@ export default function SettingsPage() {
             <input value={name} onChange={(e) => setName(e.target.value)} maxLength={80} placeholder="Display name" aria-label="Display name" className="min-w-0 flex-1 rounded-xl border border-line bg-ink-3 px-3 py-2.5 focus:border-ember/50 focus:outline-none" />
             <button type="button" onClick={saveName} className="rounded-xl bg-bone px-4 font-semibold text-ink">Save</button>
           </div>
+          <form
+            className="flex gap-2"
+            onSubmit={async (e) => {
+              e.preventDefault();
+              if (newPassword.length < 8) return toast('Use at least 8 characters.', 'error');
+              const { error } = await supabase.auth.updateUser({ password: newPassword });
+              if (error) return toast(error.message, 'error');
+              setNewPassword('');
+              toast('Password changed.');
+            }}
+          >
+            <input type="password" autoComplete="new-password" value={newPassword} onChange={(e) => setNewPassword(e.target.value)} minLength={8} placeholder="New password" aria-label="New password" className="min-w-0 flex-1 rounded-xl border border-line bg-ink-3 px-3 py-2.5 focus:border-ember/50 focus:outline-none" />
+            <button type="submit" className="rounded-xl border border-line px-4 text-bone hover:border-white/25">Change password</button>
+          </form>
           <p className="text-xs text-dim">Your library, taste profile and conversations sync across every device you sign in on.</p>
           <button type="button" onClick={() => supabase.auth.signOut().then(() => qc.clear())} className="inline-flex items-center gap-2 text-mist hover:text-bone"><LogOut className="h-4 w-4" /> Sign out</button>
         </Card>
