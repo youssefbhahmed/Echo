@@ -3,7 +3,7 @@
 import { CATEGORIES, type Category, type ConceptVector, type Intent, type TasteProfile } from '../types.ts';
 import { providersFor, type Env } from '../providers/index.ts';
 import type { Provider, SearchParams } from '../providers/types.ts';
-import { CONCEPT_BY_ID } from './concepts.ts';
+import { CONCEPT_BY_ID, CONCEPTS } from './concepts.ts';
 import { positivePart, topKeys } from './text.ts';
 
 export interface PlannedQuery {
@@ -21,6 +21,8 @@ export interface PlanOptions {
   budget?: number;
   /** Max YouTube searches (100 quota units each). */
   youtubeBudget?: number;
+  /** Relative weight per category; "more" gets more queries. */
+  mix?: Partial<Record<Category, number>>;
 }
 
 const FORMAT_WORD: Partial<Record<Category, string>> = { youtube: '', podcasts: '' };
@@ -45,8 +47,13 @@ export function feedConcepts(profile: TasteProfile, exploration: number, moods: 
     seed,
   );
   const nAdj = Math.round(4 * exploration);
-  const picks = [...moods, ...familiar.slice(0, 4 - Math.min(nAdj, 3)), ...adjacent.slice(0, nAdj)];
-  return [...new Set(picks)].filter((c) => !blocked.has(c)).slice(0, 5);
+  // Wildcards: themes the user has never engaged with, rotated every refresh, so the feed keeps
+  // opening new doors even in Familiar mode (1 wildcard) and much more in Adventurous mode (up to 3).
+  const known = new Set([...Object.keys(profile.concepts), ...base, ...adjacent]);
+  const unexplored = rotate(CONCEPTS.filter((c) => c.group === 'theme' && !known.has(c.id) && !blocked.has(c.id)).map((c) => c.id), seed * 7 + 3);
+  const nWild = 1 + Math.round(2 * exploration);
+  const picks = [...moods, ...familiar.slice(0, 4 - Math.min(nAdj, 3)), ...adjacent.slice(0, nAdj), ...unexplored.slice(0, nWild)];
+  return [...new Set(picks)].filter((c) => !blocked.has(c)).slice(0, 8);
 }
 
 export function targetCategories(intent: Intent, _profile: TasteProfile, requested?: Category[]): Category[] {
@@ -71,7 +78,7 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
   const documentary = (intent.target.documentary ?? 0) > 0.3;
   const perCat = Math.max(1, Math.floor(budget / Math.max(1, categories.length)));
 
-  for (const category of categories) {
+  for (const [ci, category] of categories.entries()) {
     const providers = providersFor(category, opts.env);
     if (!providers.length) continue;
     const queries: Array<{ q: string; retrievedFor: string[] }> = [];
@@ -92,13 +99,16 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
     const catConcepts = category === 'music'
       ? [...concepts.filter((c) => CONCEPT_BY_ID[c]?.group === 'mood' || MUSIC_THEMES.has(c)), ...(concepts.some((c) => CONCEPT_BY_ID[c]?.group === 'mood') ? [] : ['dreamy', 'calm'])]
       : concepts;
-    for (const c of catConcepts) {
+    // Each category starts at a different concept, so together they cover more ground.
+    const rotated = opts.hasQuery ? catConcepts : rotate(catConcepts, ci + (opts.seed ?? 0));
+    for (const c of rotated) {
       const s = conceptSearch(c, category);
       if (s) queries.push({ q: s, retrievedFor: [c] });
     }
     const seen = new Set<string>();
     const unique = queries.filter((q) => q.q && !seen.has(q.q.toLowerCase()) && seen.add(q.q.toLowerCase()));
-    let n = category === 'youtube' ? Math.min(ytLeft, perCat) : Math.min(perCat, 3);
+    const w = opts.mix?.[category] ?? 1;
+    let n = category === 'youtube' ? Math.min(ytLeft, perCat) : Math.min(Math.max(1, Math.round(perCat * w)), w > 1 ? 4 : 3);
     if (category === 'youtube') ytLeft -= Math.min(n, unique.length);
     for (const q of unique) {
       if (n <= 0) break;

@@ -171,6 +171,8 @@ export interface DiscoverRequest {
   exploration?: number;
   limit?: number;
   sessionId?: string;
+  /** Feed mix: relative weight per category (0.5 less, 1 normal, 2 more). */
+  mix?: Partial<Record<Category, number>>;
   /** Intent produced by an optional client-side LLM (e.g. local Ollama). Validated server-side. */
   intentHint?: Partial<Intent>;
 }

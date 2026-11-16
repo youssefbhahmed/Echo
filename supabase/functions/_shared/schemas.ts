@@ -12,6 +12,7 @@ export const DiscoverBody = z.object({
   limit: z.number().int().min(1).max(30).optional(),
   exclude: z.array(itemId).max(200).optional(),
   seed: z.number().int().optional(),
+  mix: z.partialRecord(z.enum(CATEGORIES), z.number().min(0).max(3)).optional(),
   intentHint: z.record(z.string(), z.unknown()).optional(),
 });
 

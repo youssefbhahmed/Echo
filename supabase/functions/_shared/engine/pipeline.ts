@@ -186,7 +186,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   }
   // A follow-up with nothing new to search for ("they're bad") explores fresh themes instead of repeating searches.
   const nothingToSearch = effectiveHasQuery && !intent.keywords.length && !topKeys(positivePart(intent.target), 1, 0.15).length && !intent.references.length && !intent.genres.length;
-  const plan = planRetrieval(intent, deps.profile, categories, { env: deps.env, exploration, hasQuery: effectiveHasQuery && !nothingToSearch, seed: deps.seed }, extraConcepts).filter((q) => !deps.blockedProviders?.has(q.provider.id));
+  const plan = planRetrieval(intent, deps.profile, categories, { env: deps.env, exploration, hasQuery: effectiveHasQuery && !nothingToSearch, seed: deps.seed, mix: req.mix }, extraConcepts).filter((q) => !deps.blockedProviders?.has(q.provider.id));
   for (const id of deps.blockedProviders ?? []) statuses.set(id, { id, status: 'quota', message: 'Daily quota reached; using cached results until it resets.' });
   const callsBefore = deps.http.calls;
   const settled = await Promise.allSettled(plan.map((q) => q.provider.search(q.params, { http: deps.http, env: deps.env })));
@@ -264,6 +264,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     evidence: deps.evidence,
     queryEmbedding,
     limit,
+    mix: req.mix,
     now: deps.now,
   });
   pipeline.push({ step: 'ranking', ms: t(), detail: `exploration ${Math.round(exploration * 100)}% · ${recommendations.length} picks after diversity` });

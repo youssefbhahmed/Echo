@@ -14,7 +14,7 @@ serve(async (req) => {
   for (const id of body.exclude ?? []) exclude.add(id);
   const http = createHttp(new DbCache());
   const result = await runPipeline(
-    { query: body.query, categories: body.categories, moods: body.moods, exploration: body.exploration, limit: body.limit ?? 12, intentHint: body.intentHint },
+    { query: body.query, categories: body.categories, moods: body.moods, exploration: body.exploration, limit: body.limit ?? 12, intentHint: body.intentHint, mix: body.mix },
     { env, http, profile, excludeIds: exclude, evidence, blockedProviders: blocked, collaborative: collaborativeFn(db), embed: embedder(), storedEmbeddings, seed: body.seed },
   );
   await markQuota(result.quotaErrors);

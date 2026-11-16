@@ -112,6 +112,16 @@ export default function SettingsPage() {
     toast('History cleared.');
   };
 
+  const mix = (data?.account.settings?.mix as Partial<Record<Category, number>> | undefined) ?? {};
+  const setMix = async (c: Category, w: number) => {
+    const { data: u } = await supabase.auth.getUser();
+    const settings = { ...(data?.account.settings ?? {}), mix: { ...mix, [c]: w } };
+    const { error } = await supabase.from('profiles').update({ settings }).eq('id', u.user!.id);
+    if (error) return toast(error.message, 'error');
+    qc.invalidateQueries({ queryKey: ['profile'] });
+    qc.invalidateQueries({ queryKey: ['feed'] });
+  };
+
   const enabledCats = ((data?.account.settings?.categories as Category[] | undefined) ?? []).length ? (data!.account.settings!.categories as Category[]) : [...CATEGORIES];
   const isIos = /iphone|ipad|ipod/i.test(navigator.userAgent);
   const standalone = window.matchMedia('(display-mode: standalone)').matches;
@@ -160,6 +170,26 @@ export default function SettingsPage() {
               })}
             </div>
           </div>
+        </Card>
+
+        <Card title="Feed mix">
+          <p className="text-mist">How much of each kind of media your Discover feed should show.</p>
+          <ul className="space-y-2.5">
+            {CATEGORIES.map((c) => {
+              const m = CATEGORY_META[c];
+              const w = mix[c] ?? 1;
+              return (
+                <li key={c} className="flex items-center gap-3">
+                  <span className="inline-flex w-28 items-center gap-1.5"><m.icon className="h-4 w-4" style={{ color: m.color }} /> {m.label}</span>
+                  <div className="flex overflow-hidden rounded-full border border-line" role="radiogroup" aria-label={`${m.label} amount`}>
+                    {([[0.5, 'Less'], [1, 'Normal'], [2, 'More']] as const).map(([v, label]) => (
+                      <button key={label} type="button" role="radio" aria-checked={w === v} onClick={() => setMix(c, v)} className={`px-3 py-1.5 text-xs ${w === v ? 'bg-ember font-semibold text-ink' : 'text-mist hover:text-bone'}`}>{label}</button>
+                    ))}
+                  </div>
+                </li>
+              );
+            })}
+          </ul>
         </Card>
 
         <Card title="Connected platforms" id="platforms">

@@ -52,9 +52,10 @@ export default function Discover() {
   }, [debouncedExp, exploration]);
 
   const categories = category === 'all' ? (profile.data?.account.settings?.categories as Category[] | undefined)?.length ? (profile.data!.account.settings!.categories as Category[]) : undefined : [category];
+  const mix = (profile.data?.account.settings?.mix as Partial<Record<Category, number>> | undefined) ?? undefined;
   const feed = useQuery({
-    queryKey: ['feed', category, moods.join(','), debouncedExp, seed],
-    queryFn: () => api.discover({ categories, moods, exploration: debouncedExp, limit: 12, seed, exclude }),
+    queryKey: ['feed', category, moods.join(','), debouncedExp, seed, JSON.stringify(mix ?? {})],
+    queryFn: () => api.discover({ categories, moods, exploration: debouncedExp, limit: 12, seed, exclude, mix }),
     enabled: !!profile.data,
     staleTime: 5 * 60_000,
     placeholderData: keepPreviousData,

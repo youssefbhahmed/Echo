@@ -171,3 +171,35 @@ describe('free-text exclusions and explicit dislikes', () => {
     expect(recs[0].item.title).toBe('The Birth of Civilization');
   });
 });
+
+describe('variety', () => {
+  it('shows at most 2 items from the same topic search, even when they score highest', () => {
+    const greek = [1, 2, 3, 4, 5].map((i) => make({ title: `Greek Mythology Explained part ${i}`, category: 'youtube', creators: [`Channel ${i}`], description: 'greek myths gods legends', metadata: { retrievedBy: 'mythology explained', retrievedFor: ['myth'] } }));
+    const others = [1, 2, 3].map((i) => make({ title: `Cosmos documentary ${i}`, category: 'youtube', creators: [`Space ${i}`], description: 'the universe and stars', metadata: { retrievedBy: `universe documentary ${i}` } }));
+    const p = seedProfile(emptyProfile(), { interests: ['myth'] });
+    const recs = rankCandidates([...greek, ...others], parseIntent(''), p, { exploration: 0.3, hasQuery: false, limit: 5 });
+    expect(recs.filter((r) => /Greek/.test(r.item.title)).length).toBeLessThanOrEqual(2);
+    expect(recs.length).toBe(5);
+  });
+  it('treats near-identical titles as repeats', async () => {
+    const { itemSimilarity } = await import('@shared/engine/rank.ts');
+    const a = make({ title: 'The ENTIRE Story of Greek Mythology', category: 'youtube', creators: ['A'] });
+    const b = make({ title: 'Greek Mythology in 15 Minutes', category: 'youtube', creators: ['B'] });
+    expect(itemSimilarity(a, b, false)).toBeGreaterThan(0.5);
+  });
+  it('feed mix gives "more" categories more slots', async () => {
+    const { categoryQuotas } = await import('@shared/engine/rank.ts');
+    const q = categoryQuotas(['youtube', 'music', 'screen', 'books', 'podcasts'], 12, { podcasts: 2 });
+    expect(q.get('podcasts')).toBe(4);
+    expect(q.get('books')).toBe(2);
+  });
+  it('the feed always includes themes the user has never explored', async () => {
+    const { feedConcepts } = await import('@shared/engine/retrieve.ts');
+    const p = seedProfile(emptyProfile(), { interests: ['myth', 'history', 'cosmic'] });
+    const a = feedConcepts(p, 0.4, [], 0);
+    const b = feedConcepts(p, 0.4, [], 1);
+    const fresh = (x: string[]) => x.filter((c) => !['myth', 'history', 'cosmic'].includes(c) && !['adventure', 'civilization', 'dreamy', 'awe', 'science', 'existential', 'sci-fi', 'war', 'politics', 'society'].includes(c));
+    expect(fresh(a).length).toBeGreaterThan(0);
+    expect(a).not.toEqual(b);
+  });
+});

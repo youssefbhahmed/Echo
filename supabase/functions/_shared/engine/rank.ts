@@ -36,6 +36,7 @@ export interface RankContext {
   evidence?: EvidenceItem[];
   queryEmbedding?: number[] | null;
   limit?: number;
+  mix?: Partial<Record<AnalyzedItem['category'], number>>;
   now?: Date;
 }
 
@@ -185,20 +186,57 @@ export function scoreItem(item: AnalyzedItem, intent: Intent, profile: TasteProf
 }
 
 /** Similarity between two items, used for diversity (MMR). */
+const titleTokenCache = new WeakMap<AnalyzedItem, Set<string>>();
+function titleTokens(i: AnalyzedItem): Set<string> {
+  let t = titleTokenCache.get(i);
+  if (!t) {
+    t = new Set(contentTokens(i.title).filter((x) => x.length > 3 && !/^(full|documentary|official|episode|video|explained|minutes?|hours?|part|season)$/.test(x)));
+    titleTokenCache.set(i, t);
+  }
+  return t;
+}
+
+export function retrievedBy(i: AnalyzedItem): string | null {
+  return typeof i.metadata?.retrievedBy === 'string' ? (i.metadata.retrievedBy as string) : null;
+}
+
 export function itemSimilarity(a: AnalyzedItem, b: AnalyzedItem, multiCategory: boolean): number {
   const ca = creatorKeys(a);
   if (ca.length && creatorKeys(b).some((x) => ca.includes(x))) return 1;
   const sharedGenre = genreKeys(a).some((x) => genreKeys(b).includes(x)) ? 1 : 0;
   const sameCat = a.category === b.category ? 1 : 0;
-  return 0.65 * cosine(a.concepts, b.concepts) + 0.2 * sharedGenre * sameCat + (multiCategory ? 0.15 * sameCat : 0);
+  // Same topic search + overlapping title words ("Greek Mythology Explained" ×5) = repetition.
+  const ta = titleTokens(a);
+  const tb = titleTokens(b);
+  const overlap = ta.size && tb.size ? [...ta].filter((x) => tb.has(x)).length / Math.min(ta.size, tb.size) : 0;
+  const sameQuery = retrievedBy(a) && retrievedBy(a) === retrievedBy(b) ? 1 : 0;
+  const base = 0.65 * cosine(a.concepts, b.concepts) + 0.2 * sharedGenre * sameCat + (multiCategory ? 0.15 * sameCat : 0);
+  return Math.min(1, Math.max(base, 0.6 * overlap + 0.3 * sameQuery + 0.2 * cosine(a.concepts, b.concepts)));
+}
+
+/** How many slots each category gets in a mixed feed (weights: 0.5 less, 1 normal, 2 more). */
+export function categoryQuotas(available: AnalyzedItem['category'][], limit: number, mix: Partial<Record<AnalyzedItem['category'], number>> = {}): Map<AnalyzedItem['category'], number> {
+  const cats = [...new Set(available)];
+  const total = cats.reduce((s, c) => s + (mix[c] ?? 1), 0) || 1;
+  return new Map(cats.map((c) => [c, Math.max(1, Math.ceil((limit * (mix[c] ?? 1)) / total))]));
 }
 
 /** Maximal Marginal Relevance re-ranking: balances relevance and variety. */
-export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown }>(ranked: T[], limit: number, exploration: number, multiCategory: boolean): T[] {
-  const lambda = 0.82 - 0.22 * clamp(exploration, 0, 1);
+export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown }>(
+  ranked: T[],
+  limit: number,
+  exploration: number,
+  multiCategory: boolean,
+  opts: { quotas?: Map<AnalyzedItem['category'], number>; perQuery?: number } = {},
+): T[] {
+  const lambda = 0.78 - 0.22 * clamp(exploration, 0, 1);
   const pool = [...ranked];
   const selected: T[] = [];
   const creatorCount = new Map<string, number>();
+  const queryCount = new Map<string, number>();
+  const catCount = new Map<string, number>();
+  const perQuery = opts.perQuery ?? 2;
+  let strict = true; // relax quotas only if nothing else is left
   while (selected.length < limit && pool.length) {
     let bestIdx = -1;
     let bestVal = -Infinity;
@@ -206,6 +244,10 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
       const cand = pool[i];
       const creators = creatorKeys(cand.item);
       if (creators.some((cr) => (creatorCount.get(cr) ?? 0) >= 2)) continue;
+      const q = retrievedBy(cand.item);
+      if (strict && q && (queryCount.get(q) ?? 0) >= perQuery) continue;
+      const quota = opts.quotas?.get(cand.item.category);
+      if (strict && quota !== undefined && (catCount.get(cand.item.category) ?? 0) >= quota) continue;
       const maxSim = selected.length ? Math.max(...selected.map((s) => itemSimilarity(cand.item, s.item, multiCategory))) : 0;
       const val = lambda * cand.score.total - (1 - lambda) * maxSim;
       if (val > bestVal) {
@@ -213,9 +255,18 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
         bestIdx = i;
       }
     }
-    if (bestIdx < 0) break;
+    if (bestIdx < 0) {
+      if (strict) {
+        strict = false;
+        continue;
+      }
+      break;
+    }
     const [chosen] = pool.splice(bestIdx, 1);
     for (const cr of creatorKeys(chosen.item)) creatorCount.set(cr, (creatorCount.get(cr) ?? 0) + 1);
+    const cq = retrievedBy(chosen.item);
+    if (cq) queryCount.set(cq, (queryCount.get(cq) ?? 0) + 1);
+    catCount.set(chosen.item.category, (catCount.get(chosen.item.category) ?? 0) + 1);
     selected.push(chosen);
   }
   return selected;
@@ -320,6 +371,11 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
     });
   }
 
+  // Wildcard discovery: retrieved for a theme the user has never engaged with.
+  const rf = Array.isArray(item.metadata?.retrievedFor) ? (item.metadata!.retrievedFor as string[]) : [];
+  const fresh = rf.find((c) => CONCEPT_BY_ID[c]?.group === 'theme' && (profile.concepts[c] ?? 0) === 0 && !(intent.target[c] > 0) && (item.concepts[c] ?? 0) >= 0.25 && !inherited.has(c));
+  if (fresh && !ctx.hasQuery) reasons.push({ kind: 'novelty', detail: `A new direction for you: ${conceptPhrase(fresh)}, a theme you haven't explored yet` });
+
   if (score.collaborative >= 0.3) reasons.push({ kind: 'collaborative', detail: 'Saved by people whose likes overlap with yours' });
 
   if (item.rating !== undefined && item.rating >= 0.72) {
@@ -356,7 +412,9 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
   }
   scored.sort((a, b) => b.score.total - a.score.total);
   const cats = new Set(scored.map((s) => s.item.category));
-  let picked: Array<{ item: AnalyzedItem; score: ScoreBreakdown & { keywordHits: string[] }; trajectoryStep?: number }> = diversify(scored, limit, ctx.exploration, cats.size > 1);
+  // Mixed feeds get per-category quotas (feed mix); a focused request just avoids topic repeats.
+  const quotas = cats.size > 1 && !ctx.hasQuery ? categoryQuotas(scored.map((x) => x.item.category), limit, ctx.mix) : undefined;
+  let picked: Array<{ item: AnalyzedItem; score: ScoreBreakdown & { keywordHits: string[] }; trajectoryStep?: number }> = diversify(scored, limit, ctx.exploration, cats.size > 1, { quotas, perQuery: intent.trajectory ? 4 : 2 });
   if (intent.trajectory) picked = sequenceTrajectory(picked, intent.trajectory.from, intent.trajectory.to);
   return picked.map((p) => {
     const { keywordHits, ...score } = p.score;

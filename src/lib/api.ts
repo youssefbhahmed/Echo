@@ -48,7 +48,7 @@ export interface ChatResponse extends DiscoverResponse {
 }
 
 export const api = {
-  discover: (body: { query?: string; categories?: Category[]; moods?: string[]; exploration?: number; limit?: number; exclude?: string[]; seed?: number; intentHint?: Partial<Intent> }) =>
+  discover: (body: { query?: string; categories?: Category[]; moods?: string[]; exploration?: number; limit?: number; exclude?: string[]; seed?: number; intentHint?: Partial<Intent>; mix?: Partial<Record<Category, number>> }) =>
     call<DiscoverResponse>('discover', body),
   chat: (body: { message: string; sessionId?: string; categories?: Category[]; exploration?: number; intentHint?: Record<string, unknown> }) => call<ChatResponse>('chat', body),
   feedback: (body: { itemId: string; type: FeedbackType; rating?: number; context?: { source?: 'feed' | 'chat' | 'library' | 'onboarding'; query?: string; exploration?: number } }) =>
