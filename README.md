@@ -16,7 +16,7 @@ ECHO is a personal discovery agent for **videos, music, films & series, books an
 ## Contents
 1. [Feature status](#feature-status)
 2. [Quick start (local)](#quick-start-local)
-3. [Deploy for free (Supabase + Cloudflare Pages)](#deploy-for-free)
+3. [Deploy for free (Supabase + Cloudflare)](#deploy-for-free)
 4. [Content provider setup](#content-provider-setup)
 5. [Optional AI](#optional-ai)
 6. [Environment variables](#environment-variables)
@@ -72,6 +72,11 @@ Legend: ✅ implemented **and tested** · 🟢 implemented, verified manually or
 | Future | Restaurants / destinations / events providers, A/B experimentation, multi‑language UI, offline evaluation dashboard | ⏳ planned (architecture ready: see docs) |
 
 ---
+
+## Live deployment
+
+- App: https://echo-discover.youssef-bhahmed.workers.dev
+- API health: https://mlmrzuhhwqvkfjywcjwf.supabase.co/functions/v1/health
 
 ## Quick start (local)
 
@@ -143,23 +148,22 @@ SUPABASE_PROJECT_REF=xxxx SUPABASE_ACCESS_TOKEN=sbp_... SUPABASE_DB_PASSWORD=...
 
 > **New API keys:** if your project uses `sb_publishable_…` / `sb_secret_…` keys and you have **disabled the legacy JWT keys**, add `ECHO_SERVICE_KEY=<your sb_secret_ key>` to the function secrets. Otherwise the auto‑injected service key is used.
 
-### 2. Cloudflare Pages (frontend)
+### 2. Cloudflare (frontend, Workers static assets)
 
-1. Push this repository to GitHub.
-2. Cloudflare Dashboard → Workers & Pages → Create → Pages → Connect to Git → select the repo.
-3. Build settings: **Framework preset** None · **Build command** `npm run build` · **Output directory** `dist`
-4. Environment variables (Production *and* Preview):
-   - `VITE_SUPABASE_URL` = `https://xxxx.supabase.co`
-   - `VITE_SUPABASE_PUBLISHABLE_KEY` = your `sb_publishable_…` (or legacy anon) key
-   - `NODE_VERSION` = `22`
-5. Deploy. `public/_redirects` handles SPA routing; `public/_headers` sets security headers and CSP.
-6. Add the Pages URL to Supabase **Auth redirect URLs** and to **`ALLOWED_ORIGINS`**, then redeploy the functions (step 1.5).
+Cloudflare now routes new static sites through Workers static assets; `wrangler.toml` is set up for it (SPA fallback via `not_found_handling`, security headers from `public/_headers`).
 
-CLI alternative:
+1. Create an API token: Cloudflare → My Profile → API Tokens → **Edit Cloudflare Workers** template. Note your **Account ID** (Workers & Pages overview).
+2. Build with your public Supabase values and deploy:
 
 ```bash
-npm run build && npx wrangler pages deploy dist --project-name echo
+VITE_SUPABASE_URL=https://xxxx.supabase.co VITE_SUPABASE_PUBLISHABLE_KEY=sb_publishable_... npm run build
 ```
+
+```bash
+CLOUDFLARE_API_TOKEN=... CLOUDFLARE_ACCOUNT_ID=... npx wrangler deploy
+```
+
+3. The site is served at `https://echo-discover.<your-subdomain>.workers.dev`. Add that URL to Supabase **Auth redirect URLs** and to **`ALLOWED_ORIGINS`**.
 
 ---
 
@@ -217,6 +221,7 @@ OLLAMA_ORIGINS=https://<your-pages-domain> ollama serve
 | Functions (`supabase/functions/.env` → `supabase secrets set`) | `ALLOWED_ORIGINS` | recommended | CORS + OAuth redirect allowlist |
 | | `TMDB_READ_TOKEN` / `TMDB_API_KEY` | no | films & series |
 | | `YOUTUBE_API_KEY` | no | videos |
+| | `YOUTUBE_REGION` | no | ISO country code; skips videos geo-blocked there |
 | | `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `SPOTIFY_MARKET`, `SPOTIFY_REDIRECT_URI` | no | music, podcasts, OAuth |
 | | `AI_BASE_URL`, `AI_MODEL`, `AI_API_KEY` | no | optional LLM |
 | | `ECHO_EMBEDDINGS` | no | `on` to enable gte-small |

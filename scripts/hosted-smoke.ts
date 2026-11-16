@@ -29,8 +29,12 @@ try {
   console.log('pipeline:', feed.pipeline.map((p: { step: string; ms: number }) => `${p.step}:${p.ms}ms`).join(' '));
   const fb = await call('feedback', { itemId: feed.recommendations[0].item.id, type: 'like' });
   console.log('feedback learned:', JSON.stringify(fb.learned));
-  const chat = await call('chat', { message: 'Something with the existential feeling of Interstellar, but it does not have to be science fiction' });
-  console.log('chat reply:', chat.reply);
+  for (const message of ["I'm feeling nostalgic. Recommend music that starts melancholic and gradually becomes uplifting.", 'I want to understand the origins of civilization through serious documentaries.', 'Something with the existential feeling of Interstellar, but it does not have to be science fiction']) {
+    const chat = await call('chat', { message });
+    console.log('\nCHAT:', message, '\n  ', chat.pipeline[0].detail, '\n  reply:', chat.reply);
+    for (const r of chat.recommendations.slice(0, 5)) console.log(`   - [${r.item.category}/${r.item.provider}] ${r.item.title} — ${r.item.creators.join(', ')} | embed:${r.item.embed?.type ?? 'none'} | ${r.explanation.text}`);
+    console.log('   providers:', JSON.stringify(chat.providers));
+  }
   const exp = await call('account', { action: 'export' });
   console.log('export interactions:', exp.interactions.length);
   console.log('SMOKE OK');

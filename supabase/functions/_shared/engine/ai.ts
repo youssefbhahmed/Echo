@@ -61,7 +61,16 @@ export function sanitizeHint(raw: unknown, originalText: string): Hint {
   return out;
 }
 
-export function mergeHint(intent: Intent, hint: Hint, source: Intent['source']): Intent {
+export function mergeHint(intent: Intent, rawHint: Hint, source: Intent['source']): Intent {
+  // Models guess. Only accept fields the user's own words support, and never let a guess
+  // contradict what the rules parser read explicitly ("doesn't have to be X" ≠ "no X").
+  const text = intent.rawText.toLowerCase();
+  const hint: Hint = { ...rawHint };
+  hint.excludes = (hint.excludes ?? []).filter((x) => !intent.relaxed.includes(x) && (intent.target[x] ?? 0) <= 0);
+  if (!/\b(starts?|begin|from|becom|turns?|ends?|gradual|after|then|arc|journey from)/.test(text)) delete hint.trajectory;
+  if (!/\b(short|quick|long|minutes?|hours?|brief|epic|binge|series)\b/.test(text)) delete hint.duration;
+  if (!/\b(english|french|spanish|german|italian|portuguese|japanese|korean|chinese|arabic|russian|hindi|language|in [a-z]+ please)\b/.test(text)) delete hint.language;
+  if (hint.exploration !== undefined && hint.exploration > 0.2 && hint.exploration < 0.8) delete hint.exploration;
   const target = { ...intent.target };
   for (const [k, v] of Object.entries(hint.concepts ?? {})) if (!intent.relaxed.includes(k)) target[k] = round(Math.max(target[k] ?? 0, v * 0.8));
   for (const k of hint.excludes ?? []) target[k] = -0.8;

@@ -78,3 +78,19 @@ describe('sanitizeHint', () => {
     expect(h.trajectory).toEqual({ from: 'melancholic', to: 'uplifting' });
   });
 });
+
+describe('mergeHint guards against model guesses', () => {
+  it('keeps "doesn\'t have to be" relaxed and drops unsupported fields', async () => {
+    const { parseIntent } = await import('@shared/engine/intent.ts');
+    const { mergeHint } = await import('@shared/engine/ai.ts');
+    const base = parseIntent("Something with the same existential feeling as Interstellar, but it doesn't have to be science fiction");
+    const merged = mergeHint(base, sanitizeHint({ concepts: { awe: 0.9 }, excludes: ['sci-fi'], trajectory: { from: 'awe', to: 'contemplative' }, duration: 'long', language: 'en', exploration: 0.5 }, base.rawText), 'rules+llm');
+    expect(merged.target['sci-fi']).toBeUndefined();
+    expect(merged.excludes).not.toContain('sci-fi');
+    expect(merged.trajectory).toBeUndefined();
+    expect(merged.duration).toBeUndefined();
+    expect(merged.language).toBeUndefined();
+    expect(merged.exploration).toBeUndefined();
+    expect(merged.target.awe).toBeGreaterThan(0);
+  });
+});

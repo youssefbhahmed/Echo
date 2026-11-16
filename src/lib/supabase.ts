@@ -10,4 +10,4 @@ export const supabase = createClient(url ?? 'http://localhost:54321', key ?? 'mi
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'pkce' },
 });
 
-export const functionsUrl = ((import.meta.env.VITE_FUNCTIONS_URL as string | undefined) ?? `${url ?? ''}/functions/v1`).replace(/\/$/, '');
+export const functionsUrl = ((import.meta.env.VITE_FUNCTIONS_URL as string | undefined) || `${url ?? ''}/functions/v1`).replace(/\/$/, '');

@@ -19,7 +19,7 @@ export function parseIsoDuration(iso: string | undefined): number | undefined {
 interface YTVideo {
   id: string;
   snippet: { title: string; description: string; channelTitle: string; publishedAt: string; tags?: string[]; categoryId?: string; defaultAudioLanguage?: string; defaultLanguage?: string; thumbnails?: Record<string, { url: string }> };
-  contentDetails?: { duration?: string };
+  contentDetails?: { duration?: string; regionRestriction?: { allowed?: string[]; blocked?: string[] } };
   statistics?: { viewCount?: string; likeCount?: string };
   status?: { embeddable?: boolean; privacyStatus?: string };
 }
@@ -59,6 +59,7 @@ export const youtube: Provider = {
     const key = env('YOUTUBE_API_KEY')!;
     const params = new URLSearchParams({ part: 'snippet', type: 'video', q: p.query, maxResults: String(Math.min(p.limit ?? 15, 25)), videoEmbeddable: 'true', safeSearch: 'moderate' });
     if (p.language) params.set('relevanceLanguage', p.language);
+    if (env('YOUTUBE_REGION')) params.set('regionCode', env('YOUTUBE_REGION')!.toUpperCase());
     const dur = p.duration ?? (p.documentary ? 'long' : undefined);
     if (dur) params.set('videoDuration', DURATION_PARAM[dur]);
     const search = await http.json<{ items: Array<{ id: { videoId?: string } }> }>(`https://www.googleapis.com/youtube/v3/search?${params}&key=${key}`, {
@@ -70,7 +71,15 @@ export const youtube: Provider = {
     const videos = await http.json<{ items: YTVideo[] }>(`https://www.googleapis.com/youtube/v3/videos?${vparams}&key=${key}`, {
       cacheKey: `yt:videos:${ids.join(',')}`, ttl: 2 * 86400, provider: 'youtube',
     });
-    return tagRetrieval((videos.items ?? []).filter((v) => v.status?.privacyStatus !== 'private').map(mapYouTubeVideo), p);
+    // Optional YOUTUBE_REGION (e.g. FR): skip videos that are geo-blocked there.
+    const region = env('YOUTUBE_REGION')?.toUpperCase();
+    const playable = (v: YTVideo) => {
+      const r = v.contentDetails?.regionRestriction;
+      if (!region || !r) return true;
+      if (r.allowed && !r.allowed.includes(region)) return false;
+      return !(r.blocked ?? []).includes(region);
+    };
+    return tagRetrieval((videos.items ?? []).filter((v) => v.status?.privacyStatus !== 'private' && playable(v)).map(mapYouTubeVideo), p);
   },
 };
 

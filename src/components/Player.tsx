@@ -51,7 +51,7 @@ export function YouTubePlayer({ videoId, title, onPlay }: { videoId: string; tit
             if (e.data === 1) onPlayRef.current?.();
           },
           onError: (e: { data: number }) => {
-            setError(e.data === 101 || e.data === 150 ? 'The uploader does not allow playback outside YouTube.' : 'This video could not be played here.');
+            setError(e.data === 101 || e.data === 150 ? 'This video can’t play inside ECHO (embedding or regional restrictions).' : 'This video could not be played here.');
           },
         },
       });
