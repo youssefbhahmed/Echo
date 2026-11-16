@@ -78,3 +78,21 @@ describe('http layer', () => {
     expect(providersFor('screen', all).map((p) => p.id)).toEqual(['tmdb']);
   });
 });
+
+describe('Spotify podcast language', () => {
+  it('keeps only English podcasts by default', async () => {
+    const { spotify } = await import('@shared/providers/spotify.ts');
+    const show = (id: string, lang: string) => ({ id, name: `Show ${id}`, description: 'philosophy', images: [], languages: [lang], external_urls: { spotify: `https://open.spotify.com/show/${id}` } });
+    const urls: string[] = [];
+    const fake = (async (u: string) => {
+      urls.push(String(u));
+      if (String(u).includes('accounts.spotify.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
+      return new Response(JSON.stringify({ shows: { items: [show('a', 'en'), show('b', 'fr'), show('c', 'en-GB')] }, episodes: { items: [] } }));
+    }) as unknown as typeof fetch;
+    const http = createHttp(new MemoryCache(), fake);
+    const env = (n: string) => ({ SPOTIFY_CLIENT_ID: 'x', SPOTIFY_CLIENT_SECRET: 'y', SPOTIFY_MARKET: 'FR' } as Record<string, string>)[n];
+    const items = await spotify.search({ query: 'philosophy', category: 'podcasts' }, { http, env });
+    expect(items.map((i) => i.externalId)).toEqual(['a', 'c']);
+    expect(urls.find((u) => u.includes('/v1/search'))).toContain('market=US');
+  });
+});

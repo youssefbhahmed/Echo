@@ -74,7 +74,11 @@ export const spotify: Provider = {
     const token = await spotifyAppToken(ctx);
     const types = p.category === 'podcasts' ? ['show', 'episode'] : p.kinds?.length ? p.kinds.filter((k) => ['track', 'album', 'playlist'].includes(k)) : ['track', 'album', 'playlist'];
     const genreFilter = p.category === 'music' && p.genres?.length === 1 && /^[a-z\- ]+$/.test(p.genres[0]) ? ` genre:"${p.genres[0]}"` : '';
-    const params = new URLSearchParams({ q: `${p.query}${genreFilter}`, type: types.join(','), limit: '10', market: ctx.env('SPOTIFY_MARKET') ?? 'US' });
+    // Podcasts use their own market + language (default: US catalogue, English only); music keeps SPOTIFY_MARKET.
+    const isPod = p.category === 'podcasts';
+    const market = isPod ? ctx.env('SPOTIFY_PODCAST_MARKET') ?? 'US' : ctx.env('SPOTIFY_MARKET') ?? 'US';
+    const podLang = (ctx.env('SPOTIFY_PODCAST_LANGUAGE') ?? 'en').toLowerCase();
+    const params = new URLSearchParams({ q: `${p.query}${genreFilter}`, type: types.join(','), limit: '10', market });
     const data = await ctx.http.json<Record<string, { items: unknown[] }>>(`https://api.spotify.com/v1/search?${params}`, {
       init: { headers: { Authorization: `Bearer ${token}` } }, cacheKey: `spotify:search:${params}`, ttl: 2 * 86400, provider: 'spotify',
     });
@@ -85,7 +89,8 @@ export const spotify: Provider = {
         if (m) out.push(m);
       }
     }
-    return tagRetrieval(out, p);
+    const filtered = isPod && podLang !== 'any' ? out.filter((i) => !i.language || i.language.toLowerCase().startsWith(podLang)) : out;
+    return tagRetrieval(filtered, p);
   },
   async resolve(title, ctx, category) {
     const token = await spotifyAppToken(ctx);
