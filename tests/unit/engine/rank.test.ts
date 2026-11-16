@@ -213,3 +213,27 @@ describe('clickbait', () => {
     expect(clickbaitScore('Decoding the Universe: Quantum | Full Documentary | NOVA | PBS')).toBe(0);
   });
 });
+
+describe('tone variety (worlds)', () => {
+  it('no thematic world takes more than a third of an open feed', async () => {
+    const { itemWorld } = await import('@shared/engine/worlds.ts');
+    const dark = Array.from({ length: 10 }, (_, i) => make({ title: `Dark ${i}`, category: (['books', 'screen', 'podcasts'] as const)[i % 3], creators: [`D${i}`], description: 'a horror mystery with a haunted murder', metadata: { retrievedBy: `q${i}` } }));
+    const light = Array.from({ length: 4 }, (_, i) => make({ title: `Light ${i}`, category: (['books', 'screen', 'podcasts'] as const)[i % 3], creators: [`L${i}`], description: 'a funny cozy comedy about food', metadata: { retrievedBy: `l${i}` } }));
+    const sci = Array.from({ length: 4 }, (_, i) => make({ title: `Space ${i}`, category: (['books', 'screen', 'podcasts'] as const)[(i + 1) % 3], creators: [`S${i}`], description: 'the universe, stars and science of the cosmos', metadata: { retrievedBy: `s${i}` } }));
+    const p = seedProfile(emptyProfile(), { interests: ['horror', 'mystery'] });
+    const recs = rankCandidates([...dark, ...light, ...sci], parseIntent(''), p, { exploration: 0.4, hasQuery: false, limit: 9 });
+    const darkCount = recs.filter((r) => itemWorld(r.item) === 'dark').length;
+    expect(darkCount).toBeLessThanOrEqual(3);
+    expect(recs.length).toBe(9);
+  });
+  it('feed searches span several worlds and include contrast wildcards', async () => {
+    const { feedConcepts } = await import('@shared/engine/retrieve.ts');
+    const { worldOf } = await import('@shared/engine/worlds.ts');
+    let p = seedProfile(emptyProfile(), { interests: ['horror', 'mystery', 'war', 'dystopia'] });
+    p = { ...p, explicit: { ...p.explicit, pinnedConcepts: ['horror', 'mystery', 'politics', 'sci-fi', 'technology', 'civilization'] } };
+    const c = feedConcepts(p, 1, [], 3);
+    const worlds = new Set(c.map(worldOf));
+    expect(worlds.size).toBeGreaterThanOrEqual(4);
+    expect(c.filter((x) => p.explicit.pinnedConcepts.includes(x)).length).toBeLessThanOrEqual(4);
+  });
+});

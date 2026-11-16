@@ -4,6 +4,7 @@ import { CATEGORIES, type Category, type ConceptVector, type Intent, type TasteP
 import { providersFor, type Env } from '../providers/index.ts';
 import type { Provider, SearchParams } from '../providers/types.ts';
 import { CONCEPT_BY_ID, CONCEPTS } from './concepts.ts';
+import { spreadAcrossWorlds, worldOf } from './worlds.ts';
 import { positivePart, topKeys } from './text.ts';
 
 export interface PlannedQuery {
@@ -44,7 +45,8 @@ export function feedConcepts(profile: TasteProfile, exploration: number, moods: 
   const themes = ranked.filter((k) => CONCEPT_BY_ID[k].group === 'theme');
   const base = themes.length ? themes : ranked.length ? ranked : DEFAULT_FEED_CONCEPTS;
   // Pinned interests are explicit: always searched (rotating if there are many).
-  const pinned = rotate(profile.explicit.pinnedConcepts.filter((c) => CONCEPT_BY_ID[c] && !blocked.has(c)), seed).slice(0, 3);
+  // Pinned interests are explicit: always some searched, rotating 2 at a time so they don't crowd everything else.
+  const pinned = rotate(profile.explicit.pinnedConcepts.filter((c) => CONCEPT_BY_ID[c] && !blocked.has(c)), seed * 2).slice(0, 2);
   const familiar = rotate(base.filter((c) => !pinned.includes(c)).slice(0, 6), seed);
   const adjacent = rotate(
     [...new Set(base.flatMap((c) => CONCEPT_BY_ID[c]?.related ?? []))].filter((c) => !base.includes(c) && !blocked.has(c) && CONCEPT_BY_ID[c]?.group === 'theme'),
@@ -54,10 +56,16 @@ export function feedConcepts(profile: TasteProfile, exploration: number, moods: 
   const nFam = Math.max(2, 4 - Math.round(3 * exploration)) ;
   const nAdj = Math.round(3 * exploration);
   const known = new Set([...Object.keys(profile.concepts), ...base, ...adjacent]);
-  const unexplored = rotate(CONCEPTS.filter((c) => c.group === 'theme' && !known.has(c.id) && !blocked.has(c.id)).map((c) => c.id), seed * 7 + 3);
-  const nWild = 1 + Math.round(exploration);
-  const picks = [...moods, ...pinned, ...familiar.slice(0, Math.max(0, nFam - pinned.length) + 1), ...adjacent.slice(0, nAdj), ...unexplored.slice(0, nWild)];
-  return [...new Set(picks)].filter((c) => !blocked.has(c)).slice(0, 9);
+  // Wildcards come preferably from "worlds" the rest of the feed doesn't touch (e.g. lightness & joy
+  // for someone deep into dark themes), so every refresh has real contrast.
+  const core = [...pinned, ...familiar.slice(0, Math.max(0, nFam - pinned.length) + 1), ...adjacent.slice(0, nAdj)];
+  const usedWorlds = new Set(core.map(worldOf).filter(Boolean));
+  const unexploredAll = CONCEPTS.filter((c) => c.group === 'theme' && !known.has(c.id) && !blocked.has(c.id)).map((c) => c.id);
+  const contrast = rotate(unexploredAll.filter((c) => !usedWorlds.has(worldOf(c))), seed * 7 + 3);
+  const unexplored = [...contrast, ...rotate(unexploredAll.filter((c) => usedWorlds.has(worldOf(c))), seed * 5 + 1)];
+  const nWild = 2 + Math.round(exploration);
+  const picks = spreadAcrossWorlds([...new Set([...core, ...unexplored.slice(0, nWild)])].filter((c) => !blocked.has(c)));
+  return [...new Set([...moods, ...picks])].slice(0, 9);
 }
 
 export function targetCategories(intent: Intent, _profile: TasteProfile, requested?: Category[]): Category[] {

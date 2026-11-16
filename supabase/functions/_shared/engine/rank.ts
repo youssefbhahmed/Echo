@@ -3,6 +3,7 @@ import type { AnalyzedItem, ConceptVector, Explanation, Intent, Recommendation, 
 import { conceptPhrase, CONCEPT_BY_ID } from './concepts.ts';
 import { creatorKeys, genreKeys } from './profile.ts';
 import { inBlockedFamily } from './music.ts';
+import { itemWorld } from './worlds.ts';
 import { contentTokens, cosine, denseCosine, negativePart, normalize, normKey, positivePart, round } from './text.ts';
 
 export interface EvidenceItem {
@@ -254,7 +255,7 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
   limit: number,
   exploration: number,
   multiCategory: boolean,
-  opts: { quotas?: Map<AnalyzedItem['category'], number>; perQuery?: number } = {},
+  opts: { quotas?: Map<AnalyzedItem['category'], number>; perQuery?: number; worldCap?: number } = {},
 ): T[] {
   const lambda = 0.78 - 0.22 * clamp(exploration, 0, 1);
   const pool = [...ranked];
@@ -262,8 +263,10 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
   const creatorCount = new Map<string, number>();
   const queryCount = new Map<string, number>();
   const catCount = new Map<string, number>();
+  const worldCount = new Map<string, number>();
   const perQuery = opts.perQuery ?? 2;
   let strict = true; // relax quotas only if nothing else is left
+  let worldCap = opts.worldCap; // stretched one step at a time before anything else is relaxed
   while (selected.length < limit && pool.length) {
     let bestIdx = -1;
     let bestVal = -Infinity;
@@ -275,14 +278,23 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
       if (strict && q && (queryCount.get(q) ?? 0) >= perQuery) continue;
       const quota = opts.quotas?.get(cand.item.category);
       if (strict && quota !== undefined && (catCount.get(cand.item.category) ?? 0) >= quota) continue;
+      // Tone variety: no single thematic world may dominate the feed.
+      const wld = worldCap ? itemWorld(cand.item) : null;
+      if (strict && wld && worldCap && (worldCount.get(wld) ?? 0) >= worldCap) continue;
       const maxSim = selected.length ? Math.max(...selected.map((s) => itemSimilarity(cand.item, s.item, multiCategory))) : 0;
-      const val = lambda * cand.score.total - (1 - lambda) * maxSim;
+      // Coverage: a pick that brings a tone not yet in the feed gets a small lift (more in adventurous mode).
+      const wNew = opts.worldCap && wld && !worldCount.has(wld) ? 0.08 + 0.1 * clamp(exploration, 0, 1) : 0;
+      const val = lambda * cand.score.total - (1 - lambda) * maxSim + wNew;
       if (val > bestVal) {
         bestVal = val;
         bestIdx = i;
       }
     }
     if (bestIdx < 0) {
+      if (strict && worldCap && worldCap < limit) {
+        worldCap++;
+        continue;
+      }
       if (strict) {
         strict = false;
         continue;
@@ -294,6 +306,10 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
     const cq = retrievedBy(chosen.item);
     if (cq) queryCount.set(cq, (queryCount.get(cq) ?? 0) + 1);
     catCount.set(chosen.item.category, (catCount.get(chosen.item.category) ?? 0) + 1);
+    if (opts.worldCap) {
+      const w = itemWorld(chosen.item);
+      if (w) worldCount.set(w, (worldCount.get(w) ?? 0) + 1);
+    }
     selected.push(chosen);
   }
   return selected;
@@ -458,7 +474,12 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
   const cats = new Set(scored.map((s) => s.item.category));
   // Mixed feeds get per-category quotas (feed mix); a focused request just avoids topic repeats.
   const quotas = cats.size > 1 && !ctx.hasQuery ? categoryQuotas(scored.map((x) => x.item.category), limit, ctx.mix) : undefined;
-  let picked: Array<{ item: AnalyzedItem; score: ScoreBreakdown & { keywordHits: string[] }; trajectoryStep?: number }> = diversify(scored, limit, ctx.exploration, cats.size > 1, { quotas, perQuery: intent.trajectory ? 4 : 2 });
+  let picked: Array<{ item: AnalyzedItem; score: ScoreBreakdown & { keywordHits: string[] }; trajectoryStep?: number }> = diversify(scored, limit, ctx.exploration, cats.size > 1, {
+    quotas,
+    perQuery: intent.trajectory ? 4 : 2,
+    // Open feeds: at most a third of the picks from one thematic world. Focused requests are exempt.
+    worldCap: ctx.hasQuery ? undefined : Math.max(2, Math.ceil(limit / 4)),
+  });
   if (intent.trajectory) picked = sequenceTrajectory(picked, intent.trajectory.from, intent.trajectory.to);
   return picked.map((p) => {
     const { keywordHits, ...score } = p.score;
