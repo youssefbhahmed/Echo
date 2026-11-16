@@ -2,7 +2,7 @@
 // Useful without Docker, or where the Docker edge runtime cannot fetch npm packages.
 //   deno run -A --env-file=supabase/functions/.env scripts/dev-functions.ts
 // Serves http://127.0.0.1:54331/functions/v1/<name>  (set VITE_FUNCTIONS_URL to use it).
-const NAMES = ['discover', 'chat', 'feedback', 'profile', 'catalog', 'account', 'spotify', 'health'];
+const NAMES = ['discover', 'chat', 'feedback', 'profile', 'catalog', 'account', 'spotify', 'health', 'import'];
 const handlers = new Map<string, (req: Request) => Promise<Response>>();
 let pending: string | null = null;
 // deno-lint-ignore no-explicit-any

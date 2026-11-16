@@ -20,7 +20,7 @@ if [ -f supabase/functions/.env ]; then
 fi
 
 echo "→ Deploying Edge Functions"
-for fn in discover chat feedback profile catalog account spotify health; do
+for fn in discover chat feedback profile catalog account spotify health import; do
   npx supabase functions deploy "$fn" --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt --use-api
 done
 echo "✓ Backend deployed. Health: https://$SUPABASE_PROJECT_REF.supabase.co/functions/v1/health"

@@ -133,6 +133,19 @@ export interface TasteProfile {
   interactionCount: number;
   updatedAt: string | null;
   embedding?: number[] | null;
+  /** Summary of an imported music library (styles, recent shift, eras, moods, languages). */
+  music?: MusicDna | null;
+}
+
+export interface MusicDna {
+  tracks: number;
+  distinctArtists: number;
+  styles: string[];
+  recentStyles: string[];
+  decades: string[];
+  languages: string[];
+  mood: { valence: number; energy: number; danceability: number; topQuadrant: string };
+  importedAt: string;
 }
 
 export interface ScoreBreakdown {

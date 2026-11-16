@@ -123,7 +123,14 @@ export async function verifySpotifyPicks(picks: Array<{ artist: string; track?: 
         const artists = ((it as { artists?: Array<{ name: string }> })?.artists ?? []).map((a) => simplify(a.name));
         return artists.some((a) => a === want || a.includes(want) || want.includes(a));
       });
-      return hit ? mapSpotify(type, hit) : null;
+      if (hit) return mapSpotify(type, hit);
+      // Title not found (transliterations, alternate spellings): fall back to the artist, verified by name.
+      const ap = new URLSearchParams({ q: `artist:"${pk.artist.replace(/"/g, '')}"`, type: 'track', limit: '5', market });
+      const byArtist = await ctx.http.json<Record<string, { items: unknown[] }>>(`https://api.spotify.com/v1/search?${ap}`, {
+        init: { headers: { Authorization: `Bearer ${token}` } }, cacheKey: `spotify:verify:${ap}`, ttl: 30 * 86400, provider: 'spotify',
+      });
+      const fb = (byArtist.tracks?.items ?? []).find((it) => ((it as { artists?: Array<{ name: string }> })?.artists ?? []).some((a) => simplify(a.name) === want));
+      return fb ? mapSpotify('track', fb) : null;
     } catch {
       return null;
     }

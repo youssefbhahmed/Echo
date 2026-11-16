@@ -3,6 +3,7 @@ import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { Check, CircleAlert, Download, LogOut, Music2, Smartphone, Trash2 } from 'lucide-react';
 import { CATEGORIES, type Category } from '@shared/types.ts';
 import { api } from '../lib/api';
+import { tracksFromCsv } from '@shared/importer.ts';
 import { supabase } from '../lib/supabase';
 import { getLocalAi, setLocalAi, testLocalAi, type LocalAiSettings } from '../lib/ollama';
 import { useProfile } from '../hooks/data';
@@ -30,6 +31,23 @@ export default function SettingsPage() {
   const qc = useQueryClient();
   const [name, setName] = useState('');
   const [newPassword, setNewPassword] = useState('');
+  const [importing, setImporting] = useState<string | null>(null);
+  const importCsv = async (file: File) => {
+    try {
+      setImporting('Reading your file…');
+      const tracks = tracksFromCsv(await file.text());
+      if (!tracks.length) throw new Error('No songs found in this file.');
+      setImporting(`Importing ${tracks.length} songs…`);
+      const r = await api.importSpotifyLiked(tracks);
+      setImporting(`Imported ${r.imported} songs. Top styles: ${r.topStyles.slice(0, 6).join(', ')}.`);
+      qc.invalidateQueries({ queryKey: ['library'] });
+      qc.invalidateQueries({ queryKey: ['profile'] });
+      qc.invalidateQueries({ queryKey: ['feed'] });
+    } catch (e) {
+      setImporting(null);
+      toast((e as Error).message, 'error');
+    }
+  };
   const [local, setLocal] = useState<LocalAiSettings>(getLocalAi());
   const [localStatus, setLocalStatus] = useState<string | null>(null);
   const [installEvt, setInstallEvt] = useState<BeforeInstallPromptEvent | null>(null);
@@ -170,6 +188,19 @@ export default function SettingsPage() {
               })}
             </div>
           </div>
+        </Card>
+
+        <Card title="Import from Spotify">
+          <p className="text-mist">Bring your Spotify <b>Liked Songs</b> into ECHO: they go to your library as loved songs and teach ECHO your styles and artists.</p>
+          <ol className="list-decimal space-y-1 pl-5 text-xs text-dim">
+            <li>Open <a className="text-ember underline" href="https://exportify.app" target="_blank" rel="noreferrer">exportify.app</a>, log in with Spotify and export <b>Liked Songs</b> as CSV.</li>
+            <li>Choose that file below. Re-import any time; duplicates are merged.</li>
+          </ol>
+          <label className="inline-flex cursor-pointer items-center gap-2 rounded-full bg-tide px-4 py-2 font-semibold text-ink">
+            <Music2 className="h-4 w-4" /> Choose CSV file
+            <input type="file" accept=".csv,text/csv" className="sr-only" onChange={(e) => { const f = e.target.files?.[0]; if (f) importCsv(f); e.target.value = ''; }} />
+          </label>
+          {importing && <p className="text-xs text-tide" role="status">{importing}</p>}
         </Card>
 
         <Card title="Feed mix">

@@ -191,6 +191,11 @@ npx supabase secrets set TMDB_READ_TOKEN=... YOUTUBE_API_KEY=... SPOTIFY_CLIENT_
 
 ---
 
+## Music: AI curator + Spotify import
+
+- **Import your Spotify Liked Songs:** Settings → *Import from Spotify* (export Liked Songs as CSV at exportify.app). Songs go to your library as loved; ECHO learns your styles, artists, eras and moods from genres and audio features (song titles are deliberately ignored), and builds a **Music DNA** shown in My Taste. Re-importing replaces the previous import instead of stacking.
+- **AI music curator:** Spotify's Development Mode can no longer discover music by mood or genre, so when an AI provider is configured, it proposes real recordings from generic taste words (styles, moods, eras, languages; never song or artist names) and every pick is verified on Spotify before it is shown. Without AI, ECHO falls back to Spotify search with stock/filler penalties.
+
 ## Optional AI
 
 ECHO is fully functional without AI. The rules engine (`engine/intent.ts`) parses requests, and the hybrid ranker does the rest.

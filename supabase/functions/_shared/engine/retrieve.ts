@@ -39,21 +39,25 @@ export function feedConcepts(profile: TasteProfile, exploration: number, moods: 
   const combined: ConceptVector = { ...positivePart(profile.concepts) };
   for (const p of profile.explicit.pinnedConcepts) combined[p] = Math.max(combined[p] ?? 0, 1.5);
   const blocked = new Set([...profile.explicit.blockedConcepts, ...Object.keys(profile.concepts).filter((k) => profile.concepts[k] < -0.3)]);
-  const top = topKeys(combined, 8, 0.1).filter((k) => CONCEPT_BY_ID[k] && CONCEPT_BY_ID[k].group !== 'quality');
-  const base = top.length ? top : DEFAULT_FEED_CONCEPTS;
-  const familiar = rotate(base.slice(0, 6), seed);
+  const ranked = topKeys(combined, 12, 0.1).filter((k) => CONCEPT_BY_ID[k] && CONCEPT_BY_ID[k].group !== 'quality');
+  // Themes drive retrieval; moods mostly colour it (they come in through mood chips and ranking).
+  const themes = ranked.filter((k) => CONCEPT_BY_ID[k].group === 'theme');
+  const base = themes.length ? themes : ranked.length ? ranked : DEFAULT_FEED_CONCEPTS;
+  // Pinned interests are explicit: always searched (rotating if there are many).
+  const pinned = rotate(profile.explicit.pinnedConcepts.filter((c) => CONCEPT_BY_ID[c] && !blocked.has(c)), seed).slice(0, 3);
+  const familiar = rotate(base.filter((c) => !pinned.includes(c)).slice(0, 6), seed);
   const adjacent = rotate(
-    [...new Set(base.flatMap((c) => CONCEPT_BY_ID[c]?.related ?? []))].filter((c) => !base.slice(0, 6).includes(c) && !blocked.has(c) && CONCEPT_BY_ID[c]),
+    [...new Set(base.flatMap((c) => CONCEPT_BY_ID[c]?.related ?? []))].filter((c) => !base.includes(c) && !blocked.has(c) && CONCEPT_BY_ID[c]?.group === 'theme'),
     seed,
   );
-  const nAdj = Math.round(4 * exploration);
-  // Wildcards: themes the user has never engaged with, rotated every refresh, so the feed keeps
-  // opening new doors even in Familiar mode (1 wildcard) and much more in Adventurous mode (up to 3).
+  // Familiar never drops below 2 themes; adventurous adds up to 3 adjacent themes and 2 wildcards.
+  const nFam = Math.max(2, 4 - Math.round(3 * exploration)) ;
+  const nAdj = Math.round(3 * exploration);
   const known = new Set([...Object.keys(profile.concepts), ...base, ...adjacent]);
   const unexplored = rotate(CONCEPTS.filter((c) => c.group === 'theme' && !known.has(c.id) && !blocked.has(c.id)).map((c) => c.id), seed * 7 + 3);
-  const nWild = 1 + Math.round(2 * exploration);
-  const picks = [...moods, ...familiar.slice(0, 4 - Math.min(nAdj, 3)), ...adjacent.slice(0, nAdj), ...unexplored.slice(0, nWild)];
-  return [...new Set(picks)].filter((c) => !blocked.has(c)).slice(0, 8);
+  const nWild = 1 + Math.round(exploration);
+  const picks = [...moods, ...pinned, ...familiar.slice(0, Math.max(0, nFam - pinned.length) + 1), ...adjacent.slice(0, nAdj), ...unexplored.slice(0, nWild)];
+  return [...new Set(picks)].filter((c) => !blocked.has(c)).slice(0, 9);
 }
 
 export function targetCategories(intent: Intent, _profile: TasteProfile, requested?: Category[]): Category[] {

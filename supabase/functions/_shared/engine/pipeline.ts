@@ -8,6 +8,7 @@ import { ProviderError, type HttpClient } from '../providers/http.ts';
 import type { Env, Provider } from '../providers/types.ts';
 import { aiConfig, llmEnrichIntent, llmMusicPicks, mergeHint, sanitizeHint } from './ai.ts';
 import { verifySpotifyPicks } from '../providers/spotify.ts';
+import { musicBrief, topStyles } from '../importer.ts';
 import { hashKey } from '../providers/http.ts';
 import { analyzeItem } from './analyze.ts';
 import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
@@ -197,10 +198,23 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   const musicPicks = (async (): Promise<{ items: ContentItem[]; detail: string } | null> => {
     if (!categories.includes('music') || !ai || deps.useLlm === false || !PROVIDERS.spotify?.configured(deps.env) || deps.blockedProviders?.has('spotify')) return null;
     const concepts = (effectiveHasQuery ? topKeys(positivePart(intent.target), 5, 0.15) : feedConcepts(deps.profile, exploration, intent.moods, deps.seed ?? 0)).filter((c) => CONCEPT_BY_ID[c]);
-    const words = concepts.map((c) => conceptLabel(c).toLowerCase()).join(', ');
+    // Music is briefed with moods (and the few themes that translate to sound), not e.g. "politics".
+    const SOUND_THEMES = new Set(['cosmic', 'nature', 'spiritual', 'love', 'loss', 'solitude', 'time-memory', 'identity', 'travel']);
+    const musicConcepts = effectiveHasQuery ? concepts : concepts.filter((c) => CONCEPT_BY_ID[c].group === 'mood' || SOUND_THEMES.has(c));
+    const words = musicConcepts.map((c) => conceptLabel(c).toLowerCase()).join(', ');
     const desc = effectiveHasQuery
-      ? `${intent.rawText}${words ? ` (themes: ${words})` : ''}${intent.trajectory ? `; arc from ${intent.trajectory.from} to ${intent.trajectory.to}` : ''}; ${exploration >= 0.6 ? 'favour lesser-known, distinctive artists over chart hits' : exploration <= 0.3 ? 'well-loved classics are welcome' : 'mix beloved classics with lesser-known gems; avoid obvious chart hits'}`
-      : `music for a listener drawn to ${words || 'thoughtful, atmospheric, emotionally rich music'}; exploration level ${Math.round(exploration * 100)}% (higher = less familiar artists)`;
+      ? `${intent.rawText}${words ? ` (themes: ${words})` : ''}${deps.profile.music ? `. Listener background: ${musicBrief(deps.profile.music)}` : ''}${intent.trajectory ? `; arc from ${intent.trajectory.from} to ${intent.trajectory.to}` : ''}; ${exploration >= 0.6 ? 'favour lesser-known, distinctive artists over chart hits' : exploration <= 0.3 ? 'well-loved classics are welcome' : 'mix beloved classics with lesser-known gems; avoid obvious chart hits'}`
+      : (() => {
+          // Style words learned from the user's library (generic genre terms, never track/artist names).
+          const styles = topStyles(deps.profile, 8);
+          const base = deps.profile.music ? `a listener who ${musicBrief(deps.profile.music)}` : styles.length ? `a listener whose favourite styles are ${styles.join(', ')}` : 'a listener';
+          const reach = exploration >= 0.6
+            ? 'suggest artists from neighbouring styles and scenes they probably do not know yet'
+            : exploration <= 0.3
+              ? 'suggest strong artists squarely within these styles that they may not have heard'
+              : 'mostly within these styles, plus a few adjacent discoveries';
+          return `music for ${base}${words ? `; moods/themes they respond to: ${words}` : ''}; ${reach}. Prefer artists outside the obvious mainstream.`;
+        })();
     const avoid = [...deps.profile.explicit.dislikes, ...intent.excludes.filter((x) => !CONCEPT_BY_ID[x])];
     const picks = await llmMusicPicks(desc, ai, deps.http, { avoid, count: 16, cacheKey: `ai:music:${await hashKey(`${desc}|${avoid.join(',')}`)}:${(deps.seed ?? 0) % 4}` });
     const verified = await verifySpotifyPicks(picks, { http: deps.http, env: deps.env });
@@ -226,7 +240,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   if (mp) {
     // Enough verified curator picks → drop Spotify mood-word search results for music (mostly filler);
     // otherwise they remain as the fallback.
-    if (mp.items.length >= 5) {
+    if (mp.items.length >= 3) {
       for (let i = raw.length - 1; i >= 0; i--) if (raw[i].category === 'music' && raw[i].provider === 'spotify') raw.splice(i, 1);
     }
     raw.push(...mp.items);

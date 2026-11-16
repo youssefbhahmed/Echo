@@ -61,6 +61,7 @@ export const api = {
   lookup: (query: string, category?: Category) => call<{ items: AnalyzedItem[] }>('catalog', { action: 'lookup', query, category }),
   trailer: (itemId: string) => call<{ videoId: string | null }>('catalog', { action: 'trailer', itemId }),
   refresh: (itemIds: string[]) => call<{ refreshed: number }>('catalog', { action: 'refresh', itemIds }),
+  importSpotifyLiked: (tracks: unknown[]) => call<{ imported: number; topStyles: string[]; topArtists: string[] }>('import', { source: 'spotify-liked-csv', tracks }),
   exportData: () => call<Record<string, unknown>>('account', { action: 'export' }),
   deleteAccount: () => call<{ deleted: true }>('account', { action: 'delete', confirm: 'DELETE' }),
   spotifyStatus: () => call<{ connected: boolean; scope: string | null; since: string | null }>('spotify', { action: 'status' }),

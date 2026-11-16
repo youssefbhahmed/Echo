@@ -168,6 +168,18 @@ export default function Taste() {
           </Section>
         </div>
 
+        {model.music && (
+          <Section title="Music DNA" hint={`From your ${model.music.tracks} imported Spotify liked songs`}>
+            <div className="space-y-3 text-sm">
+              <div className="flex flex-wrap gap-1.5">{model.music.styles.slice(0, 12).map((g) => <span key={g} className="rounded-full bg-ink-3 px-2.5 py-1 capitalize">{g}</span>)}</div>
+              {model.music.recentStyles.length > 0 && <p><span className="text-dim">Lately drifting toward </span>{model.music.recentStyles.slice(0, 6).join(', ')}</p>}
+              <p><span className="text-dim">Mostly </span>{model.music.decades.join(', ')}<span className="text-dim"> · in </span>{model.music.languages.join(', ')}</p>
+              <p><span className="text-dim">Mood: </span>often {model.music.mood.topQuadrant} · danceability {Math.round(model.music.mood.danceability * 100)}%</p>
+              <p className="text-dim">{model.music.distinctArtists} different artists across {model.music.tracks} songs. You're an explorer, so ECHO leans adventurous with you.</p>
+            </div>
+          </Section>
+        )}
+
         <Section title="Interest clusters" hint="Related themes you keep returning to, grouped by ECHO’s concept graph">
           {insights.clusters.length === 0 ? <p className="text-sm text-mist">Not enough signal yet.</p> : (
             <div className="flex flex-wrap gap-2">

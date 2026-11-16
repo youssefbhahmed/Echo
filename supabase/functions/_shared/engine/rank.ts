@@ -381,17 +381,22 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
 
   // Profile / cross-media evidence
   if (!view.cold) {
-    const pMatched = strong(view.positive, 0.3).sort((a, b) => view.positive[b] - view.positive[a]).slice(0, 2);
+    const pMatched = strong(view.positive, 0.3).sort((a, b) => view.positive[b] - view.positive[a]).slice(0, 3);
     if (pMatched.length) {
+      // Cite a liked item only for qualities it really shares; across media, it must share a THEME
+      // (a song and a podcast both being "joyful" is too thin to claim a connection).
       const ev = (ctx.evidence ?? [])
         .filter((e) => e.id !== item.id)
-        .map((e) => ({ e, overlap: pMatched.filter((k) => (e.concepts[k] ?? 0) >= 0.3).length, cross: e.category !== item.category }))
-        .filter((x) => x.overlap > 0)
-        .sort((a, b) => b.overlap - a.overlap || Number(b.cross) - Number(a.cross))[0];
-      const labels = list(pMatched.map(conceptPhrase));
-      if (ev && ev.cross) reasons.push({ kind: 'profile', detail: `You liked ${ev.e.title} (${kindNoun(ev.e.kind)}); this ${kindNoun(item.kind)} carries the same ${labels} qualities` });
-      else if (ev) reasons.push({ kind: 'profile', detail: `In the ${labels} vein of ${ev.e.title}, which you liked` });
-      else reasons.push({ kind: 'profile', detail: `Aligned with your interest in ${labels}` });
+        .map((e) => {
+          const cross = e.category !== item.category;
+          const shared = pMatched.filter((k) => (e.concepts[k] ?? 0) >= 0.3 && (!cross || CONCEPT_BY_ID[k]?.group === 'theme'));
+          return { e, shared, cross };
+        })
+        .filter((x) => x.shared.length > 0)
+        .sort((a, b) => b.shared.length - a.shared.length || Number(b.cross) - Number(a.cross))[0];
+      if (ev && ev.cross) reasons.push({ kind: 'profile', detail: `You liked ${ev.e.title} (${kindNoun(ev.e.kind)}); this ${kindNoun(item.kind)} carries the same ${list(ev.shared.slice(0, 2).map(conceptPhrase))} qualities` });
+      else if (ev) reasons.push({ kind: 'profile', detail: `In the ${list(ev.shared.slice(0, 2).map(conceptPhrase))} vein of ${ev.e.title}, which you liked` });
+      else reasons.push({ kind: 'profile', detail: `Aligned with your interest in ${list(pMatched.slice(0, 2).map(conceptPhrase))}` });
     }
   }
 

@@ -443,3 +443,5 @@ verify_jwt = false
 verify_jwt = false
 [functions.health]
 verify_jwt = false
+[functions.import]
+verify_jwt = false

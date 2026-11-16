@@ -77,15 +77,45 @@ export const GENRE_HINTS: Record<string, ConceptVector> = {
   'travel & events': { travel: 0.8 },
   autos: { technology: 0.3 },
   music: {},
+  // French / North-African / world labels (Spotify exports use the account's locale)
+  chanson: { contemplative: 0.4, nostalgic: 0.4, romantic: 0.2 },
+  'variete francaise': { nostalgic: 0.3, joyful: 0.2 },
+  rai: { nostalgic: 0.4, energetic: 0.3, romantic: 0.3, identity: 0.2 },
+  gnaoui: { spiritual: 0.6, dreamy: 0.4, identity: 0.3 },
+  gnawa: { spiritual: 0.6, dreamy: 0.4, identity: 0.3 },
+  chaabi: { joyful: 0.4, nostalgic: 0.4, family: 0.2 },
+  maghreb: { identity: 0.3 },
+  arabe: { identity: 0.2 },
+  'southern gothic': { dark: 0.6, eerie: 0.4, melancholic: 0.3 },
+  'blues rock': { melancholic: 0.3, energetic: 0.4 },
+  'soul blues': { melancholic: 0.4, romantic: 0.3 },
+  'afro house': { energetic: 0.6, joyful: 0.4 },
+  'tropical house': { joyful: 0.5, energetic: 0.4 },
+  'nu metal': { intense: 0.7, energetic: 0.5 },
+  'hard rock': { energetic: 0.6, intense: 0.4 },
+  'rock alternatif': { energetic: 0.4, identity: 0.2 },
+  'alternative rock': { energetic: 0.4, identity: 0.2 },
+  'rap francais': { energetic: 0.5, society: 0.3 },
+  'pop urbaine': { energetic: 0.4, joyful: 0.3 },
+  trap: { energetic: 0.5, dark: 0.3 },
+  drill: { intense: 0.6, dark: 0.4 },
+  flamenco: { romantic: 0.4, intense: 0.4 },
+  bollywood: { romantic: 0.4, joyful: 0.4 },
+  desi: { identity: 0.2, energetic: 0.3 },
+  afrobeats: { energetic: 0.6, joyful: 0.5 },
+  reggaeton: { energetic: 0.6, joyful: 0.4 },
+  'world music': { travel: 0.4, identity: 0.3 },
+  cinematic: { awe: 0.5 },
+  'singer songwriter': { contemplative: 0.4, melancholic: 0.3 },
 };
 
 export function genreHints(genres: string[]): ConceptVector {
   const out: ConceptVector = {};
   for (const g of genres) {
-    const key = normalize(g);
-    const hint = GENRE_HINTS[key];
-    if (!hint) continue;
-    for (const [k, v] of Object.entries(hint)) out[k] = Math.max(out[k] ?? 0, v);
+    const key = normalize(g).replace(/-/g, ' ');
+    // Exact label first, else any known label contained in it ("hip-hop arabe" → "hip hop" + "arabe").
+    const hints = GENRE_HINTS[key] ? [GENRE_HINTS[key]] : Object.entries(GENRE_HINTS).filter(([k]) => k.length > 2 && new RegExp(`(^|\\s)${k.replace(/[.*+?^${}()|[\]\\&]/g, '\\$&').replace(/-/g, ' ')}(\\s|$)`).test(key)).map(([, v]) => v);
+    for (const hint of hints) for (const [k, v] of Object.entries(hint)) out[k] = Math.max(out[k] ?? 0, v);
   }
   return out;
 }
@@ -96,7 +126,8 @@ export function itemText(item: ContentItem): string {
 
 export function analyzeItem(item: ContentItem): AnalyzedItem {
   const fromText = projectText([
-    { text: item.title, weight: 1.0 },
+    // Song/album titles are poetic, not descriptive: they count much less for music.
+    { text: item.title, weight: item.category === 'music' ? 0.25 : 1.0 },
     { text: item.genres.join(' . '), weight: 1.6 },
     { text: item.tags.slice(0, 40).join(' . '), weight: 1.2 },
     { text: (item.description ?? '').slice(0, 2000), weight: 0.7 },

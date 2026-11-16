@@ -45,7 +45,7 @@ export function useLibrary() {
     queryKey: ['library'],
     enabled: !!session,
     queryFn: async () => {
-      const { data, error } = await supabase.from('library_items').select('*, content_items(*)').order('updated_at', { ascending: false }).limit(1000);
+      const { data, error } = await supabase.from('library_items').select('*, content_items(*)').order('updated_at', { ascending: false }).limit(5000);
       if (error) throw error;
       return (data ?? []) as LibraryRow[];
     },

@@ -153,7 +153,8 @@ export async function llmMusicPicks(description: string, cfg: AiConfig, http: Ht
             content: `You are a music curator with deep, eclectic knowledge. Return ONLY JSON: {"items":[{"artist":"...","track":"..."} or {"artist":"...","album":"..."}]}.
 Give ${n} real, existing recordings by acclaimed or cult artists that fit the description. Mix eras, countries and genres; include lesser-known gems alongside classics; at most one item per artist.
 Never suggest generic sleep/meditation/relaxation/study/frequency/stock music, compilations or "best of" collections.
-If the description mentions an arc (from one mood to another), list the items in listening order along that arc.`,
+If the description mentions an arc (from one mood to another), list the items in listening order along that arc.
+When the description lists styles the listener loves, at least two-thirds of the picks must come from those styles (favouring the ones they are drifting toward lately), sung in the languages they listen in; the rest may be adjacent discoveries.`,
           },
           { role: 'user', content: `Description: ${description.slice(0, 600)}${opts.avoid?.length ? `\nAvoid: ${opts.avoid.join(', ').slice(0, 200)}` : ''}` },
         ],
