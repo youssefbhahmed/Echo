@@ -8,7 +8,7 @@ import { useQueryClient } from '@tanstack/react-query';
 import type { AnalyzedItem } from '@shared/types.ts';
 import { api, ApiError, type SpotifyPlayerState } from './api';
 import { useFeedback, useSpotifyStatus } from '../hooks/data';
-import { canPlayFrom, classifyPlayerError, ListenTracker, livePosition, nextPollDelay, openInSpotifyUrl, POLL_MS, queueWindow, sameQueue, spotifyUri } from './playback';
+import { canPlayFrom, classifyPlayerError, ListenTracker, livePosition, nextPollDelay, openInSpotifyAppUrl, openInSpotifyUrl, POLL_MS, queueWindow, sameQueue, spotifyUri } from './playback';
 import { connectSpotify, consumeSpotifyReturn } from './spotify';
 
 export function isQueueable(item: AnalyzedItem): boolean {
@@ -18,7 +18,7 @@ export function isQueueable(item: AnalyzedItem): boolean {
 export type PlayerMode = 'preview' | 'spotify';
 
 export type PlayerNotice =
-  | { kind: 'no_device'; url: string }
+  | { kind: 'no_device'; url: string; appUrl: string }
   | { kind: 'premium_required' }
   | { kind: 'error'; message: string };
 
@@ -216,7 +216,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
         if (ctx) {
           // Remember it: when the user comes back from the Spotify app, play again (once).
           pending.current = { queue: ctx.queue, index: ctx.index, retried: !!ctx.auto };
-          setNotice({ kind: 'no_device', url: openInSpotifyUrl(ctx.queue[ctx.index]) });
+          setNotice({ kind: 'no_device', url: openInSpotifyUrl(ctx.queue[ctx.index]), appUrl: openInSpotifyAppUrl(ctx.queue[ctx.index]) });
         }
         return;
       case 'premium_required':

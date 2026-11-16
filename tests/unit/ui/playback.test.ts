@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canPlayFrom, classifyPlayerError, formatClock, IDLE_POLL_MS, isQuickSkip, ListenTracker, livePosition, MAX_IDLE_POLLS, nextPollDelay, openInSpotifyUrl, POLL_MS, queueWindow, sameQueue, SKIP_WINDOW_MS, skipWindowMs, spotifyUri } from '../../../src/lib/playback';
+import { canPlayFrom, classifyPlayerError, formatClock, IDLE_POLL_MS, isQuickSkip, ListenTracker, livePosition, MAX_IDLE_POLLS, nextPollDelay, openInSpotifyAppUrl, openInSpotifyUrl, POLL_MS, queueWindow, sameQueue, SKIP_WINDOW_MS, skipWindowMs, spotifyUri } from '../../../src/lib/playback';
 
 // Synthetic 22-character Spotify ids.
 const sid = (n: number) => `T${String(n).padStart(21, '0')}`;
@@ -18,6 +18,8 @@ describe('spotifyUri / openInSpotifyUrl', () => {
   it('builds the universal link that opens the Spotify app', () => {
     expect(openInSpotifyUrl(track(4))).toBe(`https://open.spotify.com/track/${sid(4)}`);
     expect(openInSpotifyUrl({ id: 'x', embed: null })).toBe('https://open.spotify.com/');
+    expect(openInSpotifyAppUrl(track(4))).toBe(`spotify:track:${sid(4)}`);
+    expect(openInSpotifyAppUrl({ id: 'x', embed: null })).toBe('spotify:');
   });
 });
 

@@ -115,6 +115,7 @@ function QueueList({ onDone }: { onDone: () => void }) {
 /** Spotify isn't open anywhere: one tap opens the song in the Spotify app; coming back starts the queue. */
 function NoDeviceSheet() {
   const { notice, retry, dismissNotice, busy } = usePlayer();
+  const phone = typeof window !== 'undefined' && !!window.matchMedia?.('(pointer: coarse)').matches;
   return (
     <AnimatePresence>
       {notice?.kind === 'no_device' && (
@@ -125,7 +126,8 @@ function NoDeviceSheet() {
               <p className="text-[15px] font-semibold text-bone">Open Spotify to start playing</p>
               <p className="mt-0.5 text-[13px] leading-snug text-mist">Spotify isn’t open on any of your devices yet. Open it, then come back: ECHO starts the music.</p>
               <div className="mt-3 flex flex-wrap items-center gap-2">
-                <a href={notice.url} target="_blank" rel="noreferrer" className="inline-flex h-11 items-center gap-1.5 rounded-full bg-tide px-4 text-[14px] font-semibold text-ink transition-transform active:scale-95">
+                {/* Phones: the spotify: URI opens the app directly; elsewhere the web link (it offers the app if installed). */}
+                <a href={phone ? notice.appUrl : notice.url} target={phone ? undefined : '_blank'} rel="noreferrer" className="inline-flex h-11 items-center gap-1.5 rounded-full bg-tide px-4 text-[14px] font-semibold text-ink transition-transform active:scale-95">
                   Open Spotify <ExternalLink className="h-4 w-4" aria-hidden />
                 </a>
                 <button type="button" onClick={retry} disabled={busy} className="inline-flex h-11 items-center rounded-full border border-line px-4 text-[14px] text-bone hover:border-white/20 disabled:opacity-50">

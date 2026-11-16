@@ -129,6 +129,23 @@ describe('player modes', () => {
     expect(screen.queryByText('Open Spotify to start playing')).toBeNull();
   });
 
+  it('no device on a phone: the link opens the Spotify app directly (spotify: URI, same tab)', async () => {
+    const mm = window.matchMedia;
+    window.matchMedia = ((q: string) => ({ matches: q === '(pointer: coarse)', media: q, onchange: null, addEventListener() {}, removeEventListener() {}, addListener() {}, removeListener() {}, dispatchEvent: () => false })) as unknown as typeof window.matchMedia;
+    try {
+      h.api.spotifyPlay.mockRejectedValueOnce(new h.ApiError(409, 'Open Spotify to start playing.', 'no_device'));
+      mount();
+      await flush(10);
+      fireEvent.click(screen.getByText('start'));
+      await flush(10);
+      const link = screen.getByRole('link', { name: /Open Spotify/ });
+      expect(link).toHaveAttribute('href', `spotify:track:${songs[0].externalId}`);
+      expect(link).not.toHaveAttribute('target');
+    } finally {
+      window.matchMedia = mm;
+    }
+  });
+
   it('Premium required: falls back to the preview embed with a one-line note', async () => {
     h.api.spotifyPlay.mockRejectedValueOnce(new h.ApiError(403, 'Full songs need Spotify Premium.', 'premium_required'));
     mount();

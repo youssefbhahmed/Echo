@@ -22,6 +22,13 @@ export function openInSpotifyUrl(item: QueueItemLike | null | undefined): string
   return type && id ? `https://open.spotify.com/${type}/${id}` : 'https://open.spotify.com/';
 }
 
+/** The same item as a spotify: URI, which phones hand straight to the Spotify app (no browser hop, even from a home-screen app). */
+export function openInSpotifyAppUrl(item: QueueItemLike | null | undefined): string {
+  const uri = item?.embed?.type === 'spotify' ? item.embed.uri : undefined;
+  const [, type, id] = (uri ?? '').split(':');
+  return type && id ? `spotify:${type}:${id}` : 'spotify:';
+}
+
 /**
  * The URIs to hand Spotify for a queue started at `start` (at most `max`, Spotify's limit), and the
  * offset of the start item within them. Items without a playable URI are left out; when the start
