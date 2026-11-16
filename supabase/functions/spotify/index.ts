@@ -1,13 +1,42 @@
-// Spotify user authorization (Authorization Code + PKCE) and playlist creation.
+// Spotify user authorization (Authorization Code + PKCE), playlist creation and Spotify Connect playback.
 //   POST { action: 'authorize', redirectTo }  → { url }   (user then consents on accounts.spotify.com)
 //   GET  ?code&state                          → OAuth callback, stores tokens server-side, redirects back to the app
-//   POST { action: 'status' | 'disconnect' | 'create-playlist' }
+//   POST { action: 'status' }                 → { connected, scope, since, canPlay }
+//   POST { action: 'disconnect' | 'create-playlist' }
+//   POST { action: 'player-state' | 'devices' | 'play' | 'next' | 'previous' | 'pause' | 'resume' }  (Premium, full songs)
 // Tokens are stored in public.oauth_tokens, which is unreadable from the browser (RLS + revoked privileges).
 // Uses the Feb-2026 endpoints: POST /v1/me/playlists and POST /v1/playlists/{id}/items.
+import { z } from 'npm:zod@4.6.7';
 import { SpotifyBody } from '../_shared/schemas.ts';
 import { env, getItems, HttpError, json, rateLimit, readJson, requireUser, serve, serviceClient } from '../_shared/server.ts';
+import { canPlayWith, mapDevices, mapPlayerState, mapSpotifyError, PLAYABLE_URI, pickDevice, type PlayerErrorInfo, SCOPES } from './player.ts';
 
-const SCOPES = 'playlist-modify-private playlist-modify-public';
+const API = 'https://api.spotify.com/v1';
+
+const PlayerBody = z.discriminatedUnion('action', [
+  z.object({ action: z.literal('player-state') }),
+  z.object({ action: z.literal('devices') }),
+  z.object({
+    action: z.literal('play'),
+    uris: z.array(z.string().regex(PLAYABLE_URI)).min(1).max(100),
+    offset: z.number().int().min(0).max(99).optional(),
+    deviceId: z.string().regex(/^[A-Za-z0-9_-]{1,128}$/).optional(),
+  }),
+  z.object({ action: z.literal('next') }),
+  z.object({ action: z.literal('previous') }),
+  z.object({ action: z.literal('pause') }),
+  z.object({ action: z.literal('resume') }),
+]);
+const PLAYER_ACTIONS = new Set(['player-state', 'devices', 'play', 'next', 'previous', 'pause', 'resume']);
+
+/** A Spotify player failure with a stable code (and Retry-After for rate limits). */
+class PlayerError extends HttpError {
+  retryAfter?: number;
+  constructor(info: PlayerErrorInfo) {
+    super(info.status, info.message, info.code);
+    this.retryAfter = info.retryAfter;
+  }
+}
 
 function redirectUri(): string {
   return env('SPOTIFY_REDIRECT_URI') ?? `${env('SUPABASE_PUBLIC_URL') ?? env('SUPABASE_URL')}/functions/v1/spotify`;
@@ -32,20 +61,102 @@ async function tokenRequest(params: Record<string, string>) {
     headers: { Authorization: `Basic ${btoa(`${id}:${secret}`)}`, 'Content-Type': 'application/x-www-form-urlencoded' },
     body: new URLSearchParams(params),
   });
-  if (!res.ok) throw new HttpError(502, `Spotify token exchange failed (${res.status})`, 'spotify_error');
+  if (!res.ok) {
+    await res.body?.cancel();
+    // 400/401 = revoked or expired grant: the user has to connect again (never 401: that would sign them out of ECHO).
+    if (res.status === 400 || res.status === 401) throw new HttpError(409, 'Your Spotify sign-in expired. Please reconnect Spotify.', 'reconnect');
+    throw new HttpError(502, `Spotify token exchange failed (${res.status})`, 'spotify_error');
+  }
   return (await res.json()) as { access_token: string; refresh_token?: string; expires_in: number; scope?: string };
 }
 
-async function userToken(userId: string): Promise<string> {
+/** A valid access token for this user, refreshed (and the rotated refresh token persisted) when needed. */
+async function userToken(userId: string, opts: { force?: boolean; playback?: boolean } = {}): Promise<string> {
   const { data } = await serviceClient().from('oauth_tokens').select('*').eq('user_id', userId).eq('provider', 'spotify').maybeSingle();
   if (!data) throw new HttpError(409, 'Connect Spotify first (Settings → Connected platforms).', 'spotify_not_connected');
-  if (new Date(data.expires_at).getTime() - 60_000 > Date.now()) return data.access_token;
-  if (!data.refresh_token) throw new HttpError(409, 'Spotify session expired. Please reconnect.', 'spotify_not_connected');
+  if (opts.playback && !canPlayWith(data.scope)) throw new HttpError(409, 'Full songs need one more Spotify permission. Reconnect Spotify.', 'reconnect');
+  if (!opts.force && new Date(data.expires_at).getTime() - 60_000 > Date.now()) return data.access_token;
+  if (!data.refresh_token) throw new HttpError(409, 'Spotify session expired. Please reconnect.', 'reconnect');
   const t = await tokenRequest({ grant_type: 'refresh_token', refresh_token: data.refresh_token });
   await serviceClient().from('oauth_tokens').update({
-    access_token: t.access_token, refresh_token: t.refresh_token ?? data.refresh_token, expires_at: new Date(Date.now() + t.expires_in * 1000).toISOString(), updated_at: new Date().toISOString(),
+    access_token: t.access_token, refresh_token: t.refresh_token ?? data.refresh_token, scope: t.scope ?? data.scope,
+    expires_at: new Date(Date.now() + t.expires_in * 1000).toISOString(), updated_at: new Date().toISOString(),
   }).eq('user_id', userId).eq('provider', 'spotify');
   return t.access_token;
+}
+
+// Per-instance memory of Spotify 429s, so a rate-limited user doesn't keep hitting Spotify while it lasts.
+const backoff = new Map<string, number>();
+
+/** Call the Spotify Web API as the user. Retries once with a fresh token on 401; maps failures to PlayerError. */
+async function spotifyApi(userId: string, method: 'GET' | 'PUT' | 'POST', path: string, body?: unknown): Promise<unknown> {
+  const until = backoff.get(userId) ?? 0;
+  if (until > Date.now()) throw new PlayerError({ status: 429, code: 'rate_limited', message: 'Spotify is busy right now. Try again in a moment.', retryAfter: Math.ceil((until - Date.now()) / 1000) });
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const token = await userToken(userId, { force: attempt > 0, playback: true });
+    const res = await fetch(`${API}${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${token}`, ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}) },
+      // Spotify answers 411 to a PUT/POST without a length, so send an explicit empty body.
+      body: body !== undefined ? JSON.stringify(body) : method === 'GET' ? undefined : '',
+    });
+    if (res.status === 401 && attempt === 0) {
+      await res.body?.cancel();
+      continue;
+    }
+    const text = await res.text();
+    let data: unknown = null;
+    try {
+      data = text ? JSON.parse(text) : null;
+    } catch {
+      data = null;
+    }
+    if (res.ok) return data;
+    const info = mapSpotifyError(res.status, data, res.headers.get('Retry-After'));
+    if (info.retryAfter) backoff.set(userId, Date.now() + info.retryAfter * 1000);
+    throw new PlayerError(info);
+  }
+  throw new PlayerError(mapSpotifyError(401, null));
+}
+
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+async function handlePlayer(req: Request, userId: string, raw: unknown): Promise<Response> {
+  const body = PlayerBody.parse(raw);
+  switch (body.action) {
+    case 'player-state':
+      return json(req, mapPlayerState(await spotifyApi(userId, 'GET', '/me/player?additional_types=episode')));
+    case 'devices':
+      return json(req, { devices: mapDevices(await spotifyApi(userId, 'GET', '/me/player/devices')) });
+    case 'next':
+      await spotifyApi(userId, 'POST', '/me/player/next');
+      return json(req, { ok: true });
+    case 'previous':
+      await spotifyApi(userId, 'POST', '/me/player/previous');
+      return json(req, { ok: true });
+    case 'pause':
+      await spotifyApi(userId, 'PUT', '/me/player/pause');
+      return json(req, { ok: true });
+    case 'resume':
+      await spotifyApi(userId, 'PUT', '/me/player/play');
+      return json(req, { ok: true });
+    case 'play': {
+      const payload = { uris: body.uris, offset: { position: Math.min(body.offset ?? 0, body.uris.length - 1) } };
+      try {
+        await spotifyApi(userId, 'PUT', `/me/player/play${body.deviceId ? `?device_id=${encodeURIComponent(body.deviceId)}` : ''}`, payload);
+        return json(req, { ok: true, device: null });
+      } catch (e) {
+        if (!(e instanceof PlayerError) || e.code !== 'no_device') throw e;
+      }
+      // Nothing active: wake the best available device (the Spotify app on the phone, ideally), then retry once.
+      const device = pickDevice(mapDevices(await spotifyApi(userId, 'GET', '/me/player/devices')));
+      if (!device) throw new PlayerError({ status: 409, code: 'no_device', message: 'Open Spotify to start playing.' });
+      await spotifyApi(userId, 'PUT', '/me/player', { device_ids: [device.id], play: false });
+      await sleep(300);
+      await spotifyApi(userId, 'PUT', `/me/player/play?device_id=${encodeURIComponent(device.id)}`, payload);
+      return json(req, { ok: true, device: { id: device.id, name: device.name, type: device.type } });
+    }
+  }
 }
 
 serve(async (req) => {
@@ -65,7 +176,7 @@ serve(async (req) => {
       return Response.redirect(back.toString(), 302);
     }
     const t = await tokenRequest({ grant_type: 'authorization_code', code, redirect_uri: redirectUri(), code_verifier: st.code_verifier });
-    const me = await fetch('https://api.spotify.com/v1/me', { headers: { Authorization: `Bearer ${t.access_token}` } }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
+    const me = await fetch(`${API}/me`, { headers: { Authorization: `Bearer ${t.access_token}` } }).then((r) => (r.ok ? r.json() : null)).catch(() => null);
     await serviceClient().from('oauth_tokens').upsert({
       user_id: st.user_id, provider: 'spotify', access_token: t.access_token, refresh_token: t.refresh_token ?? null, scope: t.scope ?? SCOPES,
       expires_at: new Date(Date.now() + t.expires_in * 1000).toISOString(), external_user_id: me?.id ?? null, updated_at: new Date().toISOString(),
@@ -75,8 +186,21 @@ serve(async (req) => {
   }
 
   const { userId } = await requireUser(req);
+  const raw = await readJson<Record<string, unknown>>(req);
+
+  // Playback control: its own, roomier bucket (the player polls every few seconds while visible).
+  if (typeof raw?.action === 'string' && PLAYER_ACTIONS.has(raw.action)) {
+    await rateLimit(userId, 'spotify-player', 120, 60);
+    try {
+      return await handlePlayer(req, userId, raw);
+    } catch (e) {
+      if (e instanceof PlayerError) return json(req, { error: e.message, code: e.code, retryAfter: e.retryAfter }, e.status);
+      throw e;
+    }
+  }
+
   await rateLimit(userId, 'spotify', 20, 60);
-  const body = SpotifyBody.parse(await readJson(req));
+  const body = SpotifyBody.parse(raw);
 
   if (body.action === 'authorize') {
     if (!allowedRedirect(req, body.redirectTo)) throw new HttpError(400, 'Redirect target not allowed', 'bad_redirect');
@@ -92,7 +216,7 @@ serve(async (req) => {
 
   if (body.action === 'status') {
     const { data } = await serviceClient().from('oauth_tokens').select('scope, updated_at, external_user_id').eq('user_id', userId).eq('provider', 'spotify').maybeSingle();
-    return json(req, { connected: !!data, scope: data?.scope ?? null, since: data?.updated_at ?? null });
+    return json(req, { connected: !!data, scope: data?.scope ?? null, since: data?.updated_at ?? null, canPlay: !!data && canPlayWith(data.scope) });
   }
 
   if (body.action === 'disconnect') {
@@ -104,7 +228,7 @@ serve(async (req) => {
   const items = (await getItems(body.itemIds)).filter((i) => i.provider === 'spotify' && (i.kind === 'track' || i.kind === 'episode'));
   if (!items.length) throw new HttpError(400, 'Only Spotify tracks and episodes can be added to a Spotify playlist.', 'no_spotify_items');
   const token = await userToken(userId);
-  const created = await fetch('https://api.spotify.com/v1/me/playlists', {
+  const created = await fetch(`${API}/me/playlists`, {
     method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ name: body.name, description: body.description ?? 'Curated with ECHO — discover beyond the algorithm.', public: false }),
   });
@@ -113,7 +237,7 @@ serve(async (req) => {
     throw new HttpError(502, msg, 'spotify_error');
   }
   const pl = await created.json() as { id: string; external_urls: { spotify: string } };
-  const add = await fetch(`https://api.spotify.com/v1/playlists/${pl.id}/items`, {
+  const add = await fetch(`${API}/playlists/${pl.id}/items`, {
     method: 'POST', headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ uris: items.map((i) => `spotify:${i.kind}:${i.externalId}`) }),
   });

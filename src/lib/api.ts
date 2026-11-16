@@ -5,7 +5,7 @@ import type { AnalyzedItem, TasteProfile } from '@shared/types.ts';
 import { functionsUrl, supabase } from './supabase';
 
 export class ApiError extends Error {
-  constructor(public status: number, message: string, public code?: string) {
+  constructor(public status: number, message: string, public code?: string, public retryAfter?: number) {
     super(message);
   }
 }
@@ -30,7 +30,7 @@ async function call<T>(name: string, body?: unknown, method: 'GET' | 'POST' = 'P
     await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined);
     throw new ApiError(401, 'Your session expired. Please sign in again.', 'unauthenticated');
   }
-  if (!res.ok) throw new ApiError(res.status, json.error ?? `Request failed (${res.status})`, json.code);
+  if (!res.ok) throw new ApiError(res.status, json.error ?? `Request failed (${res.status})`, json.code, typeof json.retryAfter === 'number' ? json.retryAfter : undefined);
   return json as T;
 }
 
@@ -48,6 +48,26 @@ export interface ProfileResponse {
   musicMix?: { mix: Array<{ id: string; label: string; share: number }>; avoid: string[]; blocked: Array<{ id: string; label: string }> };
   server: ServerInfo;
 }
+
+export interface SpotifyStatus {
+  connected: boolean;
+  scope: string | null;
+  since: string | null;
+  /** The stored grant includes playback control (full songs via Spotify Premium). */
+  canPlay?: boolean;
+}
+
+export interface SpotifyDevice { id: string; name: string; type: string; isActive?: boolean; isRestricted?: boolean }
+
+export interface SpotifyPlayerState {
+  isPlaying: boolean;
+  progressMs: number;
+  durationMs: number;
+  device: { id: string; name: string; type: string } | null;
+  track: { uri: string; id: string; name: string; artists: string[]; artworkUrl: string | null } | null;
+}
+
+export type SpotifyControl = 'next' | 'previous' | 'pause' | 'resume';
 
 export interface ChatResponse extends DiscoverResponse {
   sessionId: string;
@@ -70,8 +90,12 @@ export const api = {
   importSpotifyLiked: (tracks: unknown[]) => call<{ imported: number; topStyles: string[]; topArtists: string[] }>('import', { source: 'spotify-liked-csv', tracks }),
   exportData: () => call<Record<string, unknown>>('account', { action: 'export' }),
   deleteAccount: () => call<{ deleted: true }>('account', { action: 'delete', confirm: 'DELETE' }),
-  spotifyStatus: () => call<{ connected: boolean; scope: string | null; since: string | null }>('spotify', { action: 'status' }),
+  spotifyStatus: () => call<SpotifyStatus>('spotify', { action: 'status' }),
   spotifyAuthorize: (redirectTo: string) => call<{ url: string }>('spotify', { action: 'authorize', redirectTo }),
   spotifyDisconnect: () => call<{ connected: false }>('spotify', { action: 'disconnect' }),
   spotifyPlaylist: (name: string, itemIds: string[]) => call<{ playlistUrl: string; added: number }>('spotify', { action: 'create-playlist', name, itemIds }),
+  spotifyPlayerState: () => call<SpotifyPlayerState>('spotify', { action: 'player-state' }),
+  spotifyDevices: () => call<{ devices: SpotifyDevice[] }>('spotify', { action: 'devices' }),
+  spotifyPlay: (body: { uris: string[]; offset: number; deviceId?: string }) => call<{ ok: true; device: SpotifyPlayerState['device'] }>('spotify', { action: 'play', ...body }),
+  spotifyControl: (action: SpotifyControl) => call<{ ok: true }>('spotify', { action }),
 };

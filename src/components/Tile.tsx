@@ -1,6 +1,6 @@
 import { motion } from 'motion/react';
 import { AudioLines, Heart, Info, Play } from 'lucide-react';
-import { isQueueable, usePlayer } from '../lib/player';
+import { isQueueable, usePlayQueue } from '../lib/player';
 import type { Recommendation } from '@shared/types.ts';
 import { CATEGORY_META, displayTitle, KIND_LABEL } from '../lib/meta';
 import { useLibraryMap } from '../hooks/data';
@@ -18,8 +18,8 @@ export const TILE_WIDTH: Record<string, string> = {
 /** An artwork-first tile. Tapping opens the detail sheet (player, why, actions). */
 export function Tile({ rec, onOpen, onPlay, onWatch, className = '' }: { rec: Recommendation; onOpen: (r: Recommendation) => void; onPlay?: () => void; onWatch?: (r: Recommendation) => void; className?: string }) {
   const { item } = rec;
-  const { current } = usePlayer();
-  const nowPlaying = current?.id === item.id;
+  const { currentId } = usePlayQueue();
+  const nowPlaying = currentId === item.id;
   const playsInline = !!onPlay && isQueueable(item);
   const watches = !playsInline && !!onWatch && item.embed?.type === 'youtube';
   const meta = CATEGORY_META[item.category];
@@ -49,9 +49,12 @@ export function Tile({ rec, onOpen, onPlay, onWatch, className = '' }: { rec: Re
             aria-label={`Details for ${item.title}`}
             onClick={(e) => { e.stopPropagation(); onOpen(rec); }}
             onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); onOpen(rec); } }}
-            className="absolute top-2 right-2 grid h-8 w-8 place-items-center rounded-full bg-ink/60 text-bone/90 opacity-100 backdrop-blur-md transition-opacity md:opacity-0 md:group-hover:opacity-100"
+            className="absolute top-0 right-0 grid h-11 w-11 place-items-center rounded-full opacity-100 transition-opacity md:opacity-0 md:group-hover:opacity-100 md:focus-visible:opacity-100"
           >
-            <Info className="h-4 w-4" />
+            {/* 44px hit area around a small visual button (easy to hit on phones without covering the artwork). */}
+            <span className="grid h-8 w-8 place-items-center rounded-full bg-ink/60 text-bone/90 backdrop-blur-md" aria-hidden>
+              <Info className="h-4 w-4" />
+            </span>
           </span>
         )}
         {liked && (

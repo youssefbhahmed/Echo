@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
-import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { useQueryClient } from '@tanstack/react-query';
 import { Check, CircleAlert, Download, LogOut, Music2, Smartphone, Trash2 } from 'lucide-react';
 import { CATEGORIES, type Category } from '@shared/types.ts';
 import { api } from '../lib/api';
 import { tracksFromCsv } from '@shared/importer.ts';
 import { supabase } from '../lib/supabase';
 import { getLocalAi, setLocalAi, testLocalAi, type LocalAiSettings } from '../lib/ollama';
-import { useProfile } from '../hooks/data';
+import { useProfile, useSpotifyStatus } from '../hooks/data';
+import { connectSpotify } from '../lib/spotify';
 import { CATEGORY_META } from '../lib/meta';
 import { PageHeader } from '../components/Shell';
 import { ExplorationSlider } from '../components/Controls';
@@ -51,8 +52,7 @@ export default function SettingsPage() {
   const [local, setLocal] = useState<LocalAiSettings>(getLocalAi());
   const [localStatus, setLocalStatus] = useState<string | null>(null);
   const [installEvt, setInstallEvt] = useState<BeforeInstallPromptEvent | null>(null);
-  const spotifyServer = data?.server.providers.find((p) => p.id === 'spotify');
-  const spotify = useQuery({ queryKey: ['spotify'], queryFn: api.spotifyStatus, retry: false, enabled: !!spotifyServer?.configured });
+  const spotify = useSpotifyStatus();
 
   useEffect(() => setName(data?.account.display_name ?? ''), [data?.account.display_name]);
   useEffect(() => {
@@ -61,11 +61,7 @@ export default function SettingsPage() {
       setInstallEvt(e as BeforeInstallPromptEvent);
     };
     window.addEventListener('beforeinstallprompt', h);
-    const p = new URLSearchParams(window.location.search).get('spotify');
-    if (p) {
-      toast(p === 'connected' ? 'Spotify connected.' : 'Spotify connection was cancelled.', p === 'connected' ? 'info' : 'error');
-      window.history.replaceState({}, '', '/settings');
-    }
+    // (The ?spotify=connected return from Spotify's consent screen is handled app-wide by the player.)
     return () => window.removeEventListener('beforeinstallprompt', h);
   }, []);
 
@@ -228,13 +224,28 @@ export default function SettingsPage() {
             <Music2 className="mt-0.5 h-5 w-5 text-tide" />
             <div className="min-w-0 flex-1">
               <p className="font-medium">Spotify account</p>
-              <p className="text-xs text-mist">Optional. Lets ECHO create playlists in your Spotify account from your collections. Playback inside ECHO works without connecting.</p>
-              {!spotifyServer?.configured ? (
+              <p className="text-xs text-mist">Optional. With Spotify Premium, songs play in full in your Spotify app (on this phone or any device) while ECHO shows what’s playing, and ECHO can create playlists from your collections. Without it, ECHO plays previews.</p>
+              {!spotify.configured ? (
                 <p className="mt-2 text-xs text-amber">Spotify isn’t configured on this server yet (see below).</p>
-              ) : spotify.data?.connected ? (
-                <button type="button" onClick={() => api.spotifyDisconnect().then(() => spotify.refetch())} className="mt-2 text-xs text-dim hover:text-danger">Connected ✓ · Disconnect</button>
+              ) : spotify.connected ? (
+                <div className="mt-2 space-y-2">
+                  <ul className="space-y-1 text-xs">
+                    <li className="flex items-center gap-1.5 text-tide"><Check className="h-3.5 w-3.5" aria-hidden /> Connected</li>
+                    {spotify.canPlay ? (
+                      <li className="flex items-center gap-1.5 text-tide"><Check className="h-3.5 w-3.5" aria-hidden /> Full-song playback enabled</li>
+                    ) : (
+                      <li className="flex items-center gap-1.5 text-amber"><CircleAlert className="h-3.5 w-3.5" aria-hidden /> Full songs need one more permission</li>
+                    )}
+                  </ul>
+                  <div className="flex flex-wrap items-center gap-3">
+                    {!spotify.canPlay && (
+                      <button type="button" onClick={() => connectSpotify('/settings')} className="inline-flex min-h-10 items-center rounded-full bg-tide px-4 text-xs font-semibold text-ink">Reconnect Spotify</button>
+                    )}
+                    <button type="button" onClick={() => api.spotifyDisconnect().then(() => spotify.refetch(), (e: Error) => toast(e.message, 'error'))} className="min-h-10 text-xs text-dim hover:text-danger">Disconnect</button>
+                  </div>
+                </div>
               ) : (
-                <button type="button" onClick={async () => { try { const r = await api.spotifyAuthorize(`${window.location.origin}/settings`); window.location.href = r.url; } catch (e) { toast((e as Error).message, 'error'); } }} className="mt-2 rounded-full bg-tide px-3.5 py-1.5 text-xs font-semibold text-ink">Connect Spotify</button>
+                <button type="button" onClick={() => connectSpotify('/settings')} className="mt-2 inline-flex min-h-10 items-center rounded-full bg-tide px-4 text-xs font-semibold text-ink">Connect Spotify</button>
               )}
             </div>
           </div>

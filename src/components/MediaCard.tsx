@@ -6,6 +6,7 @@ import { conceptLabel } from '@shared/engine/concepts.ts';
 import { CATEGORY_META, displayTitle, formatDuration, KIND_LABEL, PROVIDER_LABEL, year } from '../lib/meta';
 import { api } from '../lib/api';
 import { useFeedback, useLibraryMap } from '../hooks/data';
+import { isQueueable, usePlayQueue } from '../lib/player';
 import { EmbedPlayer, YouTubePlayer } from './Player';
 import { CollectionPicker } from './CollectionPicker';
 import { toast } from './Toast';
@@ -98,6 +99,7 @@ function MenuItem({ icon: Icon, children, onClick, href }: { icon: React.Compone
 export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard({ item, explanation, score, trajectoryStep, source = 'feed', onDismiss, featured, autoPlay }, ref) {
   const lib = useLibraryMap().get(item.id);
   const feedback = useFeedback();
+  const player = usePlayQueue();
   const [playing, setPlaying] = useState(!!autoPlay && !!item.embed);
   const [trailer, setTrailer] = useState<string | null | undefined>(undefined);
   const [menu, setMenu] = useState(false);
@@ -130,6 +132,8 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
   }, [feedback, item, source]);
 
   const togglePlay = async () => {
+    // Full songs (Spotify Premium connected): play in the user's Spotify app through ECHO's player bar.
+    if (playable && player.mode === 'spotify' && isQueueable(item)) return player.playQueue([item], 0);
     if (playable) return setPlaying((p) => !p);
     if (!canTrailer) return;
     if (trailer !== undefined) return setPlaying((p) => !p && !!trailer);

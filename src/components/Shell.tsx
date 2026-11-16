@@ -3,7 +3,6 @@ import { Compass, Library, MessageCircle, Settings, Sparkles } from 'lucide-reac
 import { motion } from 'motion/react';
 import { EchoMark, Wordmark } from './Echo';
 import { MiniPlayer } from './MiniPlayer';
-import { usePlayer } from '../lib/player';
 
 const NAV = [
   { to: '/', label: 'Discover', icon: Compass, end: true },
@@ -14,7 +13,6 @@ const NAV = [
 ];
 
 export function Shell() {
-  const { current } = usePlayer();
   return (
     <div className="grain min-h-dvh md:flex">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-bone focus:px-3 focus:py-2 focus:text-ink">Skip to content</a>
@@ -40,7 +38,7 @@ export function Shell() {
           <p className="mt-2 text-xs leading-relaxed text-mist">Every like, save and skip teaches ECHO a little more about you.</p>
         </div>
       </aside>
-      <main id="main" className={`min-w-0 flex-1 ${current ? 'pb-56 md:pb-36' : 'pb-32 md:pb-16'}`}>
+      <main id="main" className="echo-main-pad md:echo-main-pad-wide min-w-0 flex-1">
         <div className="mx-auto max-w-[1280px]">
           <Outlet />
         </div>
