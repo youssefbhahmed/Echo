@@ -2,7 +2,7 @@
 // https://developers.google.com/youtube/v3/getting-started — playback uses the official IFrame Player.
 // Policy: API data is cached at most 30 days (we use 2 days for searches) and refreshed on access.
 import type { ContentItem, DurationPref } from '../types.ts';
-import { tagRetrieval, type Provider } from './types.ts';
+import { tagRetrieval, type Provider, type ProviderContext, type SearchParams } from './types.ts';
 
 export const YT_CATEGORIES: Record<string, string> = {
   '1': 'Film & Animation', '2': 'Autos & Vehicles', '10': 'Music', '15': 'Pets & Animals', '17': 'Sports', '19': 'Travel & Events', '20': 'Gaming',
@@ -50,42 +50,58 @@ export function mapYouTubeVideo(v: YTVideo): ContentItem {
 
 const DURATION_PARAM: Record<DurationPref, string> = { short: 'short', medium: 'medium', long: 'long' };
 
+async function searchYouTube(p: SearchParams, { http, env }: ProviderContext, asPodcast: boolean): Promise<ContentItem[]> {
+  const key = env('YOUTUBE_API_KEY')!;
+  // Podcasts: full episodes ("<topic> podcast", 20+ min, English by default).
+  const query = asPodcast && !/podcast/i.test(p.query) ? `${p.query} podcast` : p.query;
+  const params = new URLSearchParams({ part: 'snippet', type: 'video', q: query, maxResults: String(Math.min(Math.max(p.limit ?? 15, 20), 25)), videoEmbeddable: 'true', safeSearch: 'moderate' });
+  const lang = p.language ?? (asPodcast ? (env('YOUTUBE_PODCAST_LANGUAGE') ?? 'en') : undefined);
+  if (lang) params.set('relevanceLanguage', lang);
+  if (env('YOUTUBE_REGION')) params.set('regionCode', env('YOUTUBE_REGION')!.toUpperCase());
+  const dur = asPodcast ? (p.duration === 'short' ? 'medium' : 'long') : p.duration ?? (p.documentary ? 'long' : undefined);
+  if (dur) params.set('videoDuration', DURATION_PARAM[dur]);
+  const search = await http.json<{ items: Array<{ id: { videoId?: string } }> }>(`https://www.googleapis.com/youtube/v3/search?${params}&key=${key}`, {
+    cacheKey: `yt:search:${params}`, ttl: 2 * 86400, provider: 'youtube',
+  });
+  const ids = (search.items ?? []).map((i) => i.id.videoId).filter(Boolean) as string[];
+  if (!ids.length) return [];
+  const vparams = new URLSearchParams({ part: 'snippet,contentDetails,statistics,status', id: ids.join(',') });
+  const videos = await http.json<{ items: YTVideo[] }>(`https://www.googleapis.com/youtube/v3/videos?${vparams}&key=${key}`, {
+    cacheKey: `yt:videos:${ids.join(',')}`, ttl: 2 * 86400, provider: 'youtube',
+  });
+  // Optional YOUTUBE_REGION (e.g. FR): skip videos that are geo-blocked there.
+  const region = env('YOUTUBE_REGION')?.toUpperCase();
+  const playable = (v: YTVideo) => {
+    const r = v.contentDetails?.regionRestriction;
+    if (!region || !r) return true;
+    if (r.allowed && !r.allowed.includes(region)) return false;
+    return !(r.blocked ?? []).includes(region);
+  };
+  // Quality floor: no Shorts or tiny clips; podcast episodes must be 15+ minutes.
+  const minSec = asPodcast ? 900 : p.duration === 'short' ? 60 : 180;
+  const substantial = (v: YTVideo) => (parseIsoDuration(v.contentDetails?.duration) ?? 0) >= minSec && !/#shorts?\b/i.test(`${v.snippet.title} ${v.snippet.description ?? ''}`);
+  const langOk = (v: YTVideo) => {
+    if (!asPodcast || !lang || lang === 'any') return true;
+    const l = v.snippet.defaultAudioLanguage ?? v.snippet.defaultLanguage;
+    return !l || l.toLowerCase().startsWith(lang);
+  };
+  const items = (videos.items ?? []).filter((v) => v.status?.privacyStatus !== 'private' && playable(v) && substantial(v) && langOk(v)).map(mapYouTubeVideo);
+  return tagRetrieval(asPodcast ? items.map(asPodcastEpisode) : items, p);
+}
+
+/** A YouTube video re-labelled as a podcast episode (own id, so it never collides with the Videos category). */
+export function asPodcastEpisode(i: ContentItem): ContentItem {
+  return { ...i, id: `youtube:episode:${i.externalId}`, category: 'podcasts', kind: 'episode', genres: [...new Set([...i.genres, 'Podcast'])] };
+}
+
 export const youtube: Provider = {
   id: 'youtube',
   label: 'YouTube',
-  categories: ['youtube'],
+  categories: ['youtube', 'podcasts'],
   searchCost: 101,
   setup: 'Google Cloud Console → enable "YouTube Data API v3" → Credentials → API key (restrict it to that API), then set YOUTUBE_API_KEY as a Supabase secret.',
   configured: (env) => !!env('YOUTUBE_API_KEY'),
-  async search(p, { http, env }) {
-    const key = env('YOUTUBE_API_KEY')!;
-    const params = new URLSearchParams({ part: 'snippet', type: 'video', q: p.query, maxResults: String(Math.min(Math.max(p.limit ?? 15, 20), 25)), videoEmbeddable: 'true', safeSearch: 'moderate' });
-    if (p.language) params.set('relevanceLanguage', p.language);
-    if (env('YOUTUBE_REGION')) params.set('regionCode', env('YOUTUBE_REGION')!.toUpperCase());
-    const dur = p.duration ?? (p.documentary ? 'long' : undefined);
-    if (dur) params.set('videoDuration', DURATION_PARAM[dur]);
-    const search = await http.json<{ items: Array<{ id: { videoId?: string } }> }>(`https://www.googleapis.com/youtube/v3/search?${params}&key=${key}`, {
-      cacheKey: `yt:search:${params}`, ttl: 2 * 86400, provider: 'youtube',
-    });
-    const ids = (search.items ?? []).map((i) => i.id.videoId).filter(Boolean) as string[];
-    if (!ids.length) return [];
-    const vparams = new URLSearchParams({ part: 'snippet,contentDetails,statistics,status', id: ids.join(',') });
-    const videos = await http.json<{ items: YTVideo[] }>(`https://www.googleapis.com/youtube/v3/videos?${vparams}&key=${key}`, {
-      cacheKey: `yt:videos:${ids.join(',')}`, ttl: 2 * 86400, provider: 'youtube',
-    });
-    // Optional YOUTUBE_REGION (e.g. FR): skip videos that are geo-blocked there.
-    const region = env('YOUTUBE_REGION')?.toUpperCase();
-    const playable = (v: YTVideo) => {
-      const r = v.contentDetails?.regionRestriction;
-      if (!region || !r) return true;
-      if (r.allowed && !r.allowed.includes(region)) return false;
-      return !(r.blocked ?? []).includes(region);
-    };
-    // Quality floor: no Shorts or tiny clips unless the user asked for something short.
-    const minSec = p.duration === 'short' ? 60 : 180;
-    const substantial = (v: YTVideo) => (parseIsoDuration(v.contentDetails?.duration) ?? 0) >= minSec && !/#shorts?\b/i.test(`${v.snippet.title} ${v.snippet.description ?? ''}`);
-    return tagRetrieval((videos.items ?? []).filter((v) => v.status?.privacyStatus !== 'private' && playable(v) && substantial(v)).map(mapYouTubeVideo), p);
-  },
+  search: (p, ctx) => searchYouTube(p, ctx, p.category === 'podcasts'),
 };
 
 /** Refresh metadata for stored videos (1 unit per 50 ids) — used to honour the 30-day storage policy. */

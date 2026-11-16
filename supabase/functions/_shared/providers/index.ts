@@ -30,7 +30,8 @@ export function providersFor(category: Category, env: Env): Provider[] {
     case 'books':
       return [openLibrary];
     case 'podcasts':
-      return spotify.configured(env) ? [spotify] : [];
+      // Spotify shows/episodes + full-length YouTube podcast episodes.
+      return [...(spotify.configured(env) ? [spotify] : []), ...(youtube.configured(env) ? [youtube] : [])];
   }
 }
 

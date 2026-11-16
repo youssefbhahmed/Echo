@@ -3,7 +3,7 @@ import { analyzeItem } from '../_shared/engine/analyze.ts';
 import { createHttp } from '../_shared/providers/http.ts';
 import { providersFor } from '../_shared/providers/index.ts';
 import { tmdbTrailer } from '../_shared/providers/tmdb.ts';
-import { refreshYouTube } from '../_shared/providers/youtube.ts';
+import { asPodcastEpisode, refreshYouTube } from '../_shared/providers/youtube.ts';
 import { CatalogBody } from '../_shared/schemas.ts';
 import type { Category, ContentItem } from '../_shared/types.ts';
 import { DbCache, env, getItems, HttpError, json, rateLimit, readJson, requireUser, serve, upsertItems } from '../_shared/server.ts';
@@ -43,7 +43,10 @@ serve(async (req) => {
   if (body.action === 'refresh') {
     const items = await getItems(body.itemIds);
     const stale = items.filter((i) => i.provider === 'youtube' && (i.metadata?.stale || Date.now() - new Date(String(i.metadata?.fetchedAt ?? 0)).getTime() > 25 * 86400_000));
-    const fresh = (await refreshYouTube(stale.map((i) => i.externalId), ctx).catch(() => [])).map(analyzeItem);
+    const byExt = new Map(stale.map((i) => [i.externalId, i]));
+    const fresh = (await refreshYouTube(stale.map((i) => i.externalId), ctx).catch(() => []))
+      .map((f) => (byExt.get(f.externalId)?.category === 'podcasts' ? asPodcastEpisode(f) : f))
+      .map(analyzeItem);
     await upsertItems(fresh);
     return json(req, { refreshed: fresh.length });
   }

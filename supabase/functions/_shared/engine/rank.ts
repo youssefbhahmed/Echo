@@ -95,6 +95,17 @@ export function profileView(p: TasteProfile): ProfileView {
   };
 }
 
+/** 0..1 heuristic for engagement-bait titles (shouting, "!!", bait phrases). Not applied to books/films. */
+export function clickbaitScore(title: string): number {
+  const words = title.split(/\s+/).filter((w) => /[A-Za-z]{3,}/.test(w));
+  const caps = words.filter((w) => w === w.toUpperCase() && /[A-Z]{3,}/.test(w)).length;
+  let s = 0;
+  if (words.length >= 4 && caps / words.length >= 0.3) s += 0.5;
+  if (/[!?]{2,}|!.*!/.test(title)) s += 0.3;
+  if (/\b(you won'?t believe|will do this|truly loves? you|shocking|gone wrong|rage ?bait|reddit stories|must watch|insane|exposed|destroys|nobody tells you|this is why you|before it'?s too late)\b/i.test(title)) s += 0.6;
+  return Math.min(1, s);
+}
+
 export function scoreItem(item: AnalyzedItem, intent: Intent, profile: TasteProfile, view: ProfileView, ctx: RankContext): ScoreBreakdown & { keywordHits: string[] } {
   const e = clamp(ctx.exploration, 0, 1);
   const targetPos = positivePart(intent.target);
@@ -153,6 +164,7 @@ export function scoreItem(item: AnalyzedItem, intent: Intent, profile: TasteProf
   if (c < -0.3) penalty += 0.4;
   if (g < -0.4) penalty += 0.2;
   if (durationMismatch(item, intent.duration)) penalty += 0.15;
+  penalty += clickbaitScore(item.title) * 0.35;
   if (intent.language && item.language && !item.language.toLowerCase().startsWith(intent.language)) penalty += 0.25;
   if (intent.energy === 'low' && (item.concepts.energetic ?? 0) > 0.5) penalty += 0.1;
   if (intent.energy === 'high' && (item.concepts.calm ?? 0) > 0.5) penalty += 0.1;

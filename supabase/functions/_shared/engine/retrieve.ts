@@ -69,7 +69,9 @@ function conceptSearch(concept: string, category: Category): string | undefined 
 export function planRetrieval(intent: Intent, profile: TasteProfile, categories: Category[], opts: PlanOptions, extraConcepts: string[] = []): PlannedQuery[] {
   const plan: PlannedQuery[] = [];
   const budget = opts.budget ?? 12;
-  let ytLeft = opts.youtubeBudget ?? (categories.length === 1 && categories[0] === 'youtube' ? 2 : 1);
+  // YouTube searches cost 100 quota units each: 2 per request at most, shared by Videos and Podcasts.
+  const ytCats = categories.filter((c) => c === 'youtube' || c === 'podcasts').length;
+  let ytLeft = opts.youtubeBudget ?? (categories.length === 1 && categories[0] === 'youtube' ? 2 : Math.min(2, Math.max(1, ytCats)));
   const targetTop = topKeys(positivePart(intent.target), 4, 0.15).filter((k) => CONCEPT_BY_ID[k] && !intent.relaxed.includes(k));
   const themeTop = targetTop.filter((k) => CONCEPT_BY_ID[k].group !== 'quality');
   const concepts = opts.hasQuery
@@ -108,11 +110,17 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
     const seen = new Set<string>();
     const unique = queries.filter((q) => q.q && !seen.has(q.q.toLowerCase()) && seen.add(q.q.toLowerCase()));
     const w = opts.mix?.[category] ?? 1;
-    let n = category === 'youtube' ? Math.min(ytLeft, perCat) : Math.min(Math.max(1, Math.round(perCat * w)), w > 1 ? 4 : 3);
+    const reserveForPodcasts = category === 'youtube' && categories.includes('podcasts') && ytLeft > 1 ? 1 : 0;
+    let n = category === 'youtube' ? Math.min(ytLeft - reserveForPodcasts, perCat) : Math.min(Math.max(1, Math.round(perCat * w)), w > 1 ? 4 : 3);
     if (category === 'youtube') ytLeft -= Math.min(n, unique.length);
     for (const q of unique) {
       if (n <= 0) break;
       for (const provider of providers) {
+        // In Podcasts, YouTube gets one search (its quota is precious); Spotify takes the rest.
+        if (provider.id === 'youtube' && category !== 'youtube') {
+          if (ytLeft <= 0 || plan.some((x) => x.provider.id === 'youtube' && x.params.category === category)) continue;
+          ytLeft--;
+        }
         plan.push({
           provider,
           params: {

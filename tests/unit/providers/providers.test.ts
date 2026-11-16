@@ -74,7 +74,7 @@ describe('http layer', () => {
     expect(providersFor('youtube', none)).toEqual([]);
     const all = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b', TMDB_API_KEY: 'c', YOUTUBE_API_KEY: 'd' } as Record<string, string>)[n];
     expect(providersFor('music', all).map((p) => p.id)).toEqual(['spotify']);
-    expect(providersFor('podcasts', all).map((p) => p.id)).toEqual(['spotify']);
+    expect(providersFor('podcasts', all).map((p) => p.id)).toEqual(['spotify', 'youtube']);
     expect(providersFor('screen', all).map((p) => p.id)).toEqual(['tmdb']);
   });
 });
@@ -94,5 +94,36 @@ describe('Spotify podcast language', () => {
     const items = await spotify.search({ query: 'philosophy', category: 'podcasts' }, { http, env });
     expect(items.map((i) => i.externalId)).toEqual(['a', 'c']);
     expect(urls.find((u) => u.includes('/v1/search'))).toContain('market=US');
+  });
+});
+
+describe('YouTube podcasts', () => {
+  it('searches full English episodes and files them under Podcasts', async () => {
+    const { youtube } = await import('@shared/providers/youtube.ts');
+    const urls: string[] = [];
+    const vid = (id: string, dur: string, lang?: string) => ({ id, snippet: { title: `Episode ${id}`, description: 'a long conversation about philosophy', channelTitle: 'Some Pod', publishedAt: '2026-01-01T00:00:00Z', defaultAudioLanguage: lang }, contentDetails: { duration: dur }, statistics: { viewCount: '10000', likeCount: '500' }, status: { embeddable: true } });
+    const fake = (async (u: string) => {
+      urls.push(String(u));
+      if (String(u).includes('/search')) return new Response(JSON.stringify({ items: [{ id: { videoId: 'a' } }, { id: { videoId: 'b' } }, { id: { videoId: 'c' } }] }));
+      return new Response(JSON.stringify({ items: [vid('a', 'PT1H20M', 'en'), vid('b', 'PT6M', 'en'), vid('c', 'PT1H', 'fr')] }));
+    }) as unknown as typeof fetch;
+    const items = await youtube.search({ query: 'stoicism', category: 'podcasts' }, { http: createHttp(new MemoryCache(), fake), env: (n) => (n === 'YOUTUBE_API_KEY' ? 'k' : undefined) });
+    expect(items.map((i) => i.id)).toEqual(['youtube:episode:a']);
+    expect(items[0]).toMatchObject({ category: 'podcasts', kind: 'episode', embed: { type: 'youtube', videoId: 'a' } });
+    const search = urls.find((u) => u.includes('/search'))!;
+    expect(search).toContain('q=stoicism+podcast');
+    expect(search).toContain('videoDuration=long');
+    expect(search).toContain('relevanceLanguage=en');
+  });
+  it('plans at most one YouTube podcast search and at most two YouTube searches overall', async () => {
+    const { planRetrieval } = await import('@shared/engine/retrieve.ts');
+    const { parseIntent } = await import('@shared/engine/intent.ts');
+    const { emptyProfile } = await import('@shared/engine/profile.ts');
+    const env = (n: string) => ({ YOUTUBE_API_KEY: 'k', SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b' } as Record<string, string>)[n];
+    const plan = planRetrieval(parseIntent(''), emptyProfile(), ['youtube', 'music', 'screen', 'books', 'podcasts'], { env, exploration: 0.4, hasQuery: false, mix: { podcasts: 2 } });
+    const yt = plan.filter((q) => q.provider.id === 'youtube');
+    expect(yt.length).toBeLessThanOrEqual(2);
+    expect(yt.filter((q) => q.params.category === 'podcasts').length).toBe(1);
+    expect(plan.some((q) => q.provider.id === 'spotify' && q.params.category === 'podcasts')).toBe(true);
   });
 });

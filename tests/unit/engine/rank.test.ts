@@ -203,3 +203,13 @@ describe('variety', () => {
     expect(a).not.toEqual(b);
   });
 });
+
+describe('clickbait', () => {
+  it('scores bait titles high and normal titles zero', async () => {
+    const { clickbaitScore } = await import('@shared/engine/rank.ts');
+    expect(clickbaitScore('LOVE EXPERT ON: When A Man TRULY LOVES You, He Will DO THIS! | Stephan')).toBeGreaterThan(0.8);
+    expect(clickbaitScore('294: Rage Bait! Reddit Stories Ft. Ashby')).toBeGreaterThan(0.5);
+    expect(clickbaitScore('Cosmic Queries: General Astrophysics 101')).toBe(0);
+    expect(clickbaitScore('Decoding the Universe: Quantum | Full Documentary | NOVA | PBS')).toBe(0);
+  });
+});
