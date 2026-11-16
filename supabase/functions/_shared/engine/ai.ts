@@ -149,6 +149,10 @@ export interface MusicPick {
   track: string;
   /** Feed: the lane id the curator filed the song under. Request: a short style label ("afro house"). */
   lane?: string;
+  /** Feed: the song's own main style in a few words, as the curator sees it (checked against the lane). */
+  genre?: string;
+  /** Feed: main language of the lyrics (French/Arabic songs only ever fill their own regional lane). */
+  lang?: string;
 }
 
 /** One lane of the listener's taste, described in generic words only (never track/artist names). */
@@ -214,11 +218,13 @@ export function curatorPrompt(brief: CuratorBrief): { system: string; user: stri
   }
   const lanes = brief.lanes ?? [];
   const instrumentalLane = lanes.some((l) => l.instrumental);
-  const system = `You are ECHO's music curator for one listener. Return ONLY JSON: {"items":[{"artist":"...","track":"...","lane":"<lane id>"}]}.
+  const system = `You are ECHO's music curator for one listener. Return ONLY JSON: {"items":[{"artist":"...","track":"...","lane":"<lane id>","genre":"<the song's own main style, 1-3 words>","lang":"<main language of the lyrics>"}]}.
 Choose real, officially released songs that are on Spotify:
 - Songs with vocals, in their original studio version: no live, remix, sped-up, slowed, cover, karaoke or instrumental versions${instrumentalLane ? ' (a lane marked "instrumental style" may include instrumentals)' : ''}.
 - Only songs first released in or after the year given for their lane.
+- Lanes not marked "modern only" never contain French-, Arabic- or Maghreb-language songs.
 - Familiar like the listener's own library: songs that are well known in their scene, mostly solid mid-popularity tracks plus a couple of bigger hits, at most one deeper cut per lane. Never obscure, avant-garde, experimental, ambient, noise, jazz or classical (unless the lane is that style); ${NEVER_STOCK}.
+- Every song must squarely belong to its lane's style: a mainstream pop or dance-pop song is not hip-hop, Afro, Latin or house just because it is popular or danceable. If a lane can't be filled with songs that truly fit, give fewer.
 - Match each lane's mood and energy.
 - One song per artist across the whole list; never an artist or style listed under "avoid".
 - Within each lane, order the songs for a smooth listening flow: energy and mood glide from one song to the next.
@@ -238,7 +244,7 @@ Choose real, officially released songs that are on Spotify:
 
 /** Cache key: stable for the same seed + brief, different for every refresh seed. */
 export async function curatorCacheKey(model: string, prompt: { system: string; user: string }, seed: number): Promise<string> {
-  return `ai:music:v2:${await hashKey(`${model}\n${prompt.system}\n${prompt.user}`)}:${seed}`;
+  return `ai:music:v3:${await hashKey(`${model}\n${prompt.system}\n${prompt.user}`)}:${seed}`;
 }
 
 /**
@@ -247,36 +253,74 @@ export async function curatorCacheKey(model: string, prompt: { system: string; u
  * and checked (artist, era, exclusions) before it can be shown, so hallucinated songs are dropped.
  */
 export async function llmMusicPicks(brief: CuratorBrief, cfg: AiConfig, http: HttpClient, opts: { seed?: number } = {}): Promise<MusicPick[]> {
-  const model = cfg.musicModel ?? cfg.model;
   const prompt = curatorPrompt(brief);
-  const cacheKey = await curatorCacheKey(model, prompt, opts.seed ?? 0);
   const total = brief.request ? brief.request.count : (brief.lanes ?? []).reduce((s, l) => s + l.count, 0);
-  const res = await withRateLimitRetry(() => http.json<{ choices: Array<{ message: { content: string } }> }>(`${cfg.baseUrl}/chat/completions`, {
-    init: {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}) },
-      body: JSON.stringify({
-        model,
-        ...modelParams(model),
-        temperature: 0.7,
-        response_format: { type: 'json_object' },
-        messages: [
-          { role: 'system', content: prompt.system },
-          { role: 'user', content: prompt.user },
-        ],
-      }),
-    },
-    timeoutMs: 20000,
-    provider: 'ai',
-    cacheKey,
-    ttl: 86400,
-  }));
+  const ask = async (model: string) => {
+    const cacheKey = await curatorCacheKey(model, prompt, opts.seed ?? 0);
+    return http.json<{ choices: Array<{ message: { content: string } }> }>(`${cfg.baseUrl}/chat/completions`, {
+      init: {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}) },
+        body: JSON.stringify({
+          model,
+          ...modelParams(model),
+          temperature: 0.7,
+          // No strict JSON mode: long answers fail it outright ("Failed to generate JSON"); the
+          // lenient parser keeps every complete song instead.
+          messages: [
+            { role: 'system', content: prompt.system },
+            { role: 'user', content: prompt.user },
+          ],
+        }),
+      },
+      timeoutMs: 20000,
+      provider: 'ai',
+      cacheKey,
+      ttl: 86400,
+    });
+  };
+  const music = cfg.musicModel ?? cfg.model;
+  let res: { choices: Array<{ message: { content: string } }> };
+  try {
+    res = await ask(music);
+  } catch (e) {
+    if ((e as { kind?: string })?.kind !== 'quota') throw e;
+    // Per-minute token limits are per model: a rate-limited music model hands over to the general one.
+    res = await withRateLimitRetry(() => ask(cfg.model));
+  }
   return parseMusicPicks(res.choices?.[0]?.message?.content ?? '{}', total + 6);
+}
+
+/**
+ * The curator's item objects: the {"items":[…]} JSON when it parses (fences and chatter around it are
+ * ignored), otherwise every complete {"artist":…,"track":…} object found, so a cut-off answer still counts.
+ */
+export function curatorItems(content: string): unknown[] {
+  const text = content.replace(/```(json)?/g, '').trim();
+  const start = text.indexOf('{');
+  const end = text.lastIndexOf('}');
+  if (start >= 0 && end > start) {
+    try {
+      const j = JSON.parse(text.slice(start, end + 1)) as { items?: unknown };
+      if (Array.isArray(j.items)) return j.items;
+    } catch {
+      // fall through to the lenient scan
+    }
+  }
+  const out: unknown[] = [];
+  for (const m of text.matchAll(/\{[^{}]*"artist"\s*:[^{}]*\}/g)) {
+    try {
+      out.push(JSON.parse(m[0]));
+    } catch {
+      // incomplete object: skip
+    }
+  }
+  return out;
 }
 
 /** Validate the curator's JSON: real-looking artist + track, one song per artist. */
 export function parseMusicPicks(content: string, max = 60): MusicPick[] {
-  const json = JSON.parse(content.replace(/^```(json)?|```$/g, '').trim()) as { items?: unknown[] };
+  const json = { items: curatorItems(content) };
   const str = (v: unknown, n = 120) => (typeof v === 'string' && v.trim().length > 0 && v.length < n ? v.trim() : undefined);
   const seen = new Set<string>();
   const out: MusicPick[] = [];
@@ -289,7 +333,9 @@ export function parseMusicPicks(content: string, max = 60): MusicPick[] {
     if (seen.has(key)) continue;
     seen.add(key);
     const lane = str(x.lane, 60) ?? str(x.style, 60);
-    out.push({ artist, track, ...(lane ? { lane: lane.toLowerCase() } : {}) });
+    const genre = str(x.genre, 60);
+    const lang = str(x.lang, 40) ?? str(x.language, 40);
+    out.push({ artist, track, ...(lane ? { lane: lane.toLowerCase() } : {}), ...(genre ? { genre } : {}), ...(lang ? { lang } : {}) });
     if (out.length >= max) break;
   }
   return out;

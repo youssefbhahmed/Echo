@@ -8,7 +8,7 @@ import { resolveSpotifyPicks, type SpotifyPick } from '../providers/spotify.ts';
 import { musicBrief } from '../importer.ts';
 import { llmMusicPicks, type AiConfig, type CuratorBrief, type CuratorLane } from './ai.ts';
 import {
-  chooseLanes, DEFAULT_MIN_YEAR, effectiveLanes, eraFloor, LANE_BY_ID, laneBlocked, laneOfGenre, laneOfGenres, laneReject, laneTag, laneTagOf, laneTargets, MIX_LANE, mixLane, moodPhrase,
+  chooseLanes, DEFAULT_MIN_YEAR, effectiveLanes, eraFloor, LANE_BY_ID, laneBlocked, laneKey, laneOfGenre, laneOfGenres, laneReject, laneTag, laneTagOf, laneTargets, MIX_LANE, mixLane, moodPhrase,
   musicPolicy, popularityPhrase, REQUEST_LANE, withoutPerUser, type LaneRuleContext, type LibrarySongs,
 } from './lanes.ts';
 import { CONCEPT_BY_ID } from './concepts.ts';
@@ -71,7 +71,8 @@ export function planMusic(profile: TasteProfile, opts: { hasQuery: boolean; seed
     const rules = requestRules(opts.text);
     return { mode: 'request', lanes: [requestLane(rules, now)], order: [REQUEST_LANE.id], targets: { [REQUEST_LANE.id]: opts.total }, total: opts.total, policy, rules };
   }
-  const n = Math.max(1, Math.min(3, Math.floor(opts.total / 3)));
+  // A whole music page (18+ songs) spreads over 4 lanes; a feed's music share over up to 3.
+  const n = opts.total >= 18 ? 4 : Math.max(1, Math.min(3, Math.floor(opts.total / 3)));
   const chosen = chooseLanes(effectiveLanes(profile, now), opts.seed, n, { feedback: profile.laneFeedback, blocked: (l) => laneBlocked(l, profile), regionalShare: policy.regionalShare });
   if (!chosen.length) return null;
   const t = laneTargets(chosen, opts.total, 3);
@@ -82,10 +83,12 @@ export function planMusic(profile: TasteProfile, opts: { hasQuery: boolean; seed
 }
 
 /**
- * Songs asked from the curator per lane: about twice the lane's slots (9–18). Only ~40–60% of picks
- * survive resolution (ListenBrainz coverage, era/library/version filters), more when Spotify search is limited.
+ * Songs asked from the curator per lane: about three times the lane's slots (12–24). Spotify search is
+ * rate-limited most of the time in Development Mode, so picks resolve through ListenBrainz (~40–50%
+ * coverage) after the off-lane style, era, library and version filters (~70% pass): ~30% survive.
  */
-export const askCount = (target: number) => Math.max(9, Math.min(18, Math.ceil(target * 2) + 1));
+export const MAX_ASK = 64;
+export const askCount = (target: number) => Math.max(12, Math.min(24, Math.ceil(target * 3) + 2));
 
 /** Curator brief from the plan: lane labels, generic descriptors, mood, era — never track or artist names. */
 export function buildBrief(plan: MusicPlan, profile: TasteProfile, ctx: { intent?: Intent; words?: string; moods?: string[] } = {}): CuratorBrief {
@@ -125,6 +128,9 @@ export function buildBrief(plan: MusicPlan, profile: TasteProfile, ctx: { intent
       count: askCount(plan.targets[l.id] ?? 3),
     };
   });
+  // One call answers ~60 songs in full (and stays inside the AI provider's per-minute token budget).
+  const asked = lanes.reduce((n, l) => n + l.count, 0);
+  if (asked > MAX_ASK) for (const l of lanes) l.count = Math.max(9, Math.floor((l.count * MAX_ASK) / asked));
   return { lanes, moods: ctx.moods?.length ? ctx.moods : undefined, avoid: [...new Set(avoid)] };
 }
 
@@ -181,6 +187,33 @@ export function ruleLaneFor(plan: MusicPlan, hints: Array<string | string[] | un
   return { ...lane, regional: hints.some(isRegionalHint) };
 }
 
+// Style labels a lane also accepts although the taxonomy files them elsewhere (or nowhere):
+// "neo-soul"/"funk"/"gospel" in the soul lane, plain "house" in the melodic-house lane, etc.
+const LANE_ALSO: Record<string, RegExp> = {
+  'blues-soul': /\b(soul|funk|gospel|blues|folk|country|americana)\b/,
+  'melodic-house': /\b(house|electronic|electronica|downtempo|organic|melodic techno|afro tech)\b/,
+  edm: /\b(edm|house|uk garage|2 step|electro|future bass|big room)\b/,
+  'afro-latin': /\b(afro\w*|latin\w*|caribbean|brazil\w*|baile|reggae\w*|dancehall|amapiano)\b/,
+  'hiphop-rnb': /\b(hip hop|rap|r b|rnb|trap|drill|neo soul)\b/,
+  'rock-metal': /\b(rock|metal|punk|grunge|garage)\b/,
+};
+
+/** The regional lane a lyrics language belongs to ("French" → french, "Arabic"/"Darija" → arabic-pop), else null. */
+export function regionalLaneOfLanguage(lang: string | undefined): string | null {
+  const k = laneKey(lang ?? '');
+  if (/\b(french|francais|fr)\b/.test(k)) return 'french';
+  if (/\b(arabic|arabe|ar|darija|moroccan|egyptian|levantine|gulf|maghrebi|tamazight|berber|amazigh)\b/.test(k)) return 'arabic-pop';
+  return null;
+}
+
+/** Does the curator's own style label fit this lane (its taxonomy rule or the lane's looser allowances)? */
+export function styleFitsLane(label: string, laneId: string): boolean {
+  const k = laneKey(label);
+  const def = LANE_BY_ID[laneId];
+  if (!k || !def) return false;
+  return def.re.test(k) || !!def.broad?.test(k) || !!LANE_ALSO[laneId]?.test(k);
+}
+
 /** Brief → curator → resolve on Spotify → items tagged with their lane, in the curator's order. */
 export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<CurateResult> {
   const brief = buildBrief(plan, deps.profile, { intent: deps.intent, words: deps.words, moods: deps.moods });
@@ -189,6 +222,7 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
   const byLabel = new Map(plan.lanes.map((l) => [normKey(l.label), l.id]));
   const style = new Map<SpotifyPick, string | undefined>();
   const spicks: SpotifyPick[] = [];
+  let offStyle = 0;
   for (const p of picks) {
     let laneId: string | undefined;
     if (plan.mode === 'request') laneId = REQUEST_LANE.id;
@@ -196,6 +230,30 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
     else if (p.lane && byLabel.has(normKey(p.lane))) laneId = byLabel.get(normKey(p.lane));
     else if (plan.lanes.length === 1) laneId = plan.lanes[0].id;
     if (!laneId) continue;
+    // The curator pads lanes with general hits; its own style label must map to the lane (or to
+    // another lane of this refresh, where the song moves). Pop/unknown styles never fill a taste lane.
+    // Lyrics in French or Arabic: the song belongs to that regional lane (capped, 2015+) or nowhere.
+    const langLane = plan.mode === 'lanes' && laneId !== MIX_LANE.id ? regionalLaneOfLanguage(p.lang) : null;
+    if (langLane && !LANE_BY_ID[laneId]?.regional) {
+      if (byId.has(langLane)) laneId = langLane;
+      else {
+        offStyle++;
+        continue;
+      }
+    }
+    // (A song placed by its language stays there: its style label can't move it back out.)
+    if (plan.mode === 'lanes' && laneId !== MIX_LANE.id && p.genre && !(langLane && laneId === langLane)) {
+      const own = laneOfGenre(p.genre);
+      // A French / Arabic / Maghreb song only ever counts in its own (capped, 2015+) lane.
+      const regionalElsewhere = !!own && own !== laneId && !!LANE_BY_ID[own]?.regional;
+      if (own !== laneId && (regionalElsewhere || !styleFitsLane(p.genre, laneId))) {
+        if (own && byId.has(own)) laneId = own;
+        else {
+          offStyle++;
+          continue;
+        }
+      }
+    }
     const sp = { artist: p.artist, track: p.track, laneId };
     style.set(sp, plan.mode === 'request' ? p.lane : undefined);
     spicks.push(sp);
@@ -230,7 +288,7 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
       },
     } as ContentItem;
   });
-  const rejected = Object.entries(res.stats.rejected).map(([k, v]) => `${k} ${v}`).join(', ');
+  const rejected = [...(offStyle ? [`off-lane style ${offStyle}`] : []), ...Object.entries(res.stats.rejected).map(([k, v]) => `${k} ${v}`)].join(', ');
   const detail = `${items.length}/${picks.length} curator picks resolved for ${plan.mode === 'request' ? 'the request' : plan.lanes.map((l) => l.label).join(' · ')} (cache ${res.stats.cached}, ListenBrainz ${res.stats.listenbrainz}, search ${res.stats.searched}${deps.searchBlocked ? ' blocked' : ''}${deps.lookupBlocked ? ', lookups blocked: cache only' : ''}${rejected ? `; rejected: ${rejected}` : ''})`;
   return { items, detail, rateLimitedSec: res.rateLimitedSec, lookupLimitedSec: res.lookupLimitedSec, perLane };
 }

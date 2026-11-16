@@ -1,6 +1,7 @@
 import { analyzeLibrary, applyLibraryImport, tracksFromCsv, trackToItem } from '@shared/importer.ts';
-import { curatorCacheKey, curatorPrompt, parseMusicPicks } from '@shared/engine/ai.ts';
-import { buildBrief, musicQuotaFor, planMusic, requestRules } from '@shared/engine/curator.ts';
+import { curatorCacheKey, curatorPrompt, llmMusicPicks, parseMusicPicks } from '@shared/engine/ai.ts';
+import { createHttp, MemoryCache } from '@shared/providers/http.ts';
+import { buildBrief, MAX_ASK, musicQuotaFor, planMusic, regionalLaneOfLanguage, requestRules, styleFitsLane } from '@shared/engine/curator.ts';
 import { parseIntent } from '@shared/engine/intent.ts';
 import { emptyProfile } from '@shared/engine/profile.ts';
 import type { TasteProfile } from '@shared/types.ts';
@@ -98,5 +99,70 @@ describe('music curator brief', () => {
   it('parses curator JSON: artist + track required, one song per artist', () => {
     const picks = parseMusicPicks(JSON.stringify({ items: [{ artist: 'A', track: 'One', lane: 'Hiphop-RNB' }, { artist: 'a', track: 'Two', lane: 'edm' }, { artist: 'B' }, { artist: 'C', track: 'Three' }] }));
     expect(picks).toEqual([{ artist: 'A', track: 'One', lane: 'hiphop-rnb' }, { artist: 'C', track: 'Three' }]);
+    expect(parseMusicPicks(JSON.stringify({ items: [{ artist: 'D', track: 'Four', lane: 'edm', genre: 'Tropical House' }] }))).toEqual([{ artist: 'D', track: 'Four', lane: 'edm', genre: 'Tropical House' }]);
+    // Fenced, with chatter around it.
+    expect(parseMusicPicks('Here you go:\n```json\n{"items":[{"artist":"E","track":"Five","lane":"edm"}]}\n```')).toEqual([{ artist: 'E', track: 'Five', lane: 'edm' }]);
+    // Cut off mid-answer: every complete song survives.
+    expect(parseMusicPicks('{"items":[{"artist":"F","track":"Six","lane":"edm"},{"artist":"G","track":"Seven","lane":"edm"},{"artist":"H","tra')).toEqual([
+      { artist: 'F', track: 'Six', lane: 'edm' },
+      { artist: 'G', track: 'Seven', lane: 'edm' },
+    ]);
+    expect(parseMusicPicks('sorry, no')).toEqual([]);
+  });
+
+  it('maps a lyrics language to its regional lane', () => {
+    expect(regionalLaneOfLanguage('French')).toBe('french');
+    expect(regionalLaneOfLanguage('français')).toBe('french');
+    expect(regionalLaneOfLanguage('Arabic (Darija)')).toBe('arabic-pop');
+    expect(regionalLaneOfLanguage('English')).toBeNull();
+    expect(regionalLaneOfLanguage('Spanish')).toBeNull();
+    expect(regionalLaneOfLanguage(undefined)).toBeNull();
+    expect(parseMusicPicks('{"items":[{"artist":"J","track":"T","lane":"hiphop-rnb","genre":"rap","lang":"French"}]}')).toEqual([{ artist: 'J', track: 'T', lane: 'hiphop-rnb', genre: 'rap', lang: 'French' }]);
+  });
+
+  it("checks the curator's own style label against the lane", () => {
+    expect(styleFitsLane('dance pop', 'afro-latin')).toBe(false);
+    expect(styleFitsLane('pop', 'hiphop-rnb')).toBe(false);
+    expect(styleFitsLane('electropop', 'edm')).toBe(false);
+    expect(styleFitsLane('afrobeats', 'afro-latin')).toBe(true);
+    expect(styleFitsLane('neo-soul', 'blues-soul')).toBe(true);
+    expect(styleFitsLane('funk', 'blues-soul')).toBe(true);
+    expect(styleFitsLane('house', 'melodic-house')).toBe(true);
+    expect(styleFitsLane('alternative R&B', 'hiphop-rnb')).toBe(true);
+    expect(styleFitsLane('indie rock', 'rock-metal')).toBe(true);
+    expect(styleFitsLane('Moroccan rap', 'arabic-pop')).toBe(true);
+  });
+
+  it('a whole music page uses 4 lanes in one curator call of at most MAX_ASK songs', () => {
+    const { profile } = importedProfile();
+    const page = planMusic(profile, { hasQuery: false, seed: 2, total: 24, now: NOW })!;
+    expect(page.lanes.length).toBe(Math.min(4, profile.music!.lanes!.length));
+    const brief = buildBrief(page, profile);
+    expect(brief.lanes!.reduce((n, l) => n + l.count, 0)).toBeLessThanOrEqual(MAX_ASK);
+    expect(Math.min(...brief.lanes!.map((l) => l.count))).toBeGreaterThanOrEqual(9);
+  });
+
+  it('asks the curator for each song\'s own style and to keep lanes pure', () => {
+    const { profile } = importedProfile();
+    const plan = planMusic(profile, { hasQuery: false, seed: 3, total: 12, now: NOW })!;
+    const { system } = curatorPrompt(buildBrief(plan, profile));
+    expect(system).toMatch(/"genre"/);
+    expect(system).toMatch(/squarely belong to its lane/);
+    expect(system).toMatch(/never contain French-, Arabic- or Maghreb-language songs/);
+  });
+});
+
+describe('curator model handover', () => {
+  it('uses the general model when the music model is over its per-minute limit', async () => {
+    const models: string[] = [];
+    const fetchImpl = (async (_u: string, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body));
+      models.push(body.model);
+      if (body.model === 'music-model') return new Response('{"error":{"message":"Rate limit reached"}}', { status: 429 });
+      return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ items: [{ artist: 'A', track: 'One', lane: 'edm', genre: 'edm' }] }) } }] }));
+    }) as unknown as typeof fetch;
+    const picks = await llmMusicPicks({ lanes: [{ id: 'edm', label: 'EDM', descriptors: ['edm'], fromYear: 2010, regional: false, count: 9 }] }, { baseUrl: 'https://ai.test/v1', model: 'general-model', musicModel: 'music-model' }, createHttp(new MemoryCache(), fetchImpl), { seed: 1 });
+    expect(models).toEqual(['music-model', 'general-model']);
+    expect(picks).toEqual([{ artist: 'A', track: 'One', lane: 'edm', genre: 'edm' }]);
   });
 });

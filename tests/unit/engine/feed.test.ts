@@ -129,6 +129,38 @@ describe('lane feed end to end (mocked AI, ListenBrainz and Spotify; search bloc
     }
     expect(res.pipeline.find((p) => p.step === 'music-ai')?.detail).toMatch(/search 0 blocked/);
   });
+  it("drops songs whose own style doesn't fit their lane, and moves a song filed under the wrong lane", async () => {
+    // The curator's own style label per song: H3 is really house (moves), M2 is plain dance-pop (dropped).
+    // M3 is labelled French rap: a regional song never stays in another lane, even when "rap" would fit it.
+    const genre: Record<string, string> = { 'Song H1': 'hip-hop', 'Song H3': 'deep house', 'Song H4': 'neo-soul', 'Song M1': 'afro house', 'Song M2': 'dance pop', 'Song M3': 'French rap', 'Song F2': 'pop urbaine', 'Song F3': 'French rap', 'Song F4': 'chanson' };
+    const fetchImpl = (async (u: string, init?: RequestInit) => {
+      const url = String(u);
+      if (url.includes('accounts.spotify.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
+      if (url.includes('/chat/completions')) {
+        // H4 is sung in French: it can only be a French-lane song, whatever its style label says.
+        return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ items: picks.map(({ artist, track, lane }) => ({ artist, track, lane, ...(genre[track] ? { genre: genre[track] } : {}), lang: track === 'Song H4' ? 'French' : 'English' })) }) } }] }));
+      }
+      if (url === LB_SPOTIFY_MAPPING_URL) {
+        const rows = JSON.parse(String(init?.body)) as Array<{ artist_name: string; track_name: string }>;
+        return new Response(JSON.stringify(rows.map((r) => ({ ...r, spotify_track_ids: [tid(picks.findIndex((p) => p.track === r.track_name))] }))));
+      }
+      const m = /\/v1\/tracks\/(LANE\d+)/.exec(url);
+      if (m) {
+        const p = picks[Number(m[1].slice(4))];
+        return new Response(JSON.stringify({ id: m[1], name: p.track, artists: [{ id: 'a', name: p.artist }], album: { id: 'al', name: 'Album', images: [], release_date: `${p.year}-06-01` }, duration_ms: 200000, external_urls: { spotify: `https://open.spotify.com/track/${m[1]}` }, is_playable: true }));
+      }
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    const env = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b', AI_BASE_URL: 'https://ai.test/v1', AI_MODEL: 'm' } as Record<string, string>)[n];
+    const res = await runPipeline({ categories: ['music'], limit: 9 }, { env, http: createHttp(new MemoryCache(), fetchImpl), profile, blockedProviders: new Set(['spotify']), seed: 1 });
+    const byLane = (id: string) => res.recommendations.filter((r) => (r.item.metadata?.lane as { id: string }).id === id).map((r) => r.item.title);
+    expect(res.recommendations.map((r) => r.item.title)).not.toContain('Song M2');
+    expect(byLane('melodic-house')).toContain('Song H3');
+    expect(byLane('hiphop-rnb')).toEqual(['Song H1']);
+    expect(byLane('french')).toContain('Song H4');
+    expect(byLane('melodic-house')).not.toContain('Song M3');
+    expect(res.pipeline.find((p) => p.step === 'music-ai')?.detail).toMatch(/off-lane style 1/);
+  });
 });
 
 describe('music outside the curator still follows the lane contract and rules', () => {
