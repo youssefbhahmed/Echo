@@ -18,7 +18,7 @@ const ANGLE: Record<Category, number> = { youtube: -90, music: -18, screen: 54, 
 function Constellation({ data }: { data: ProfileResponse }) {
   const { model } = data;
   const nodes = useMemo(() => {
-    const top = Object.entries(model.concepts).filter(([k, w]) => w > 0.15 && CONCEPT_BY_ID[k]).sort((a, b) => b[1] - a[1]).slice(0, 16);
+    const top = Object.entries(model.concepts).filter(([k, w]) => w > 0.15 && CONCEPT_BY_ID[k]).sort((a, b) => b[1] - a[1]).slice(0, 14);
     const max = top[0]?.[1] ?? 1;
     const placed = top.map(([id, w], i) => {
       let x = 0;
@@ -41,18 +41,27 @@ function Constellation({ data }: { data: ProfileResponse }) {
       const r = 48 + (1 - strength) * 92;
       return { id, w, cats, x: 180 + Math.cos(angle) * r, y: 180 + Math.sin(angle) * r, size: 4 + strength * 9 };
     });
-    // Simple collision relaxation so labels stay readable; keeps nodes inside the orbit.
-    for (let iter = 0; iter < 80; iter++) {
+    // Label-aware collision relaxation: each star + its label is a box; boxes push apart until no
+    // two overlap, while staying inside the orbit.
+    const box = (n: (typeof placed)[number]) => ({ w: Math.max(n.size * 2, conceptLabel(n.id).split(' & ')[0].length * 5.3) + 8, h: n.size * 2 + 16 });
+    for (let iter = 0; iter < 160; iter++) {
+      let moved = false;
       for (let a = 0; a < placed.length; a++) {
         for (let b = a + 1; b < placed.length; b++) {
           const A = placed[a];
           const B = placed[b];
-          const dx = B.x - A.x;
-          const dy = B.y - A.y;
-          const d = Math.hypot(dx, dy) || 0.01;
-          const min = A.size + B.size + 22;
-          if (d < min) {
-            const push = (min - d) / 2;
+          const ba = box(A);
+          const bb = box(B);
+          const ox = (ba.w + bb.w) / 2 - Math.abs(B.x - A.x);
+          const oy = (ba.h + bb.h) / 2 - Math.abs(B.y - A.y);
+          if (ox > 0 && oy > 0) {
+            moved = true;
+            // Push apart along the line between the two stars (organic spread, not a column).
+            let dx = B.x - A.x;
+            let dy = B.y - A.y;
+            const d = Math.hypot(dx, dy) || 1;
+            if (d < 0.5) { dx = Math.cos(a + b); dy = Math.sin(a + b); }
+            const push = Math.min(ox, oy) / 2 + 0.6;
             A.x -= (dx / d) * push; A.y -= (dy / d) * push;
             B.x += (dx / d) * push; B.y += (dy / d) * push;
           }
@@ -62,8 +71,9 @@ function Constellation({ data }: { data: ProfileResponse }) {
         const dx = n.x - 180;
         const dy = n.y - 180;
         const d = Math.hypot(dx, dy);
-        if (d > 140) { n.x = 180 + (dx / d) * 140; n.y = 180 + (dy / d) * 140; }
+        if (d > 150) { n.x = 180 + (dx / d) * 150; n.y = 180 + (dy / d) * 150; }
       }
+      if (!moved) break;
     }
     return placed;
   }, [model]);
@@ -96,7 +106,7 @@ function Constellation({ data }: { data: ProfileResponse }) {
             <motion.g key={n.id} initial={{ opacity: 0, scale: 0.6 }} animate={{ opacity: 1, scale: 1 }} transition={{ delay: i * 0.04, duration: 0.5 }} style={{ transformOrigin: `${n.x}px ${n.y}px` }}>
               <circle cx={n.x} cy={n.y} r={n.size + 5} fill={color} opacity={0.12} />
               <circle cx={n.x} cy={n.y} r={n.size} fill={color} />
-              <text x={n.x} y={n.y + n.size + 11} textAnchor="middle" fontSize="9.5" fill="var(--color-bone)">{conceptLabel(n.id).split(' & ')[0]}</text>
+              <text x={n.x} y={n.y + n.size + 11} textAnchor="middle" fontSize="9.5" fill="var(--color-bone)" style={{ paintOrder: 'stroke', stroke: 'var(--color-ink-2)', strokeWidth: 3 }}>{conceptLabel(n.id).split(' & ')[0]}</text>
             </motion.g>
           );
         })}
@@ -172,14 +182,19 @@ export default function Taste() {
           <Section title="Music mix" hint="What ECHO's music curator aims for. Changes apply on your next refresh.">
             <ul className="space-y-2">
               {data.musicMix.mix.map((f) => (
-                <li key={f.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
-                  <span className="w-full text-sm sm:w-52 sm:truncate" title={f.label}>{f.label.split(' (')[0]}</span>
-                  <div className="h-1.5 min-w-16 flex-1 overflow-hidden rounded-full bg-ink-4"><div className="h-full rounded-full bg-tide" style={{ width: `${Math.max(4, f.share * 100)}%` }} /></div>
-                  <span className="w-10 text-right text-xs text-dim">{Math.round(f.share * 100)}%</span>
-                  <div className="flex overflow-hidden rounded-full border border-line text-xs">
-                    <button type="button" onClick={() => edit({ family: { id: f.id, action: 'less' } })} className="px-2.5 py-1 text-mist hover:bg-ink-3 hover:text-bone">Less</button>
-                    <button type="button" onClick={() => edit({ family: { id: f.id, action: 'more' } })} className="border-x border-line px-2.5 py-1 text-mist hover:bg-ink-3 hover:text-bone">More</button>
-                    <button type="button" onClick={() => edit({ family: { id: f.id, action: 'never' } })} className="px-2.5 py-1 text-mist hover:bg-ink-3 hover:text-danger">Never</button>
+                <li key={f.id} className="rounded-2xl border border-line/60 bg-ink-3/40 p-3 sm:flex sm:items-center sm:gap-3 sm:border-0 sm:bg-transparent sm:p-0">
+                  <div className="flex items-baseline justify-between gap-3 sm:w-56 sm:shrink-0">
+                    <span className="truncate text-sm text-bone" title={f.label}>{f.label.split(' (')[0]}</span>
+                    <span className="text-xs text-dim tabular-nums sm:hidden">{Math.round(f.share * 100)}%</span>
+                  </div>
+                  <div className="mt-2 flex items-center gap-3 sm:mt-0 sm:flex-1">
+                    <div className="h-1.5 flex-1 overflow-hidden rounded-full bg-ink-4"><div className="h-full rounded-full bg-gradient-to-r from-tide/70 to-tide transition-[width] duration-500" style={{ width: `${Math.max(4, f.share * 100)}%` }} /></div>
+                    <span className="hidden w-9 text-right text-xs text-dim tabular-nums sm:block">{Math.round(f.share * 100)}%</span>
+                    <div className="flex overflow-hidden rounded-full border border-line text-xs" role="group" aria-label={`${f.label.split(' (')[0]} amount`}>
+                      <button type="button" onClick={() => edit({ family: { id: f.id, action: 'less' } })} className="h-10 px-3 text-mist transition-colors hover:bg-white/[0.06] hover:text-bone sm:h-9">Less</button>
+                      <button type="button" onClick={() => edit({ family: { id: f.id, action: 'more' } })} className="h-10 border-x border-line px-3 text-mist transition-colors hover:bg-white/[0.06] hover:text-bone sm:h-9">More</button>
+                      <button type="button" onClick={() => edit({ family: { id: f.id, action: 'never' } })} className="h-10 px-3 text-mist transition-colors hover:bg-danger/10 hover:text-danger sm:h-9">Never</button>
+                    </div>
                   </div>
                 </li>
               ))}

@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { motion } from 'motion/react';
-import { ArrowUp, History, Plus } from 'lucide-react';
+import { ArrowUp, Compass, History, Landmark, Mic2, Music2, Orbit, Plus, Sunrise } from 'lucide-react';
 import type { AnalyzedItem, Explanation, ScoreBreakdown } from '@shared/types.ts';
 import { api } from '../lib/api';
 import { supabase } from '../lib/supabase';
@@ -18,12 +18,13 @@ interface Msg { role: 'user' | 'assistant'; content: string; recs?: Rec[]; clari
 
 const REFINEMENTS = ['More like the first one', 'More adventurous', 'Only books', 'Only music', 'Shorter', 'Less dark'];
 
-const STARTERS = [
-  'Something with the same existential feeling as Interstellar, but it doesn’t have to be science fiction.',
-  'I’m feeling nostalgic. Music that starts melancholic and gradually becomes uplifting.',
-  'I want to understand the origins of civilization through serious documentaries.',
-  'Recommend something completely outside my usual preferences that you think I would love.',
-  'Find music that feels like watching the sunrise after a difficult night.',
+const STARTERS: Array<{ icon: typeof Compass; text: string }> = [
+  { icon: Orbit, text: 'Something with the same existential feeling as Interstellar, but it doesn’t have to be science fiction.' },
+  { icon: Music2, text: 'I’m feeling nostalgic. Music that starts melancholic and gradually becomes uplifting.' },
+  { icon: Landmark, text: 'I want to understand the origins of civilization through serious documentaries.' },
+  { icon: Compass, text: 'Recommend something completely outside my usual preferences that you think I would love.' },
+  { icon: Mic2, text: 'Des podcasts YouTube sur la géopolitique, en français.' },
+  { icon: Sunrise, text: 'Find music that feels like watching the sunrise after a difficult night.' },
 ];
 
 export default function Chat() {
@@ -135,12 +136,14 @@ export default function Chat() {
 
       <div className="flex-1 space-y-6 px-4 pt-6 pb-10 md:px-8">
         {messages.length === 0 && (
-          <div className="max-w-2xl">
-            <p className="text-mist">Speak naturally. A feeling, a reference, a curiosity. I interpret the deeper intent, search real catalogs, and explain every pick.</p>
-            <div className="mt-5 space-y-2">
-              {STARTERS.map((s) => (
-                <button key={s} type="button" onClick={() => send(s)} className="block w-full rounded-2xl border border-line bg-ink-2/70 px-4 py-3 text-left font-display text-[15.5px] text-bone/90 italic transition hover:border-ember/40">
-                  “{s}”
+          <div className="max-w-4xl">
+            <p className="max-w-xl text-[15px] leading-relaxed text-mist">Speak naturally, in any language: a feeling, a reference, a curiosity. ECHO reads the intent behind it, searches real catalogs and explains every pick.</p>
+            <p className="mt-6 text-xs font-semibold tracking-[0.18em] text-dim uppercase">Try asking</p>
+            <div className="mt-3 grid gap-2.5 md:grid-cols-2">
+              {STARTERS.map(({ icon: Icon, text }) => (
+                <button key={text} type="button" onClick={() => send(text)} className="group flex items-start gap-3 rounded-2xl border border-line bg-ink-2/70 p-4 text-left transition-colors duration-150 hover:border-ember/40 hover:bg-ink-2">
+                  <span className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-ember/10 text-ember transition-colors group-hover:bg-ember/20"><Icon className="h-[18px] w-[18px]" aria-hidden /></span>
+                  <span className="font-display text-[15px] leading-snug text-bone/90">{text}</span>
                 </button>
               ))}
             </div>

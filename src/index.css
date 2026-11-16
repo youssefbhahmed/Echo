@@ -60,11 +60,35 @@ body {
   background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='.85' numOctaves='3' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)'/%3E%3C/svg%3E");
 }
 
-.scrollbar-none { scrollbar-width: none; }
-.scrollbar-none::-webkit-scrollbar { display: none; }
+/* Utilities must live in Tailwind's utilities layer, otherwise they override pt-*/pb-* classes. */
+@utility scrollbar-none {
+  scrollbar-width: none;
+  &::-webkit-scrollbar { display: none; }
+}
+/* Add the device safe area ON TOP of the element's own padding. */
+@utility safe-bottom {
+  padding-bottom: max(env(safe-area-inset-bottom), 0px);
+}
+@utility pb-safe-nav {
+  padding-bottom: calc(env(safe-area-inset-bottom) + 6px);
+}
+@utility pt-safe {
+  padding-top: calc(env(safe-area-inset-top) + 1.25rem);
+}
+/* Horizontal scrollers fade at the edges instead of cutting content off. */
+@utility scroll-fade-x {
+  mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 28px), transparent 100%);
+}
 
-.safe-bottom { padding-bottom: env(safe-area-inset-bottom); }
-.safe-top { padding-top: env(safe-area-inset-top); }
+@keyframes shimmer {
+  0% { background-position: -400px 0; }
+  100% { background-position: 400px 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, var(--color-ink-3) 0, var(--color-ink-4) 120px, var(--color-ink-3) 240px);
+  background-size: 800px 100%;
+  animation: shimmer 1.4s linear infinite;
+}
 
 @keyframes echo-ring {
   0% { transform: scale(0.4); opacity: 0.9; }
@@ -88,5 +112,6 @@ input[type='range'].echo-range:focus-visible::-webkit-slider-thumb { outline: 2p
 
 @media (prefers-reduced-motion: reduce) {
   .echo-ring { animation: none; opacity: 0.3; }
+  .skeleton { animation: none; }
   * { scroll-behavior: auto !important; }
 }

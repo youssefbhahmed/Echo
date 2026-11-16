@@ -24,14 +24,28 @@ export default function LibraryPage() {
   const [shown, setShown] = useState(30);
   useEffect(() => setShown(30), [tab, category, q, openCollection]);
   const refreshed = useRef(false);
-
-  // YouTube policy: refresh stored video metadata older than ~30 days when it is displayed.
+  const pickedTab = useRef(false);
+  // Open on the first tab that has something in it (e.g. "Loved" right after a Spotify import).
   useEffect(() => {
-    if (refreshed.current || !lib.data) return;
-    refreshed.current = true;
-    const stale = lib.data.filter((r) => r.content_items?.provider === 'youtube' && (r.content_items.stale || Date.now() - new Date(String(r.content_items.metadata?.fetchedAt ?? 0)).getTime() > 25 * 86400_000)).map((r) => r.item_id);
-    if (stale.length) api.refresh(stale).then((r) => { if (r.refreshed) qc.invalidateQueries({ queryKey: ['library'] }); }).catch(() => undefined);
-  }, [lib.data, qc]);
+    if (pickedTab.current || !lib.data) return;
+    pickedTab.current = true;
+    const rows = lib.data;
+    if (!rows.some((r) => r.saved)) setTab(rows.some((r) => r.liked || (r.rating ?? 0) >= 4) ? 'liked' : rows.some((r) => r.status === 'consumed') ? 'finished' : 'saved');
+  }, [lib.data]);
+
+  // Keep displayed items fresh: YouTube's 30-day policy, and cover art for imported Spotify songs.
+  const asked = useRef(new Set<string>());
+  const refreshVisible = (visible: Array<{ item_id: string; content_items: { provider: string; artwork_url: string | null; stale: boolean; metadata: Record<string, unknown> } | null }>) => {
+    const ids = visible
+      .filter((r) => r.content_items && !asked.current.has(r.item_id))
+      .filter((r) => (r.content_items!.provider === 'spotify' && !r.content_items!.artwork_url) || (r.content_items!.provider === 'youtube' && (r.content_items!.stale || Date.now() - new Date(String(r.content_items!.metadata?.fetchedAt ?? 0)).getTime() > 25 * 86400_000)))
+      .map((r) => r.item_id)
+      .slice(0, 40);
+    if (!ids.length) return;
+    ids.forEach((id) => asked.current.add(id));
+    api.refresh(ids).then((r) => { if (r.refreshed) qc.invalidateQueries({ queryKey: ['library'] }); }).catch(() => undefined);
+  };
+  void refreshed;
 
   const rows = useMemo(() => {
     let list = (lib.data ?? []).filter((r) => r.content_items);
@@ -46,6 +60,11 @@ export default function LibraryPage() {
     if (needle) list = list.filter((r) => `${r.content_items!.title} ${r.content_items!.creators.join(' ')} ${r.note ?? ''}`.toLowerCase().includes(needle));
     return list;
   }, [lib.data, tab, category, q, openCollection, collections.data]);
+
+  useEffect(() => {
+    refreshVisible(rows.slice(0, shown));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [rows, shown]);
 
   // Items saved to collections but not otherwise in the library still need display data.
   const collection = collections.data?.find((c) => c.id === openCollection);
@@ -128,7 +147,11 @@ export default function LibraryPage() {
               <CategoryTabs value={category} onChange={setCategory} />
             </div>
             {lib.isLoading ? <Listening label="Opening your library…" /> : rows.length === 0 ? (
-              <p className="py-16 text-center text-mist">{q ? 'No matches.' : 'Nothing here yet. Save, like or finish things from Discover and Echo AI.'}</p>
+              <div className="mx-auto max-w-sm py-20 text-center">
+                <div className="mx-auto grid h-14 w-14 place-items-center rounded-full bg-ember/10"><Search className="h-6 w-6 text-ember" aria-hidden /></div>
+                <p className="mt-4 font-display text-xl">{q ? 'No matches' : 'Nothing here yet'}</p>
+                <p className="mt-1.5 text-sm text-mist">{q ? 'Try another word, or clear the search.' : 'Save, like or finish things from Discover and Echo AI, and they’ll appear here.'}</p>
+              </div>
             ) : (
               <>
               <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">

@@ -1,6 +1,7 @@
 import { StrictMode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { BrowserRouter } from 'react-router-dom';
+import { MotionConfig } from 'motion/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { registerSW } from 'virtual:pwa-register';
 import { AuthProvider } from './lib/auth';
@@ -25,12 +26,14 @@ import('./hooks/data').then(({ flushFeedbackQueue }) => {
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>
+      <MotionConfig reducedMotion="user">
       <BrowserRouter>
         <AuthProvider>
           <App />
           <Toaster />
         </AuthProvider>
       </BrowserRouter>
+      </MotionConfig>
     </QueryClientProvider>
   </StrictMode>,
 );

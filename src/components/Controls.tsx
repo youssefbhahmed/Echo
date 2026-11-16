@@ -36,11 +36,11 @@ export function ExplorationSlider({ value, onChange, compact }: { value: number;
 
 export function MoodChips({ selected, onToggle }: { selected: string[]; onToggle: (m: string) => void }) {
   return (
-    <div className="scrollbar-none -mx-4 flex gap-2 overflow-x-auto px-4 pb-1" role="group" aria-label="Moods">
+    <div className="scrollbar-none scroll-fade-x -mx-4 flex gap-2 overflow-x-auto px-4 py-0.5" role="group" aria-label="Moods">
       {MOOD_CHIPS.map((m) => {
         const on = selected.includes(m);
         return (
-          <button key={m} type="button" aria-pressed={on} onClick={() => onToggle(m)} className={`shrink-0 rounded-full border px-3.5 py-1.5 text-sm transition ${on ? 'border-ember bg-ember text-ink font-semibold' : 'border-line text-mist hover:border-white/20 hover:text-bone'}`}>
+          <button key={m} type="button" aria-pressed={on} onClick={() => onToggle(m)} className={`h-9 shrink-0 rounded-full border px-3.5 text-[13.5px] transition-colors duration-150 ${on ? 'border-ember bg-ember font-semibold text-ink' : 'border-line text-mist hover:border-white/20 hover:text-bone'}`}>
             {conceptLabel(m).replace(' & ', ' · ')}
           </button>
         );
@@ -52,14 +52,14 @@ export function MoodChips({ selected, onToggle }: { selected: string[]; onToggle
 export function CategoryTabs({ value, onChange }: { value: Category | 'all'; onChange: (c: Category | 'all') => void }) {
   const tabs: Array<Category | 'all'> = ['all', ...CATEGORIES];
   return (
-    <div className="scrollbar-none -mx-4 flex gap-1.5 overflow-x-auto px-4" role="tablist" aria-label="Categories">
+    <div className="scrollbar-none scroll-fade-x -mx-4 flex gap-1.5 overflow-x-auto px-4 py-0.5" role="tablist" aria-label="Categories">
       {tabs.map((t) => {
         const on = value === t;
         const meta = t === 'all' ? null : CATEGORY_META[t];
         const Icon = meta?.icon;
         return (
-          <button key={t} role="tab" aria-selected={on} type="button" onClick={() => onChange(t)} className={`inline-flex shrink-0 items-center gap-1.5 rounded-full px-3.5 py-2 text-sm transition ${on ? 'bg-bone text-ink font-semibold' : 'bg-ink-3/80 text-mist hover:text-bone'}`}>
-            {Icon && <Icon className="h-4 w-4" style={{ color: on ? undefined : meta!.color }} />}
+          <button key={t} role="tab" aria-selected={on} type="button" onClick={() => onChange(t)} className={`inline-flex h-10 shrink-0 items-center gap-1.5 rounded-full px-4 text-sm transition-colors duration-150 ${on ? 'bg-bone font-semibold text-ink' : 'bg-white/[0.05] text-mist hover:bg-white/[0.08] hover:text-bone'}`}>
+            {Icon && <Icon className="h-4 w-4" aria-hidden style={{ color: on ? undefined : meta!.color }} />}
             {t === 'all' ? 'Everything' : meta!.label}
           </button>
         );

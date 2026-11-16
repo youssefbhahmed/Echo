@@ -33,7 +33,7 @@ test('full journey: signup → onboarding → discover → feedback → chat →
   const cards = page.locator('article');
   await expect(cards.first()).toBeVisible({ timeout: 60_000 });
   expect(await cards.count()).toBeGreaterThan(2);
-  await expect(cards.first().locator('p.italic')).not.toBeEmpty();
+  await expect(cards.first().getByTestId('reason')).not.toBeEmpty();
 
   // Feedback is persisted and learned
   await cards.first().getByRole('button', { name: 'Save' }).click();

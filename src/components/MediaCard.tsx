@@ -1,6 +1,6 @@
-import { forwardRef, memo, useCallback, useRef, useState } from 'react';
+import { forwardRef, memo, useCallback, useEffect, useRef, useState } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
-import { Bookmark, Check, ChevronDown, ExternalLink, Film, Heart, MoreHorizontal, Play, Star, ThumbsDown, X } from 'lucide-react';
+import { ArrowUpRight, Bookmark, Check, Clock, Film, FolderPlus, Heart, MoreHorizontal, Pause, Play, Sparkles, Star, ThumbsDown } from 'lucide-react';
 import type { AnalyzedItem, Explanation, ScoreBreakdown } from '@shared/types.ts';
 import { conceptLabel } from '@shared/engine/concepts.ts';
 import { CATEGORY_META, formatDuration, KIND_LABEL, PROVIDER_LABEL, year } from '../lib/meta';
@@ -17,40 +17,51 @@ interface Props {
   trajectoryStep?: number;
   source?: 'feed' | 'chat' | 'library';
   onDismiss?: (id: string) => void;
-  compact?: boolean;
+  /** Large hero presentation (Discover's top pick). */
+  featured?: boolean;
 }
+
+/** Hero artwork width by shape: posters stay narrow, squares medium, videos wide. */
+const FEATURED_ART: Record<string, string> = {
+  youtube: 'w-full md:w-[52%]',
+  music: 'mx-auto w-[72%] max-w-[300px] md:mx-0 md:w-[280px]',
+  podcasts: 'mx-auto w-[72%] max-w-[300px] md:mx-0 md:w-[280px]',
+  screen: 'mx-auto w-[58%] max-w-[240px] md:mx-0 md:w-[230px]',
+  books: 'mx-auto w-[58%] max-w-[240px] md:mx-0 md:w-[230px]',
+};
 
 const ASPECT: Record<string, string> = { youtube: 'aspect-video', music: 'aspect-square', podcasts: 'aspect-square', screen: 'aspect-[2/3]', books: 'aspect-[2/3]' };
 
-function Artwork({ item, onPlay, playable }: { item: AnalyzedItem; onPlay?: () => void; playable: boolean }) {
+/** Artwork with a shimmer placeholder and a soft fade-in once loaded. */
+export function Artwork({ item, className = '', rounded = 'rounded-2xl' }: { item: AnalyzedItem; className?: string; rounded?: string }) {
   const meta = CATEGORY_META[item.category];
   const Icon = meta.icon;
-  const [broken, setBroken] = useState(false);
+  const [state, setState] = useState<'loading' | 'ok' | 'error'>(item.artworkUrl ? 'loading' : 'error');
   return (
-    <button
-      type="button"
-      onClick={onPlay}
-      disabled={!onPlay}
-      className={`group relative block w-full overflow-hidden rounded-2xl bg-ink-3 ${ASPECT[item.category]} ${onPlay ? 'cursor-pointer' : 'cursor-default'}`}
-      aria-label={playable ? `Play ${item.title}` : item.title}
-    >
-      {item.artworkUrl && !broken ? (
-        <img src={item.artworkUrl} alt="" loading="lazy" decoding="async" onError={() => setBroken(true)} className="h-full w-full object-cover transition duration-700 ease-[var(--ease-echo)] group-hover:scale-[1.04]" />
-      ) : (
-        <div className="grid h-full w-full place-items-center" style={{ background: `radial-gradient(circle at 30% 20%, color-mix(in oklab, ${meta.color} 30%, transparent), transparent 70%)` }}>
-          <Icon className="h-10 w-10 opacity-60" style={{ color: meta.color }} />
+    <div className={`relative overflow-hidden bg-ink-3 ${rounded} ${ASPECT[item.category]} ${className}`}>
+      {state === 'loading' && <div className="skeleton absolute inset-0" aria-hidden />}
+      {item.artworkUrl && state !== 'error' && (
+        <img
+          src={item.artworkUrl}
+          alt=""
+          loading="lazy"
+          decoding="async"
+          onLoad={() => setState('ok')}
+          onError={() => setState('error')}
+          className={`h-full w-full object-cover transition-[opacity,transform] duration-700 ease-[var(--ease-echo)] group-hover:scale-[1.03] ${state === 'ok' ? 'opacity-100' : 'opacity-0'}`}
+        />
+      )}
+      {state === 'error' && (
+        <div className="grid h-full w-full place-items-center" style={{ background: `radial-gradient(circle at 30% 20%, color-mix(in oklab, ${meta.color} 28%, transparent), transparent 72%)` }}>
+          <Icon className="h-9 w-9 opacity-60" style={{ color: meta.color }} aria-hidden />
         </div>
       )}
-      {playable && (
-        <span className="absolute bottom-2.5 right-2.5 grid h-11 w-11 place-items-center rounded-full bg-bone text-ink shadow-xl transition group-hover:scale-110">
-          <Play className="ml-0.5 h-5 w-5 fill-current" />
-        </span>
-      )}
-    </button>
+      <div className="pointer-events-none absolute inset-0 rounded-[inherit] ring-1 ring-white/[0.06] ring-inset" aria-hidden />
+    </div>
   );
 }
 
-function IconButton({ label, active, onClick, children, tone = 'ember' }: { label: string; active?: boolean; onClick: () => void; children: React.ReactNode; tone?: 'ember' | 'mist' }) {
+function ActionButton({ label, active, onClick, children, danger }: { label: string; active?: boolean; onClick: () => void; children: React.ReactNode; danger?: boolean }) {
   return (
     <button
       type="button"
@@ -58,25 +69,57 @@ function IconButton({ label, active, onClick, children, tone = 'ember' }: { labe
       aria-pressed={active}
       title={label}
       onClick={onClick}
-      className={`grid h-10 w-10 place-items-center rounded-full border transition active:scale-90 ${active ? (tone === 'ember' ? 'border-ember/50 bg-ember/15 text-ember' : 'border-line bg-ink-4 text-bone') : 'border-line text-mist hover:border-white/20 hover:text-bone'}`}
+      className={`grid h-11 w-11 place-items-center rounded-full transition-[background-color,color,transform] duration-150 active:scale-90 ${
+        active ? (danger ? 'bg-white/10 text-bone' : 'bg-ember/15 text-ember') : 'text-mist hover:bg-white/[0.06] hover:text-bone'
+      }`}
     >
       {children}
     </button>
   );
 }
 
-export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard({ item, explanation, score, trajectoryStep, source = 'feed', onDismiss, compact }, ref) {
+function MenuItem({ icon: Icon, children, onClick, href }: { icon: React.ComponentType<{ className?: string }>; children: React.ReactNode; onClick?: () => void; href?: string }) {
+  const cls = 'flex w-full items-center gap-3 rounded-xl px-3 py-2.5 text-left text-sm text-bone/90 hover:bg-white/[0.06]';
+  if (href)
+    return (
+      <a href={href} target="_blank" rel="noreferrer" className={cls} onClick={onClick}>
+        <Icon className="h-4 w-4 text-mist" /> {children}
+      </a>
+    );
+  return (
+    <button type="button" onClick={onClick} className={cls}>
+      <Icon className="h-4 w-4 text-mist" /> {children}
+    </button>
+  );
+}
+
+export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard({ item, explanation, score, trajectoryStep, source = 'feed', onDismiss, featured }, ref) {
   const lib = useLibraryMap().get(item.id);
   const feedback = useFeedback();
   const [playing, setPlaying] = useState(false);
   const [trailer, setTrailer] = useState<string | null | undefined>(undefined);
-  const [more, setMore] = useState(false);
+  const [menu, setMenu] = useState(false);
   const [details, setDetails] = useState(false);
   const [collections, setCollections] = useState(false);
   const playedRef = useRef(false);
+  const menuRef = useRef<HTMLDivElement>(null);
   const meta = CATEGORY_META[item.category];
   const playable = !!item.embed;
+  const canTrailer = item.provider === 'tmdb';
   const send = (type: Parameters<typeof feedback.mutate>[0]['type'], rating?: number) => feedback.mutate({ item, type, rating, source });
+
+  useEffect(() => {
+    if (!menu) return;
+    const close = (e: MouseEvent | KeyboardEvent) => {
+      if (e instanceof KeyboardEvent ? e.key === 'Escape' : !menuRef.current?.contains(e.target as Node)) setMenu(false);
+    };
+    document.addEventListener('mousedown', close);
+    document.addEventListener('keydown', close);
+    return () => {
+      document.removeEventListener('mousedown', close);
+      document.removeEventListener('keydown', close);
+    };
+  }, [menu]);
 
   const onPlayed = useCallback(() => {
     if (playedRef.current) return;
@@ -84,8 +127,10 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
     feedback.mutate({ item, type: 'play', source });
   }, [feedback, item, source]);
 
-  const openTrailer = async () => {
-    if (trailer !== undefined) return setPlaying((p) => !p);
+  const togglePlay = async () => {
+    if (playable) return setPlaying((p) => !p);
+    if (!canTrailer) return;
+    if (trailer !== undefined) return setPlaying((p) => !p && !!trailer);
     try {
       const r = await api.trailer(item.id);
       setTrailer(r.videoId);
@@ -96,153 +141,211 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
     }
   };
 
-  const facts = [KIND_LABEL[item.kind], year(item.releaseDate), formatDuration(item.durationSec), item.rating ? `★ ${item.provider === 'openlibrary' ? (item.rating * 5).toFixed(1) : (item.rating * 10).toFixed(1)}` : null].filter(Boolean);
-  const side = !compact && item.category !== 'youtube';
+  const rating = item.rating ? (item.provider === 'openlibrary' ? (item.rating * 5).toFixed(1) : (item.rating * 10).toFixed(1)) : null;
+  const facts = [year(item.releaseDate), formatDuration(item.durationSec)].filter(Boolean) as string[];
+  const reason = explanation?.reasons[0]?.detail ?? explanation?.text;
+  const stacked = featured || item.category === 'youtube';
 
   return (
     <motion.article
       ref={ref}
-      layout
-      initial={{ opacity: 0, y: 16 }}
+      layout="position"
+      initial={{ opacity: 0, y: 14 }}
       animate={{ opacity: 1, y: 0 }}
-      exit={{ opacity: 0, scale: 0.96, transition: { duration: 0.18 } }}
-      transition={{ duration: 0.45, ease: [0.22, 1, 0.36, 1] }}
-      className="relative rounded-[var(--radius-card)] border border-line bg-ink-2/80 p-3 shadow-[0_20px_60px_-30px_rgba(0,0,0,0.8)] backdrop-blur"
+      exit={{ opacity: 0, scale: 0.97, transition: { duration: 0.16 } }}
+      transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
+      className={`group relative flex flex-col rounded-[var(--radius-card)] border border-line bg-ink-2/85 p-3 shadow-[0_24px_60px_-36px_rgba(0,0,0,0.9)] transition-colors duration-200 hover:border-white/[0.13] ${featured ? 'md:p-5' : ''}`}
     >
-      <div className={side ? 'flex gap-3.5' : 'space-y-3'}>
-        <div className={side ? (item.category === 'music' || item.category === 'podcasts' ? 'w-[38%] shrink-0' : 'w-[34%] shrink-0') : ''}>
-          <Artwork item={item} playable={playable} onPlay={playable ? () => setPlaying((p) => !p) : undefined} />
-        </div>
-        <div className="min-w-0 flex-1">
-          <div className="flex items-center gap-2 text-[11px] font-semibold uppercase tracking-[0.14em]" style={{ color: meta.color }}>
-            <span className="h-1.5 w-1.5 rounded-full" style={{ background: meta.color }} />
-            {meta.short}
-            {trajectoryStep !== undefined && <span className="rounded-full border border-line px-1.5 py-0.5 text-[10px] tracking-normal text-mist">step {trajectoryStep + 1}</span>}
-            <span className="ml-auto font-medium normal-case tracking-normal text-dim">{PROVIDER_LABEL[item.provider]}</span>
-          </div>
-          <h3 className="mt-1.5 font-display text-[19px] leading-snug font-semibold text-bone [overflow-wrap:anywhere]">{item.title}</h3>
-          {item.creators.length > 0 && <p className="mt-0.5 truncate text-sm text-mist">{item.creators.slice(0, 2).join(', ')}</p>}
-          {facts.length > 0 && <p className="mt-1 text-xs text-dim">{facts.join(' · ')}</p>}
-          {explanation && (
-            <p className="mt-2.5 border-l-2 border-ember/60 pl-2.5 font-display text-[14.5px] leading-snug text-bone/90 italic">{explanation.text}</p>
+      <div className={featured ? 'md:flex md:gap-7' : ''}>
+      <div className={stacked ? (featured ? `${FEATURED_ART[item.category]} md:shrink-0` : '') : 'flex gap-3.5'}>
+        <div className={stacked ? 'relative' : `relative shrink-0 ${item.category === 'music' || item.category === 'podcasts' ? 'w-[36%]' : 'w-[31%]'}`}>
+          <Artwork item={item} />
+          {(playable || canTrailer) && (
+            <button
+              type="button"
+              onClick={togglePlay}
+              aria-label={playing ? `Close player for ${item.title}` : playable ? `Play ${item.title}` : `Watch the trailer of ${item.title}`}
+              className="absolute right-2 bottom-2 grid h-11 w-11 place-items-center rounded-full bg-bone text-ink shadow-[0_8px_24px_-6px_rgba(0,0,0,0.6)] transition-transform duration-150 hover:scale-105 active:scale-95"
+            >
+              {playing ? <Pause className="h-[18px] w-[18px] fill-current" /> : canTrailer && !playable ? <Film className="h-[18px] w-[18px]" /> : <Play className="ml-0.5 h-[18px] w-[18px] fill-current" />}
+            </button>
           )}
         </div>
+        {!stacked && renderText()}
+      </div>
+      {stacked && (
+        <div className={featured ? 'mt-4 flex min-w-0 flex-1 flex-col md:mt-1 md:py-1' : 'mt-3'}>
+          {renderText()}
+          {featured && <div className="md:mt-auto md:pt-4">{renderActions()}</div>}
+        </div>
+      )}
       </div>
 
       <AnimatePresence initial={false}>
         {playing && (item.embed || trailer) && (
-          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
+          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.28 }} className="overflow-hidden">
             <div className="pt-3">{trailer ? <YouTubePlayer videoId={trailer} title={`${item.title} trailer`} /> : item.embed && <EmbedPlayer embed={item.embed} title={item.title} onPlay={onPlayed} />}</div>
           </motion.div>
         )}
       </AnimatePresence>
 
-      {!playable && (
-        <div className="mt-3 flex flex-wrap items-center gap-2">
-          {item.provider === 'tmdb' && (
-            <button type="button" onClick={openTrailer} className="inline-flex items-center gap-1.5 rounded-full bg-bone px-3.5 py-1.5 text-sm font-semibold text-ink active:scale-95">
-              <Film className="h-4 w-4" /> {playing ? 'Hide trailer' : 'Trailer'}
-            </button>
-          )}
-          <a href={item.externalUrl} target="_blank" rel="noreferrer" onClick={() => send('open')} className="inline-flex items-center gap-1.5 rounded-full border border-line px-3.5 py-1.5 text-sm text-bone hover:border-white/25">
-            Open on {PROVIDER_LABEL[item.provider]} <ExternalLink className="h-3.5 w-3.5" />
-          </a>
-          {item.playbackNote && <p className="w-full text-xs text-dim">{item.playbackNote}</p>}
-        </div>
-      )}
-
-      <div className="mt-3 flex items-center gap-2">
-        <IconButton label={lib?.liked ? 'Unlike' : 'Like'} active={lib?.liked === true} onClick={() => send(lib?.liked ? 'unlike' : 'like')}>
-          <Heart className={`h-[18px] w-[18px] ${lib?.liked ? 'fill-current' : ''}`} />
-        </IconButton>
-        <IconButton label={lib?.saved ? 'Remove from library' : 'Save'} active={!!lib?.saved} onClick={() => send(lib?.saved ? 'unsave' : 'save')}>
-          <Bookmark className={`h-[18px] w-[18px] ${lib?.saved ? 'fill-current' : ''}`} />
-        </IconButton>
-        <IconButton label="Not for me" tone="mist" active={lib?.liked === false} onClick={() => { send('dislike'); onDismiss?.(item.id); }}>
-          <ThumbsDown className="h-[18px] w-[18px]" />
-        </IconButton>
-        {onDismiss && (
-          <IconButton label="Skip for now" tone="mist" onClick={() => { send('skip'); onDismiss(item.id); }}>
-            <X className="h-[18px] w-[18px]" />
-          </IconButton>
+      <AnimatePresence initial={false}>
+        {details && explanation && (
+          <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
+            <div className="mt-3 space-y-3 rounded-2xl bg-ink-3/70 p-3 text-xs text-mist">
+              <ul className="space-y-1.5">
+                {explanation.reasons.map((r, i) => (
+                  <li key={i} className="flex gap-2">
+                    <span className="w-[5.5rem] shrink-0 text-dim capitalize">{r.kind}</span>
+                    <span className="text-bone/85">{r.detail}</span>
+                  </li>
+                ))}
+              </ul>
+              {explanation.matchedConcepts.length > 0 && (
+                <div className="flex flex-wrap items-center gap-1.5">
+                  <span className="text-dim">From its metadata:</span>
+                  {explanation.matchedConcepts.map((c) => (
+                    <span key={c} className="rounded-full bg-ink-4 px-2 py-0.5 text-bone/80">{conceptLabel(c)}</span>
+                  ))}
+                </div>
+              )}
+              {item.playbackNote && <p className="text-dim">{item.playbackNote}</p>}
+              {score && (
+                <div className="grid grid-cols-4 gap-1.5 font-mono text-[10.5px]">
+                  {(['query', 'deep', 'surface', 'novelty', 'context', 'quality', 'collaborative', 'semantic'] as const).map((k) => (
+                    <div key={k} className="rounded-lg bg-ink-2 px-1.5 py-1">
+                      <div className="text-dim">{k}</div>
+                      <div className="text-bone">{score[k].toFixed(2)}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </motion.div>
         )}
-        <div className="relative ml-auto">
-          <IconButton label="More actions" tone="mist" active={more} onClick={() => setMore((m) => !m)}>
-            <MoreHorizontal className="h-[18px] w-[18px]" />
-          </IconButton>
+      </AnimatePresence>
+
+      {!featured && renderActions()}
+      {collections && <CollectionPicker itemId={item.id} onClose={() => setCollections(false)} />}
+    </motion.article>
+  );
+
+  function renderActions() {
+    return (
+      <div className={`flex flex-wrap items-center ${featured ? 'mt-4 gap-y-2' : 'mt-2'}`}>
+        {featured && (
+          playable || canTrailer ? (
+            <button type="button" onClick={togglePlay} className="mr-2 inline-flex h-11 items-center gap-2 rounded-full bg-bone px-5 text-sm font-semibold text-ink shadow-[0_10px_30px_-12px_rgba(239,232,220,0.5)] transition-transform active:scale-95">
+              {playing ? <Pause className="h-4 w-4 fill-current" aria-hidden /> : canTrailer && !playable ? <Film className="h-4 w-4" aria-hidden /> : <Play className="h-4 w-4 fill-current" aria-hidden />}
+              {playing ? 'Close player' : canTrailer && !playable ? 'Watch trailer' : 'Play'}
+            </button>
+          ) : (
+            <a href={item.externalUrl} target="_blank" rel="noreferrer" onClick={() => send('open')} className="mr-2 inline-flex h-11 items-center gap-2 rounded-full bg-bone px-5 text-sm font-semibold text-ink transition-transform active:scale-95">
+              Open in {PROVIDER_LABEL[item.provider]} <ArrowUpRight className="h-4 w-4" aria-hidden />
+            </a>
+          )
+        )}
+        <ActionButton label={lib?.liked ? 'Unlike' : 'Like'} active={lib?.liked === true} onClick={() => send(lib?.liked ? 'unlike' : 'like')}>
+          <Heart className={`h-[19px] w-[19px] ${lib?.liked ? 'fill-current' : ''}`} />
+        </ActionButton>
+        <ActionButton label={lib?.saved ? 'Remove from saved' : 'Save for later'} active={!!lib?.saved} onClick={() => send(lib?.saved ? 'unsave' : 'save')}>
+          <Bookmark className={`h-[19px] w-[19px] ${lib?.saved ? 'fill-current' : ''}`} />
+        </ActionButton>
+        <ActionButton label="Not for me" danger active={lib?.liked === false} onClick={() => { send('dislike'); onDismiss?.(item.id); }}>
+          <ThumbsDown className="h-[19px] w-[19px]" />
+        </ActionButton>
+        {explanation && (
+          <button type="button" onClick={() => setDetails((d) => !d)} aria-expanded={details} className="ml-1 h-11 rounded-full px-3 text-xs text-dim transition-colors hover:text-bone">
+            {details ? 'Hide why' : 'Why this?'}
+          </button>
+        )}
+        <div className="relative ml-auto" ref={menuRef}>
+          <ActionButton label="More actions" active={menu} danger onClick={() => setMenu((m) => !m)}>
+            <MoreHorizontal className="h-[19px] w-[19px]" />
+          </ActionButton>
           <AnimatePresence>
-            {more && (
+            {menu && (
               <motion.div
                 initial={{ opacity: 0, y: 6, scale: 0.97 }}
                 animate={{ opacity: 1, y: 0, scale: 1 }}
-                exit={{ opacity: 0, y: 4 }}
-                className="absolute right-0 bottom-12 z-20 w-60 rounded-2xl border border-line bg-ink-3/95 p-2 shadow-2xl backdrop-blur-xl"
+                exit={{ opacity: 0, y: 4, transition: { duration: 0.12 } }}
+                transition={{ duration: 0.18 }}
+                role="menu"
+                className="absolute right-0 bottom-12 z-30 w-64 origin-bottom-right rounded-2xl border border-line bg-ink-3/95 p-1.5 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.9)] backdrop-blur-xl"
               >
-                <p className="px-2 pt-1 pb-1.5 text-xs text-dim">Rate it</p>
-                <div className="flex gap-1 px-1 pb-2" role="radiogroup" aria-label="Rating">
+                <p className="px-3 pt-1.5 pb-1 text-[11px] font-semibold tracking-[0.12em] text-dim uppercase">Rate</p>
+                <div className="flex gap-0.5 px-1.5 pb-1.5" role="radiogroup" aria-label="Rating">
                   {[1, 2, 3, 4, 5].map((n) => (
-                    <button key={n} type="button" role="radio" aria-checked={lib?.rating === n} aria-label={`${n} star${n > 1 ? 's' : ''}`} onClick={() => { send('rate', n); setMore(false); }} className="grid h-9 w-9 place-items-center rounded-lg hover:bg-ink-4">
+                    <button key={n} type="button" role="radio" aria-checked={lib?.rating === n} aria-label={`${n} star${n > 1 ? 's' : ''}`} onClick={() => { send('rate', n); setMenu(false); }} className="grid h-10 w-10 place-items-center rounded-xl hover:bg-white/[0.06]">
                       <Star className={`h-5 w-5 ${lib?.rating && n <= lib.rating ? 'fill-amber text-amber' : 'text-mist'}`} />
                     </button>
                   ))}
                 </div>
-                <button type="button" onClick={() => { send('consumed'); setMore(false); }} className="flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-sm hover:bg-ink-4">
-                  <Check className="h-4 w-4 text-tide" /> {lib?.status === 'consumed' ? 'Finished ✓' : 'Mark as finished'}
-                </button>
-                <button type="button" onClick={() => { setCollections(true); setMore(false); }} className="flex w-full items-center gap-2 rounded-xl px-2 py-2 text-left text-sm hover:bg-ink-4">
-                  <Bookmark className="h-4 w-4 text-iris" /> Add to collection…
-                </button>
-                <a href={item.externalUrl} target="_blank" rel="noreferrer" className="flex w-full items-center gap-2 rounded-xl px-2 py-2 text-sm hover:bg-ink-4">
-                  <ExternalLink className="h-4 w-4 text-mist" /> Open on {PROVIDER_LABEL[item.provider]}
-                </a>
+                <div className="my-1 h-px bg-line" />
+                <MenuItem icon={Check} onClick={() => { send('consumed'); setMenu(false); }}>{lib?.status === 'consumed' ? 'Finished ✓' : 'Mark as finished'}</MenuItem>
+                <MenuItem icon={FolderPlus} onClick={() => { setCollections(true); setMenu(false); }}>Add to collection</MenuItem>
+                {onDismiss && <MenuItem icon={Clock} onClick={() => { send('skip'); onDismiss(item.id); setMenu(false); }}>Not now</MenuItem>}
+                <MenuItem icon={ArrowUpRight} href={item.externalUrl} onClick={() => { send('open'); setMenu(false); }}>Open on {PROVIDER_LABEL[item.provider]}</MenuItem>
               </motion.div>
             )}
           </AnimatePresence>
         </div>
       </div>
+    );
+  }
 
-      {explanation && (
-        <div className="mt-2">
-          <button type="button" onClick={() => setDetails((d) => !d)} className="inline-flex items-center gap-1 text-xs text-dim hover:text-mist" aria-expanded={details}>
-            Why this? <ChevronDown className={`h-3.5 w-3.5 transition ${details ? 'rotate-180' : ''}`} />
-          </button>
-          <AnimatePresence initial={false}>
-            {details && (
-              <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
-                <div className="space-y-2.5 pt-2 text-xs text-mist">
-                  <ul className="space-y-1">
-                    {explanation.reasons.map((r, i) => (
-                      <li key={i} className="flex gap-2">
-                        <span className="w-20 shrink-0 text-dim capitalize">{r.kind}</span>
-                        <span>{r.detail}</span>
-                      </li>
-                    ))}
-                  </ul>
-                  {explanation.matchedConcepts.length > 0 && (
-                    <div className="flex flex-wrap gap-1.5">
-                      <span className="text-dim">Detected from metadata:</span>
-                      {explanation.matchedConcepts.map((c) => (
-                        <span key={c} className="rounded-full bg-ink-4 px-2 py-0.5 text-bone/80">{conceptLabel(c)}</span>
-                      ))}
-                    </div>
-                  )}
-                  {score && (
-                    <div className="grid grid-cols-4 gap-1.5 font-mono text-[10.5px]">
-                      {(['query', 'deep', 'surface', 'novelty', 'context', 'quality', 'collaborative', 'semantic'] as const).map((k) => (
-                        <div key={k} className="rounded-lg bg-ink-3 px-1.5 py-1">
-                          <div className="text-dim">{k}</div>
-                          <div className="text-bone">{score[k].toFixed(2)}</div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              </motion.div>
-            )}
-          </AnimatePresence>
+  function renderText() {
+    return (
+      <div className="min-w-0 flex-1">
+        <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.13em] uppercase">
+          <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: meta.color }} aria-hidden />
+          <span style={{ color: meta.color }}>{KIND_LABEL[item.kind]}</span>
+          {trajectoryStep !== undefined && <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] tracking-normal text-mist normal-case">step {trajectoryStep + 1}</span>}
+          <a
+            href={item.externalUrl}
+            target="_blank"
+            rel="noreferrer"
+            onClick={() => send('open')}
+            className="ml-auto inline-flex min-h-6 items-center gap-0.5 font-medium tracking-normal text-dim normal-case transition-colors hover:text-bone"
+            aria-label={`Open ${item.title} on ${PROVIDER_LABEL[item.provider]}`}
+          >
+            {PROVIDER_LABEL[item.provider]} <ArrowUpRight className="h-3 w-3" aria-hidden />
+          </a>
         </div>
-      )}
-      {collections && <CollectionPicker itemId={item.id} onClose={() => setCollections(false)} />}
-    </motion.article>
-  );
+        <h3 className={`mt-1.5 font-display leading-[1.18] font-semibold text-bone [overflow-wrap:anywhere] ${featured ? 'line-clamp-3 text-[26px] md:text-[34px]' : 'line-clamp-3 text-[18px]'}`}>{item.title}</h3>
+        {item.creators.length > 0 && <p className={`mt-1 truncate text-mist ${featured ? 'text-base' : 'text-[13.5px]'}`}>{item.creators.slice(0, 2).join(', ')}</p>}
+        {(facts.length > 0 || rating) && (
+          <p className="mt-1 flex items-center gap-1.5 text-xs text-dim">
+            {facts.join(' · ')}
+            {rating && (
+              <span className="inline-flex items-center gap-0.5">
+                {facts.length > 0 && '·'} <Star className="h-3 w-3 fill-amber text-amber" aria-hidden /> {rating}
+              </span>
+            )}
+          </p>
+        )}
+        {reason && (
+          <p data-testid="reason" className={`mt-2.5 flex gap-1.5 leading-snug text-bone/80 ${featured ? 'max-w-xl text-[15px] md:mt-4 md:text-[17px] md:leading-relaxed' : 'line-clamp-3 text-[13.5px]'}`}>
+            <Sparkles className="mt-[3px] h-3.5 w-3.5 shrink-0 text-ember" aria-hidden />
+            <span>{reason}</span>
+          </p>
+        )}
+      </div>
+    );
+  }
 }));
+
+export function MediaCardSkeleton({ featured }: { featured?: boolean }) {
+  return (
+    <div className={`rounded-[var(--radius-card)] border border-line bg-ink-2/70 p-3 ${featured ? 'md:flex md:gap-6 md:p-4' : 'flex gap-3.5'}`} aria-hidden>
+      <div className={`skeleton rounded-2xl ${featured ? 'aspect-video md:w-[44%]' : 'aspect-[2/3] w-[31%] shrink-0'}`} />
+      <div className={`flex-1 space-y-2.5 ${featured ? 'mt-4 md:mt-2' : 'pt-1'}`}>
+        <div className="skeleton h-3 w-16 rounded-full" />
+        <div className="skeleton h-5 w-4/5 rounded-lg" />
+        <div className="skeleton h-3.5 w-1/2 rounded-full" />
+        <div className="skeleton mt-4 h-3 w-full rounded-full" />
+        <div className="skeleton h-3 w-3/4 rounded-full" />
+      </div>
+    </div>
+  );
+}

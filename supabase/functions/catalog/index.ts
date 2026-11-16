@@ -42,13 +42,24 @@ serve(async (req) => {
 
   if (body.action === 'refresh') {
     const items = await getItems(body.itemIds);
+    // Spotify items imported from a CSV have no artwork: fill it from Spotify's public oEmbed (cached).
+    const noArt = items.filter((i) => i.provider === 'spotify' && !i.artworkUrl).slice(0, 40);
+    const withArt = (await Promise.all(noArt.map(async (i) => {
+      try {
+        const o = await http.json<{ thumbnail_url?: string }>(`https://open.spotify.com/oembed?url=${encodeURIComponent(i.externalUrl)}`, { cacheKey: `spotify:oembed:${i.id}`, ttl: 30 * 86400, provider: 'spotify', timeoutMs: 5000 });
+        return o.thumbnail_url ? { ...i, artworkUrl: o.thumbnail_url } : null;
+      } catch {
+        return null;
+      }
+    }))).filter((x): x is NonNullable<typeof x> => !!x);
+    if (withArt.length) await upsertItems(withArt);
     const stale = items.filter((i) => i.provider === 'youtube' && (i.metadata?.stale || Date.now() - new Date(String(i.metadata?.fetchedAt ?? 0)).getTime() > 25 * 86400_000));
     const byExt = new Map(stale.map((i) => [i.externalId, i]));
     const fresh = (await refreshYouTube(stale.map((i) => i.externalId), ctx).catch(() => []))
       .map((f) => (byExt.get(f.externalId)?.category === 'podcasts' ? asPodcastEpisode(f) : f))
       .map(analyzeItem);
     await upsertItems(fresh);
-    return json(req, { refreshed: fresh.length });
+    return json(req, { refreshed: fresh.length + withArt.length });
   }
 
   const items = await getItems(body.itemIds);

@@ -54,16 +54,16 @@ export default function AuthPage() {
 
         <form onSubmit={submit} className="mt-8 space-y-3">
           <label className="block">
-            <span className="sr-only">Email</span>
-            <input type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" className="w-full rounded-2xl border border-line bg-ink-2/80 px-4 py-3.5 placeholder:text-dim focus:border-ember/60 focus:outline-none" />
+            <span className="mb-1.5 block text-xs font-medium tracking-wide text-mist">Email</span>
+            <input type="email" required autoComplete="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@example.com" className="h-12 w-full rounded-2xl border border-line bg-ink-2/80 px-4 placeholder:text-dim transition-colors focus:border-ember/60 focus:outline-none" />
           </label>
           {mode !== 'magic' && (
             <label className="block">
-              <span className="sr-only">Password</span>
-              <input type="password" required minLength={8} autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="Password (8+ characters)" className="w-full rounded-2xl border border-line bg-ink-2/80 px-4 py-3.5 placeholder:text-dim focus:border-ember/60 focus:outline-none" />
+              <span className="mb-1.5 block text-xs font-medium tracking-wide text-mist">Password</span>
+              <input type="password" required minLength={8} autoComplete={mode === 'signup' ? 'new-password' : 'current-password'} value={password} onChange={(e) => setPassword(e.target.value)} placeholder="8+ characters" className="h-12 w-full rounded-2xl border border-line bg-ink-2/80 px-4 placeholder:text-dim transition-colors focus:border-ember/60 focus:outline-none" />
             </label>
           )}
-          <button disabled={busy} className="w-full rounded-2xl bg-ember py-3.5 font-semibold text-ink transition hover:bg-[#ff9a70] active:scale-[0.99] disabled:opacity-60">
+          <button disabled={busy} className="mt-2 h-12 w-full rounded-2xl bg-ember font-semibold text-ink shadow-[0_12px_32px_-12px_rgba(255,138,91,0.6)] transition hover:bg-[#ff9a70] active:scale-[0.99] disabled:opacity-60">
             {busy ? 'One moment…' : mode === 'signup' ? 'Create account' : mode === 'magic' ? 'Email me a link' : 'Sign in'}
           </button>
           {msg && <p role="alert" className={`text-sm ${msg.tone === 'err' ? 'text-danger' : 'text-tide'}`}>{msg.text}</p>}
