@@ -81,8 +81,11 @@ export function planMusic(profile: TasteProfile, opts: { hasQuery: boolean; seed
   };
 }
 
-/** Songs asked from the curator per lane: ~9, more when a lane must fill a bigger shelf. */
-export const askCount = (target: number) => Math.max(9, Math.min(14, target + 4));
+/**
+ * Songs asked from the curator per lane: about twice the lane's slots (9–18). Only ~40–60% of picks
+ * survive resolution (ListenBrainz coverage, era/library/version filters), more when Spotify search is limited.
+ */
+export const askCount = (target: number) => Math.max(9, Math.min(18, Math.ceil(target * 2) + 1));
 
 /** Curator brief from the plan: lane labels, generic descriptors, mood, era — never track or artist names. */
 export function buildBrief(plan: MusicPlan, profile: TasteProfile, ctx: { intent?: Intent; words?: string; moods?: string[] } = {}): CuratorBrief {
