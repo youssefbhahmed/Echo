@@ -263,10 +263,13 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
       statuses.set(pid, { id: pid, status: kind === 'quota' ? 'quota' : 'error', message: String(e?.message ?? e).slice(0, 200) });
     }
   });
+  // Stored podcasts follow the same language rule as live search (SPOTIFY_PODCAST_LANGUAGE, default English).
+  const podLang = (deps.env('SPOTIFY_PODCAST_LANGUAGE') ?? 'en').toLowerCase();
+  const podcastLanguageOk = (i: ContentItem) => i.category !== 'podcasts' || podLang === 'any' || !i.language || i.language.toLowerCase().startsWith(podLang);
   // YouTube out of daily quota: serve its shelves from the stored, already-verified catalog instead of dropping them.
   const ytCats = categories.filter((c) => c === 'youtube' || c === 'podcasts');
   if (ytCats.length && deps.catalogFallback && (deps.blockedProviders?.has('youtube') || quotaErrors.includes('youtube'))) {
-    const fb = await deps.catalogFallback('youtube', ytCats).catch(() => [] as ContentItem[]);
+    const fb = (await deps.catalogFallback('youtube', ytCats).catch(() => [] as ContentItem[])).filter(podcastLanguageOk);
     raw.push(...fb);
     pipeline.push({ step: 'fallback', ms: 0, detail: `YouTube quota reached: ${fb.length} stored videos/episodes used instead` });
   }
@@ -299,7 +302,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   const spotifyDown = searchBlocked || quotaErrors.includes('spotify');
   // Spotify search rate-limited: podcasts come from stored, already-verified Spotify shows/episodes.
   if (categories.includes('podcasts') && deps.catalogFallback && spotifyDown) {
-    const fb = await deps.catalogFallback('spotify', ['podcasts']).catch(() => [] as ContentItem[]);
+    const fb = (await deps.catalogFallback('spotify', ['podcasts']).catch(() => [] as ContentItem[])).filter(podcastLanguageOk);
     raw.push(...fb);
     pipeline.push({ step: 'fallback', ms: 0, detail: `Spotify rate-limited: ${fb.length} stored podcasts added` });
   }

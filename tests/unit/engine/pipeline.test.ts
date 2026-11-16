@@ -34,6 +34,22 @@ describe('runPipeline (keyless providers, mocked network)', () => {
     expect(res.pipeline.some((p) => p.step === 'fallback')).toBe(true);
   });
 
+  it('stored podcasts used while Spotify is rate-limited follow the English-only podcast rule', async () => {
+    const { make } = await import('./fixtures');
+    const stored = [
+      make({ title: 'Ancient Worlds Explained', category: 'podcasts', creators: ['History Hour'], description: 'A history podcast about ancient civilisations' }),
+      make({ title: 'Mythes et Legendes', category: 'podcasts', creators: ['Studio FR'], description: 'Podcast sur les mythes anciens' }),
+    ].map((i, n) => ({ ...i, provider: 'spotify' as const, language: n === 0 ? 'en' : 'fr', embed: { type: 'spotify' as const, uri: `spotify:show:${'S'.repeat(21)}${n}`, kind: 'show' as const } }));
+    const env = (k: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b' } as Record<string, string>)[k];
+    const res = await runPipeline({ categories: ['podcasts'], limit: 4 }, {
+      env, http: createHttp(new MemoryCache(), fakeFetch([])), profile: emptyProfile(),
+      blockedProviders: new Set(['spotify', 'youtube']), catalogFallback: async (provider) => (provider === 'spotify' ? stored : []),
+    });
+    const titles = res.recommendations.map((r) => r.item.title);
+    expect(titles).toContain('Ancient Worlds Explained');
+    expect(titles).not.toContain('Mythes et Legendes');
+  });
+
   it('runs all steps for a conversational request and returns grounded, real-catalog items', async () => {
     const log: string[] = [];
     const http = createHttp(new MemoryCache(), fakeFetch(log));
