@@ -11,14 +11,24 @@ import { Tile } from '../components/Tile';
 import { Shelf } from '../components/Shelf';
 import { DetailSheet } from '../components/DetailSheet';
 import { Wordmark } from '../components/Echo';
-import { isQueueable, usePlayer } from '../lib/player';
+import { isQueueable, usePlayQueue } from '../lib/player';
 import { conceptLabel } from '@shared/engine/concepts.ts';
 import { CategoryTabs, ExplorationSlider, MoodChips } from '../components/Controls';
 import { CATEGORY_META, displayTitle, KIND_LABEL } from '../lib/meta';
+import { groupByLane, laneDomId, laneOf, songsLabel, type LaneGroup } from '../lib/lanes';
 
 function greeting() {
   const h = new Date().getHours();
   return h < 5 ? 'Still up' : h < 12 ? 'Good morning' : h < 18 ? 'Good afternoon' : 'Good evening';
+}
+
+/** "Play all" for a shelf or lane: plays its songs in order. */
+function PlayAll({ onClick }: { onClick: () => void }) {
+  return (
+    <button type="button" onClick={onClick} className="inline-flex h-9 items-center gap-1.5 rounded-full bg-bone px-4 text-[13px] font-semibold text-ink transition-transform active:scale-95">
+      <Play className="h-3.5 w-3.5 fill-current" aria-hidden /> Play all
+    </button>
+  );
 }
 
 function useDebounced<T>(v: T, ms: number) {
@@ -83,10 +93,23 @@ export default function Discover() {
   const [open, setOpenState] = useState<{ rec: Recommendation; play: boolean } | null>(null);
   const setOpen = (rec: Recommendation | null) => setOpenState(rec ? { rec, play: false } : null);
   const watch = (rec: Recommendation) => setOpenState({ rec, play: true });
-  const player = usePlayer();
+  const player = usePlayQueue();
   const dismiss = (id: string) => setDismissed((s) => new Set(s).add(id));
   const shelves = CATEGORIES.map((c) => ({ c, items: rest.filter((r) => r.item.category === c) })).filter((x) => x.items.length > 0);
   const SHELF_TITLE: Record<Category, string> = { youtube: 'Videos for you', music: 'Music for you', screen: 'Films & series', books: 'Books to read', podcasts: 'Podcasts to hear' };
+  const tunedSubtitle = (n: number) => (moods.length ? `Tuned to ${moods.map((m) => conceptLabel(m).toLowerCase()).join(', ')}` : `${n} picks`);
+  // Music arrives in listening lanes (metadata.lane): one shelf per lane, in feed order; songs without a lane stay together.
+  const musicLanes = groupByLane(rest.filter((r) => r.item.category === 'music'), (r) => r.item);
+  const laneTitle = (g: LaneGroup<Recommendation>) => g.lane?.label ?? SHELF_TITLE.music;
+  const laneSubtitle = (g: LaneGroup<Recommendation>) => (g.lane ? songsLabel(g.items.length) : tunedSubtitle(g.items.length));
+  const playLane = (g: LaneGroup<Recommendation>, i = 0) => player.playQueue(g.items.map((r) => r.item), i);
+  const playHero = () => {
+    if (!hero) return;
+    // Music plays the hero's lane (or the unlaned songs) from the top pick; other kinds play their category.
+    const lane = hero.item.category === 'music' ? laneOf(hero.item)?.id ?? '' : null;
+    const sameShelf = (r: Recommendation) => r.item.category === hero.item.category && (lane === null || (laneOf(r.item)?.id ?? '') === lane);
+    player.playQueue(recs.filter(sameShelf).map((r) => r.item), 0);
+  };
 
   return (
     <div>
@@ -116,7 +139,7 @@ export default function Discover() {
                 {hero.item.creators[0] && <p className="mt-2 text-base text-mist md:text-lg">{hero.item.creators.slice(0, 2).join(', ')}</p>}
                 {hero.explanation.reasons[0] && <p className="mt-4 max-w-xl text-[15px] leading-relaxed text-bone/85 md:text-[17px]">{hero.explanation.reasons[0].detail}</p>}
                 <div className="mt-6 flex flex-wrap items-center gap-2.5">
-                  <button type="button" onClick={() => (isQueueable(hero.item) ? player.playQueue(recs.filter((r) => r.item.category === hero.item.category).map((r) => r.item), 0) : hero.item.embed ? watch(hero) : setOpen(hero))} className="inline-flex h-12 items-center gap-2 rounded-full bg-bone px-6 text-[15px] font-semibold text-ink shadow-[0_14px_40px_-14px_rgba(239,232,220,0.55)] transition-transform active:scale-95">
+                  <button type="button" onClick={() => (isQueueable(hero.item) ? playHero() : hero.item.embed ? watch(hero) : setOpen(hero))} className="inline-flex h-12 items-center gap-2 rounded-full bg-bone px-6 text-[15px] font-semibold text-ink shadow-[0_14px_40px_-14px_rgba(239,232,220,0.55)] transition-transform active:scale-95">
                     {hero.item.embed ? <><Play className="h-4 w-4 fill-current" aria-hidden /> Play</> : <>Discover it <ArrowUpRight className="h-4 w-4" aria-hidden /></>}
                   </button>
                   <button type="button" onClick={refresh} disabled={feed.isFetching} className="inline-flex h-12 items-center gap-2 rounded-full border border-white/15 bg-white/[0.04] px-5 text-[15px] text-bone backdrop-blur-md transition-colors hover:bg-white/[0.08] disabled:opacity-50">
@@ -181,21 +204,49 @@ export default function Discover() {
             </Shelf>
           ))
         ) : category === 'all' ? (
-          shelves.map(({ c, items }) => (
-            <Shelf
-              key={c}
-              id={`shelf-${c}`}
-              title={SHELF_TITLE[c]}
-              subtitle={moods.length ? `Tuned to ${moods.map((m) => conceptLabel(m).toLowerCase()).join(', ')}` : `${items.length} picks`}
-              action={items.some((r) => isQueueable(r.item)) ? (
-                <button type="button" onClick={() => player.playQueue(items.map((r) => r.item), 0)} className="inline-flex h-9 items-center gap-1.5 rounded-full bg-bone px-4 text-[13px] font-semibold text-ink transition-transform active:scale-95">
-                  <Play className="h-3.5 w-3.5 fill-current" aria-hidden /> Play all
-                </button>
-              ) : undefined}
-            >
-              {items.map((r, i) => <Tile key={r.item.id} rec={r} onOpen={setOpen} onWatch={watch} onPlay={() => player.playQueue(items.map((x) => x.item), i)} />)}
-            </Shelf>
-          ))
+          shelves.flatMap(({ c, items }) =>
+            c === 'music'
+              ? musicLanes.map((g, gi) => (
+                  <Shelf
+                    key={`music-${g.key}`}
+                    id={`shelf-music-${gi}-${laneDomId(g.key)}`}
+                    title={laneTitle(g)}
+                    subtitle={laneSubtitle(g)}
+                    action={g.items.some((r) => isQueueable(r.item)) ? <PlayAll onClick={() => playLane(g)} /> : undefined}
+                  >
+                    {g.items.map((r, i) => <Tile key={r.item.id} rec={r} onOpen={setOpen} onWatch={watch} onPlay={() => playLane(g, i)} />)}
+                  </Shelf>
+                ))
+              : [
+                  <Shelf
+                    key={c}
+                    id={`shelf-${c}`}
+                    title={SHELF_TITLE[c]}
+                    subtitle={tunedSubtitle(items.length)}
+                    action={items.some((r) => isQueueable(r.item)) ? <PlayAll onClick={() => player.playQueue(items.map((r) => r.item), 0)} /> : undefined}
+                  >
+                    {items.map((r, i) => <Tile key={r.item.id} rec={r} onOpen={setOpen} onWatch={watch} onPlay={() => player.playQueue(items.map((x) => x.item), i)} />)}
+                  </Shelf>,
+                ],
+          )
+        ) : category === 'music' && musicLanes.some((g) => g.lane) ? (
+          musicLanes.map((g, gi) => {
+            const hid = `lane-music-${gi}-${laneDomId(g.key)}`;
+            return (
+              <section key={`music-${g.key}`} className="mt-10 px-4 md:px-10" aria-labelledby={hid}>
+                <div className="flex items-end justify-between gap-4">
+                  <div className="min-w-0">
+                    <h2 id={hid} className="font-display text-[22px] leading-tight md:text-[26px]">{laneTitle(g)}</h2>
+                    <p className="mt-0.5 text-[13px] text-mist">{laneSubtitle(g)}</p>
+                  </div>
+                  {g.items.some((r) => isQueueable(r.item)) && <PlayAll onClick={() => playLane(g)} />}
+                </div>
+                <div className="mt-4 grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5">
+                  {g.items.map((r, i) => <Tile key={r.item.id} rec={r} onOpen={setOpen} onWatch={watch} onPlay={() => playLane(g, i)} className="!w-auto" />)}
+                </div>
+              </section>
+            );
+          })
         ) : (
           <section className="mt-10 px-4 md:px-10" aria-label={CATEGORY_META[category].label}>
             <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5">

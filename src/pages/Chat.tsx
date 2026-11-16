@@ -190,7 +190,7 @@ export default function Chat() {
           e.preventDefault();
           send(input);
         }}
-        className="sticky bottom-[calc(4.5rem+env(safe-area-inset-bottom))] z-30 px-4 pb-3 md:bottom-0 md:px-8 md:pb-6"
+        className="echo-composer-offset md:echo-composer-offset-wide sticky z-30 px-4 pb-3 md:px-8 md:pb-6"
       >
         {showRefine && !busy && (
           <div className="scrollbar-none -mx-4 mb-2 flex gap-2 overflow-x-auto px-4 text-sm md:mx-0 md:px-0" aria-label="Refine suggestions">

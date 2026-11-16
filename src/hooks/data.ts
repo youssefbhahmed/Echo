@@ -5,6 +5,7 @@ import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { toast } from '../components/Toast';
 import { conceptLabel } from '@shared/engine/concepts.ts';
+import { canPlayFrom } from '../lib/playback';
 
 export interface LibraryRow {
   item_id: string;
@@ -37,6 +38,16 @@ export function dbToItem(r: DbItem): AnalyzedItem {
 export function useProfile() {
   const { session } = useAuth();
   return useQuery({ queryKey: ['profile'], queryFn: api.profile, enabled: !!session, staleTime: 30_000 });
+}
+
+/** Spotify account link: connected, and whether full-song playback (Spotify Connect) is allowed. */
+export function useSpotifyStatus() {
+  const profile = useProfile();
+  const configured = !!profile.data?.server.providers.find((p) => p.id === 'spotify')?.configured;
+  const q = useQuery({ queryKey: ['spotify'], queryFn: api.spotifyStatus, retry: false, enabled: configured, staleTime: 5 * 60_000 });
+  const connected = !!q.data?.connected;
+  const canPlay = canPlayFrom(q.data);
+  return { ...q, configured, connected, canPlay };
 }
 
 export function useLibrary() {
@@ -104,14 +115,18 @@ export function useRecent() {
 export function useFeedback() {
   const qc = useQueryClient();
   return useMutation({
-    mutationFn: (v: { item: AnalyzedItem; type: FeedbackType; rating?: number; source?: 'feed' | 'chat' | 'library' }) =>
+    // `silent`: background signals from the player (play/skip) — no toasts, no refetches.
+    mutationFn: (v: { item: AnalyzedItem; type: FeedbackType; rating?: number; source?: 'feed' | 'chat' | 'library'; silent?: boolean }) =>
       api.feedback({ itemId: v.item.id, type: v.type, rating: v.rating, context: { source: v.source } }),
     onMutate: async (v) => {
-      await qc.cancelQueries({ queryKey: ['library'] });
-      const prev = qc.getQueryData<LibraryRow[]>(['library']);
       const patch: Partial<LibraryRow> | null =
         v.type === 'like' ? { liked: true } : v.type === 'unlike' ? { liked: null } : v.type === 'dislike' ? { liked: false, saved: false } : v.type === 'save' ? { saved: true } : v.type === 'unsave' ? { saved: false } : v.type === 'rate' ? { rating: v.rating ?? null } : v.type === 'consumed' ? { status: 'consumed' } : null;
-      if (patch && prev) {
+      // Nothing to show optimistically (play, skip, open…): leave an in-flight library refetch alone (e.g. the
+      // focus refetch that runs while the player records a 'play' on return to the app).
+      if (!patch) return { prev: undefined };
+      await qc.cancelQueries({ queryKey: ['library'] });
+      const prev = qc.getQueryData<LibraryRow[]>(['library']);
+      if (prev) {
         const exists = prev.some((r) => r.item_id === v.item.id);
         qc.setQueryData<LibraryRow[]>(['library'], exists ? prev.map((r) => (r.item_id === v.item.id ? { ...r, ...patch } : r)) : prev);
       }
@@ -121,13 +136,14 @@ export function useFeedback() {
       // Network failure: keep the change and retry automatically instead of losing it.
       if (e instanceof ApiError && e.status === 0) {
         queueFeedback({ itemId: v.item.id, type: v.type, rating: v.rating, source: v.source });
-        toast('Saved on this device. It will sync when the connection is back.');
+        if (!v.silent) toast('Saved on this device. It will sync when the connection is back.');
         return;
       }
       if (ctx?.prev) qc.setQueryData(['library'], ctx.prev);
-      toast((e as Error).message, 'error');
+      if (!v.silent) toast((e as Error).message, 'error');
     },
     onSuccess: (res, v) => {
+      if (v.silent) return;
       qc.invalidateQueries({ queryKey: ['library'] });
       qc.invalidateQueries({ queryKey: ['profile'] });
       const learned = res.learned.filter((l) => Math.abs(l.to - l.from) > 0.02).slice(0, 2);

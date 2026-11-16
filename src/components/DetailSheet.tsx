@@ -46,7 +46,7 @@ export function DetailSheet({ rec, onClose, onDismiss, autoPlay }: { rec: Recomm
               <X className="h-5 w-5" />
             </button>
             <div className="p-2 md:p-3 [&>article]:border-0 [&>article]:bg-transparent [&>article]:shadow-none">
-              <MediaCard key={rec.item.id} featured autoPlay={autoPlay} item={rec.item} explanation={rec.explanation} score={rec.score} trajectoryStep={rec.trajectoryStep} source="feed" onDismiss={onDismiss ? (id) => { onDismiss(id); onClose(); } : undefined} />
+              <MediaCard key={rec.item.id} featured autoPlay={autoPlay} item={rec.item} explanation={rec.explanation} score={rec.score} trajectoryStep={rec.trajectoryStep} source="feed" onPlayStarted={onClose} onDismiss={onDismiss ? (id) => { onDismiss(id); onClose(); } : undefined} />
             </div>
           </motion.div>
         </motion.div>

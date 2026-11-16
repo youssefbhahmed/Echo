@@ -75,6 +75,27 @@ body {
 @utility pt-safe {
   padding-top: calc(env(safe-area-inset-top) + 1.25rem);
 }
+/* Page content keeps clear of the mobile tab bar, the safe area and the mini player (--echo-player-h, set by it). */
+@utility echo-main-pad {
+  padding-bottom: calc(8rem + env(safe-area-inset-bottom) + var(--echo-player-h, 0px));
+}
+@utility echo-main-pad-wide {
+  padding-bottom: calc(4rem + var(--echo-player-h, 0px));
+}
+/* Toasts float above the tab bar and the mini player. */
+@utility echo-toast-offset {
+  bottom: calc(6rem + env(safe-area-inset-bottom) + var(--echo-player-h, 0px));
+}
+@utility echo-toast-offset-wide {
+  bottom: calc(1.5rem + var(--echo-player-h, 0px));
+}
+/* Sticky composers (Echo AI chat) sit above the tab bar and the mini player. */
+@utility echo-composer-offset {
+  bottom: calc(4.5rem + env(safe-area-inset-bottom) + var(--echo-player-h, 0px));
+}
+@utility echo-composer-offset-wide {
+  bottom: var(--echo-player-h, 0px);
+}
 /* Horizontal scrollers fade at the edges instead of cutting content off. */
 @utility scroll-fade-x {
   mask-image: linear-gradient(90deg, transparent 0, #000 16px, #000 calc(100% - 28px), transparent 100%);
