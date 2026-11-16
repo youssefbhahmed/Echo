@@ -461,7 +461,22 @@ export interface LaneRuleContext {
 }
 
 /** Why a resolved song may not be served in a lane (null = fine). */
-export function laneReject(item: ContentItem, lane: { regional: boolean; era?: { from: number } }, ctx: LaneRuleContext): string | null {
+// Recordings registered in France / the Arab world (ISRC country) are, outside electronic music, almost always
+// French- or Arabic-language: they only ever fill their own regional lane (capped, 2015+, off when switched off).
+const FRENCH_ISRC = /^FR/i;
+const ARABIC_ISRC = /^(MA|DZ|TN|LY|EG|LB|SY|JO|PS|IQ|SA|AE|KW|QA|BH|OM|YE)/i;
+const LANGUAGE_NEUTRAL_LANES = new Set(['melodic-house', 'edm', 'jazz-classical']);
+
+/** 'french' | 'arabic' when the ISRC says the recording is regional in a lane where that is a language signal. */
+export function regionalByIsrc(item: Pick<ContentItem, 'metadata'>, lane: { id?: string; regional: boolean }): 'french' | 'arabic' | null {
+  if (lane.regional || (lane.id && LANGUAGE_NEUTRAL_LANES.has(lane.id))) return null;
+  const isrc = String(item.metadata?.isrc ?? '').trim();
+  if (FRENCH_ISRC.test(isrc)) return 'french';
+  if (ARABIC_ISRC.test(isrc)) return 'arabic';
+  return null;
+}
+
+export function laneReject(item: ContentItem, lane: { id?: string; regional: boolean; era?: { from: number } }, ctx: LaneRuleContext): string | null {
   if (ctx.excludeIds?.has(item.id)) return 'excluded';
   if (inLibrary(item, ctx.library)) return 'library';
   if (isDislikedArtist(item.creators, ctx.profile)) return 'disliked';
@@ -472,5 +487,6 @@ export function laneReject(item: ContentItem, lane: { regional: boolean; era?: {
     if (!passesEra(y, lane, ctx.policy ?? DEFAULT_POLICY)) return 'era';
   }
   if (inBlockedFamily(item.genres, ctx.profile)) return 'blocked';
+  if (regionalByIsrc(item, lane)) return 'regional-language';
   return null;
 }

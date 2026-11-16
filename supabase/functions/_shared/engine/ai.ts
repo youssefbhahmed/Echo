@@ -261,10 +261,10 @@ export async function curatorCacheKey(model: string, prompt: { system: string; u
  * and checked (artist, era, exclusions) before it can be shown, so hallucinated songs are dropped.
  */
 export async function llmMusicPicks(brief: CuratorBrief, cfg: AiConfig, http: HttpClient, opts: { seed?: number } = {}): Promise<MusicPick[]> {
-  const prompt = curatorPrompt(brief);
-  const total = brief.request ? brief.request.count : (brief.lanes ?? []).reduce((s, l) => s + l.count, 0);
-  const ask = async (model: string) => {
-    const cacheKey = await curatorCacheKey(model, prompt, opts.seed ?? 0);
+  const music = cfg.musicModel ?? cfg.model;
+  const ask = async (b: CuratorBrief, model: string, salt: string) => {
+    const prompt = curatorPrompt(b);
+    const cacheKey = `${await curatorCacheKey(model, prompt, opts.seed ?? 0)}${salt}`;
     return http.json<{ choices: Array<{ message: { content: string } }> }>(`${cfg.baseUrl}/chat/completions`, {
       init: {
         method: 'POST',
@@ -287,16 +287,36 @@ export async function llmMusicPicks(brief: CuratorBrief, cfg: AiConfig, http: Ht
       ttl: 86400,
     });
   };
-  const music = cfg.musicModel ?? cfg.model;
-  let res: { choices: Array<{ message: { content: string } }> };
+  const run = async (b: CuratorBrief, salt: string) => {
+    let res: { choices: Array<{ message: { content: string } }> };
+    try {
+      res = await ask(b, music, salt);
+    } catch (e) {
+      if ((e as { kind?: string })?.kind !== 'quota') throw e;
+      // Per-minute token limits are per model: a rate-limited music model hands over to the general one.
+      res = await withRateLimitRetry(() => ask(b, cfg.model, salt));
+    }
+    return parseMusicPicks(res.choices?.[0]?.message?.content ?? '{}', briefTotal(b) + 6);
+  };
+  const total = briefTotal(brief);
+  const picks = await run(brief, '');
+  // A refusal ("I can't fulfill that request") or a near-empty answer: ask once more for half as many
+  // songs (under its own cache key, so the cached refusal is never served again).
+  if (picks.length >= Math.max(1, Math.floor(total / 5))) return picks;
   try {
-    res = await ask(music);
-  } catch (e) {
-    if ((e as { kind?: string })?.kind !== 'quota') throw e;
-    // Per-minute token limits are per model: a rate-limited music model hands over to the general one.
-    res = await withRateLimitRetry(() => ask(cfg.model));
+    const retry = await run(shrinkBrief(brief, 0.5), ':retry');
+    return retry.length > picks.length ? retry : picks;
+  } catch {
+    return picks;
   }
-  return parseMusicPicks(res.choices?.[0]?.message?.content ?? '{}', total + 6);
+}
+
+const briefTotal = (b: CuratorBrief) => (b.request ? b.request.count : (b.lanes ?? []).reduce((s, l) => s + l.count, 0));
+
+/** The same brief asking for a fraction of the songs (at least 6 per lane / request). */
+export function shrinkBrief(b: CuratorBrief, f: number): CuratorBrief {
+  if (b.request) return { ...b, request: { ...b.request, count: Math.max(6, Math.round(b.request.count * f)) } };
+  return { ...b, lanes: (b.lanes ?? []).map((l) => ({ ...l, count: Math.max(6, Math.round(l.count * f)) })) };
 }
 
 /**
