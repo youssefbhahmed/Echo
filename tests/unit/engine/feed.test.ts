@@ -131,6 +131,77 @@ describe('lane feed end to end (mocked AI, ListenBrainz and Spotify; search bloc
   });
 });
 
+describe('music outside the curator still follows the lane contract and rules', () => {
+  const spotifyTrack = (id: string, name: string, artist: string, date: string) => ({
+    id: id.padEnd(22, '0'), name, artists: [{ id: 'a', name: artist }], album: { id: 'al', name: 'Album', images: [], release_date: date }, duration_ms: 200000, external_urls: { spotify: `https://open.spotify.com/track/${id}` },
+  });
+  const searchOnly = (tracks: unknown[], log: string[] = []) => (async (u: string) => {
+    const url = String(u);
+    log.push(url);
+    if (url.includes('accounts.spotify.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
+    if (url.includes('/v1/search')) return new Response(JSON.stringify({ tracks: { items: tracks }, albums: { items: [] } }));
+    return new Response('{}', { status: 404 });
+  }) as unknown as typeof fetch;
+  const spotifyEnv = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b' } as Record<string, string>)[n];
+
+  it('a typed request: searched songs get the request lane and pass the regional/era, library and taste rules', async () => {
+    const profile: TasteProfile = { ...emptyProfile(), creators: { 'disliked rapper': -1.2 } };
+    const tracks = [
+      spotifyTrack('NEW', 'Modern Track', 'New Rapper', '2021-03-01'),
+      spotifyTrack('OLD', 'Classic Track', 'Old Master', '1978-01-01'),
+      spotifyTrack('PRE', 'Early Track', 'Early Rapper', '2012-01-01'), // fine for a 2005+ request, not for a Moroccan one
+      spotifyTrack('BAD', 'Another Track', 'Disliked Rapper', '2022-01-01'),
+      spotifyTrack('LIB', 'Liked Track - Single', 'Fan Favourite', '2023-01-01'),
+    ];
+    const stored = [
+      make({ title: 'Stored New', category: 'music', provider: 'spotify', creators: ['Stored Artist'], genres: ['rap marocain'], releaseDate: '2020-01-01', metadata: { lane: { id: 'arabic-pop', label: 'Arabic rap & pop' }, aiPick: true, aiOrder: 4, laneEra: { from: 2019, to: 2025 }, lastShownAt: '2026-10-01' } }),
+      make({ title: 'Stored Old', category: 'music', provider: 'spotify', creators: ['Stored Old Artist'], genres: ['chaabi'], releaseDate: '1980-01-01', metadata: { lane: { id: 'maghreb-fusion', label: 'Maghreb fusion' } } }),
+    ].map((i) => ({ ...i, embed: { type: 'spotify' as const, uri: `spotify:track:${i.id}`, kind: 'track' as const } }));
+    const library = { isrcs: new Set<string>(), songs: new Set(['fanfavourite|likedtrack']) };
+    const res = await runPipeline({ query: 'moroccan rap', categories: ['music'], limit: 8 }, {
+      env: spotifyEnv, http: createHttp(new MemoryCache(), searchOnly(tracks)), profile, library, catalogFallback: async () => stored, now: new Date('2026-11-16T00:00:00Z'),
+    });
+    const titles = res.recommendations.map((r) => r.item.title);
+    expect(titles).toContain('Modern Track');
+    expect(titles).toContain('Stored New');
+    for (const t of ['Classic Track', 'Early Track', 'Another Track', 'Liked Track - Single', 'Stored Old']) expect(titles).not.toContain(t);
+    for (const r of res.recommendations) expect(r.item.metadata?.lane).toEqual({ id: 'request', label: 'For your request' });
+    // Fresh search results first, stored songs after them, as one contiguous block.
+    expect(titles.indexOf('Modern Track')).toBeLessThan(titles.indexOf('Stored New'));
+    const stor = res.recommendations.find((r) => r.item.title === 'Stored New')!.item.metadata!;
+    expect(stor).toMatchObject({ aiPick: false, fallback: true });
+    expect(stor.lastShownAt).toBeUndefined();
+    expect(stor.laneEra).toBeUndefined();
+  });
+
+  it('an open feed without the AI curator: searched songs form a "Fresh picks" lane after the taste lanes', async () => {
+    const lane: MusicLane = { id: 'hiphop-rnb', label: 'Hip-hop & R&B', share: 1, descriptors: ['rap'], era: { from: 2010, to: 2025 }, energy: 0.6, danceability: 0.7, valence: 0.4, popularity: { p25: 30, p50: 50, p75: 70 }, regional: false, genres: ['rap'], source: 'library' };
+    const profile: TasteProfile = { ...emptyProfile(), music: { tracks: 10, distinctArtists: 10, styles: ['rap'], recentStyles: [], decades: ['2010s'], languages: [], mood: { valence: 0.4, energy: 0.6, danceability: 0.7, topQuadrant: '' }, importedAt: '', lanes: [lane] } };
+    const tracks = [spotifyTrack('S1', 'Search One', 'Artist One', '2019-01-01'), spotifyTrack('S2', 'Search Two', 'Artist Two', '2020-01-01'), spotifyTrack('S3', 'Search Old', 'Artist Three', '1991-01-01')];
+    const res = await runPipeline({ categories: ['music'], moods: ['melancholic'], limit: 6 }, { env: spotifyEnv, http: createHttp(new MemoryCache(), searchOnly(tracks)), profile, seed: 1, now: new Date('2026-11-16T00:00:00Z') });
+    const titles = res.recommendations.map((r) => r.item.title);
+    expect(titles).toEqual(expect.arrayContaining(['Search One', 'Search Two']));
+    expect(titles).not.toContain('Search Old');
+    for (const r of res.recommendations) expect(r.item.metadata).toMatchObject({ lane: { id: 'mix', label: 'Fresh picks' }, aiPick: false });
+  });
+
+  it('a 429 on track lookups is reported apart from search, so it never shortens the search block', async () => {
+    const fetchImpl = (async (u: string, init?: RequestInit) => {
+      const url = String(u);
+      if (url.includes('accounts.spotify.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
+      if (url.includes('/chat/completions')) return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ items: [{ artist: 'A', track: 'One' }, { artist: 'B', track: 'Two' }] }) } }] }));
+      if (url === LB_SPOTIFY_MAPPING_URL) return new Response(JSON.stringify((JSON.parse(String(init?.body)) as unknown[]).map((_, i) => ({ spotify_track_ids: [`LOOK${String(i).padStart(18, '0')}`] }))));
+      if (url.includes('/v1/tracks/')) return new Response('slow down', { status: 429, headers: { 'retry-after': '120' } });
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    const env = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b', AI_BASE_URL: 'https://ai.test/v1', AI_MODEL: 'm' } as Record<string, string>)[n];
+    const res = await runPipeline({ categories: ['music'], limit: 6 }, { env, http: createHttp(new MemoryCache(), fetchImpl), profile: emptyProfile(), blockedProviders: new Set(['spotify']), seed: 1 });
+    expect(res.spotifyLookupLimitedSec).toBe(120);
+    expect(res.quotaErrors).not.toContain('spotify');
+    expect(res.quotaRetryAfter.spotify).toBeUndefined();
+  });
+});
+
 describe('learning from music feedback', () => {
   const song = make({ title: 'Song', category: 'music', provider: 'spotify', creators: ['Some Artist'], genres: ['afro house'], metadata: { lane: HOUSE } });
   it('skip = -0.35 on the artist and a small negative on its genres', () => {

@@ -4,7 +4,7 @@
 // Pure functions, generic words only: no track or artist names live here.
 import type { ContentItem, LaneTag, MusicLane, MusicPolicy, TasteProfile } from '../types.ts';
 import { inBlockedFamily } from './music.ts';
-import { normalize, normKey } from './text.ts';
+import { normalize, normKey, songKey } from './text.ts';
 
 export interface LaneDef {
   id: string;
@@ -131,29 +131,50 @@ export function laneTagOf(item: { metadata?: Record<string, unknown> }): LaneTag
   return l && typeof l.id === 'string' && typeof l.label === 'string' ? { id: l.id, label: l.label } : null;
 }
 
+/** A lane id this engine writes (taxonomy lanes plus the request/open pseudo-lanes); older curator picks carry none. */
+export function isEngineLane(id: string | undefined | null): boolean {
+  return !!id && (!!LANE_BY_ID[id] || id === REQUEST_LANE.id || id === MIX_LANE.id);
+}
+
+/**
+ * Per-user / per-response fields of a recommended item: rebuilt for every response, never stored in the
+ * shared catalog (content_items is readable by every signed-in user) nor carried over from it.
+ */
+export const PER_USER_METADATA = ['lastShownAt', 'laneEra', 'laneMood', 'aiOrder', 'fallback'] as const;
+
+export function withoutPerUser(meta: Record<string, unknown> | undefined): Record<string, unknown> {
+  const out = { ...(meta ?? {}) };
+  for (const k of PER_USER_METADATA) delete out[k];
+  return out;
+}
+
 // ───────────── owner policy ─────────────
 
 const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
 
-/** Regional lanes share policy.regionalShare between them (proportionally); the rest share the remainder. */
+/**
+ * Regional lanes share at most policy.regionalShare between them (proportionally); the rest share the
+ * remainder. A cap, not a quota: a library that is 0.5% French keeps a 0.5% French lane (then dropped).
+ */
 function rescale<T extends { share: number; regional: boolean }>(lanes: T[], policy: MusicPolicy): T[] {
   const reg = lanes.filter((l) => l.regional);
   const other = lanes.filter((l) => !l.regional);
   const rs = sum(reg.map((l) => l.share));
   const os = sum(other.map((l) => l.share));
-  const regTotal = !other.length ? 1 : !reg.length ? 0 : policy.regionalShare;
+  const regTotal = !other.length ? 1 : !reg.length ? 0 : Math.min(policy.regionalShare, rs / (rs + os || 1));
   return lanes.map((l) => ({ ...l, share: l.regional ? (rs ? (l.share / rs) * regTotal : 0) : os ? (l.share / os) * (1 - regTotal) : 0 }));
 }
 
 /**
- * Owner policy: regional lanes (French, Arabic rap & pop, Maghreb fusion) get a combined share of
+ * Owner policy: regional lanes (French, Arabic rap & pop, Maghreb fusion) get a combined share of at most
  * policy.regionalShare and modern releases only; lanes under 3% are dropped (jazz/classical under 6%);
  * shares are renormalised. Sorted by share.
  */
 export function applyLanePolicy<T extends { id: string; share: number; regional: boolean; era: { from: number; to: number } }>(lanes: T[], policy: MusicPolicy = DEFAULT_POLICY): T[] {
-  const first = rescale(lanes.filter((l) => l.share > 0), policy);
-  const kept = first.filter((l) => l.share >= (l.id === 'jazz-classical' ? MIN_JAZZ_SHARE : MIN_LANE_SHARE));
-  return rescale(kept, policy)
+  const positive = lanes.filter((l) => l.share > 0);
+  const kept = new Set(rescale(positive, policy).filter((l) => l.share >= (l.id === 'jazz-classical' ? MIN_JAZZ_SHARE : MIN_LANE_SHARE)).map((l) => l.id));
+  // Renormalise the kept lanes from their measured shares (capping already-capped shares would shrink the regional cap).
+  return rescale(positive.filter((l) => kept.has(l.id)), policy)
     .map((l) => (l.regional ? { ...l, era: { from: Math.max(l.era.from, policy.regionalMinYear), to: Math.max(l.era.to, policy.regionalMinYear) } } : l))
     .sort((a, b) => b.share - a.share);
 }
@@ -212,25 +233,57 @@ export function laneBlocked(l: { id: string; genres?: string[] }, profile: Taste
   return !!l.genres?.length && inBlockedFamily(l.genres, profile);
 }
 
+/** FNV-1a: a lane id → 32-bit int. */
+function hash32(x: string): number {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < x.length; i++) h = Math.imul(h ^ x.charCodeAt(i), 0x01000193);
+  return h >>> 0;
+}
+
+/** The draw of one lane for one seed: depends on nothing else, so other lanes' weights can't move it. */
+function laneUniform(seed: number, laneId: string): number {
+  return Math.max(1e-12, seededRandom(Math.imul((seed | 0) ^ 0x5bd1e995, 0x27d4eb2d) ^ hash32(laneId))());
+}
+
+/**
+ * Feedback may re-balance between regional lanes and lower them, never raise their combined weight:
+ * regional lanes keep at most min(policy.regionalShare, their share before feedback) of the pool.
+ */
+function capRegional(pool: Array<{ l: MusicLane; w: number }>, regionalShare: number): void {
+  const reg0 = sum(pool.filter((x) => x.l.regional).map((x) => x.l.share));
+  const tot0 = sum(pool.map((x) => x.l.share));
+  const reg = sum(pool.filter((x) => x.l.regional).map((x) => x.w));
+  const other = sum(pool.filter((x) => !x.l.regional).map((x) => x.w));
+  if (!reg || !other || !tot0) return;
+  const cap = Math.min(regionalShare, reg0 / tot0);
+  if (reg / (reg + other) <= cap) return;
+  const scale = (cap * other) / (1 - cap) / reg;
+  for (const x of pool) if (x.l.regional) x.w *= scale;
+}
+
 /**
  * Lanes for one refresh: share-weighted draws without replacement (the top lane comes up often),
- * nudged by lane feedback. Regional lanes only enter with their policy weight (~12% combined) and at
- * most one per refresh. Returned strongest first.
+ * nudged by lane feedback. Regional lanes only enter with their policy weight (~12% combined, which
+ * feedback can't raise) and at most one per refresh. Drawn as an exponential race (Efraimidis-Spirakis):
+ * each lane's draw comes from (seed, lane id) alone, so a like or skip on one lane doesn't reshuffle the
+ * others and a re-fetched feed keeps its lanes. Returned strongest first.
  */
-export function chooseLanes(lanes: MusicLane[], seed: number, n = 3, opts: { feedback?: Record<string, number>; blocked?: (l: MusicLane) => boolean } = {}): MusicLane[] {
-  const rnd = seededRandom(seed);
+export function chooseLanes(
+  lanes: MusicLane[],
+  seed: number,
+  n = 3,
+  opts: { feedback?: Record<string, number>; blocked?: (l: MusicLane) => boolean; regionalShare?: number } = {},
+): MusicLane[] {
   const pool = lanes
     .filter((l) => l.share > 0 && !opts.blocked?.(l))
     .map((l) => ({ l, w: l.share * Math.exp(Math.max(-1, Math.min(1, opts.feedback?.[l.id] ?? 0))) }));
+  capRegional(pool, opts.regionalShare ?? DEFAULT_POLICY.regionalShare);
+  const raced = pool.filter((x) => x.w > 0).map((x) => ({ ...x, key: -Math.log(laneUniform(seed, x.l.id)) / x.w })).sort((a, b) => a.key - b.key);
   const out: Array<{ l: MusicLane; w: number }> = [];
-  while (out.length < n && pool.length) {
-    const total = sum(pool.map((x) => x.w));
-    let r = rnd() * total;
-    let idx = pool.findIndex((x) => (r -= x.w) < 0);
-    if (idx < 0) idx = pool.length - 1;
-    const [picked] = pool.splice(idx, 1);
-    out.push(picked);
-    if (picked.l.regional) for (let i = pool.length - 1; i >= 0; i--) if (pool[i].l.regional) pool.splice(i, 1);
+  for (const x of raced) {
+    if (out.length >= n) break;
+    if (x.l.regional && out.some((o) => o.l.regional)) continue;
+    out.push(x);
   }
   return out.sort((a, b) => b.w - a.w).map((x) => x.l);
 }
@@ -321,11 +374,15 @@ export function isrcYear(isrc: string | undefined | null, now = new Date()): num
   return yy <= (nowYear(now) % 100) + 1 ? 2000 + yy : 1900 + yy;
 }
 
-/** Best estimate of when a recording was first released: the album date, or the ISRC year when older (reissues). */
+/** An ISRC this many years older than the album marks a reissue (ISRCs are often registered a year before release). */
+export const REISSUE_GAP = 3;
+
+/** Best estimate of when a recording was first released: the album year, or the ISRC year for reissues. */
 export function recordingYear(item: Pick<ContentItem, 'releaseDate' | 'metadata'>, now = new Date()): number | undefined {
   const a = yearOf(item.releaseDate);
   const i = isrcYear(item.metadata?.isrc as string | undefined, now);
-  return a && i ? Math.min(a, i) : a ?? i;
+  if (a && i) return i <= a - REISSUE_GAP ? i : a;
+  return a ?? i;
 }
 
 /** First allowed release year for a lane (regional lanes never before policy.regionalMinYear). */
@@ -352,10 +409,49 @@ export function isDislikedArtist(artists: string[], profile: TasteProfile): bool
   });
 }
 
+/** The user's liked/saved songs by recording identity, not just by Spotify id. */
+export interface LibrarySongs {
+  isrcs: Set<string>;
+  /** songKey(artist, title) for every credited artist. */
+  songs: Set<string>;
+}
+
+export function normIsrc(x: unknown): string {
+  const s = typeof x === 'string' ? x.replace(/[-\s]/g, '').toUpperCase() : '';
+  return /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(s) ? s : '';
+}
+
+/** Index of library songs (title, credited artists, ISRC when the export had one). */
+export function librarySongIndex(rows: Array<{ title?: string | null; creators?: string[] | null; isrc?: unknown }>): LibrarySongs {
+  const lib: LibrarySongs = { isrcs: new Set(), songs: new Set() };
+  for (const r of rows) {
+    const isrc = normIsrc(r.isrc);
+    if (isrc) lib.isrcs.add(isrc);
+    for (const a of r.creators ?? []) {
+      const k = r.title ? songKey(a, r.title) : '';
+      if (k) lib.songs.add(k);
+    }
+  }
+  return lib;
+}
+
+/** Same recording as a library song under another id (single vs album vs deluxe vs relinked)? */
+export function inLibrary(item: Pick<ContentItem, 'title' | 'creators' | 'metadata'>, lib: LibrarySongs | undefined): boolean {
+  if (!lib) return false;
+  const isrc = normIsrc(item.metadata?.isrc);
+  if (isrc && lib.isrcs.has(isrc)) return true;
+  return item.creators.some((a) => {
+    const k = songKey(a, item.title);
+    return !!k && lib.songs.has(k);
+  });
+}
+
 export interface LaneRuleContext {
   profile: TasteProfile;
   policy?: MusicPolicy;
   excludeIds?: Set<string>;
+  /** Liked/saved songs by ISRC and artist|title, so a liked song never comes back under another id. */
+  library?: LibrarySongs;
   /** false when the user explicitly asked for older music. */
   era?: boolean;
   now?: Date;
@@ -364,6 +460,7 @@ export interface LaneRuleContext {
 /** Why a resolved song may not be served in a lane (null = fine). */
 export function laneReject(item: ContentItem, lane: { regional: boolean; era?: { from: number } }, ctx: LaneRuleContext): string | null {
   if (ctx.excludeIds?.has(item.id)) return 'excluded';
+  if (inLibrary(item, ctx.library)) return 'library';
   if (isDislikedArtist(item.creators, ctx.profile)) return 'disliked';
   if (VERSION_RE.test(item.title)) return 'version';
   if (item.metadata?.albumType === 'compilation') return 'compilation';

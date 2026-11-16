@@ -50,7 +50,9 @@ describe('music curator brief', () => {
     expect(system).toMatch(/One song per artist/);
     expect(system).toMatch(/smooth listening flow/);
     expect(system).toMatch(/no live, remix/);
-    expect(user).toMatch(/modern only: released 2015 or later, no traditional or classic-era songs/);
+    const reg = plan.lanes.find((l) => l.regional)!;
+    expect(reg.era.from).toBeGreaterThanOrEqual(2015);
+    expect(user).toContain(`modern only: released ${reg.era.from} or later, no traditional or classic-era songs`);
     for (const l of plan.lanes) expect(user).toContain(`lane "${l.id}" (${l.label})`);
     expect(user).toMatch(/\b(9|1[0-4]) songs/);
     expect(user).toMatch(/Session mood: melancholic/);

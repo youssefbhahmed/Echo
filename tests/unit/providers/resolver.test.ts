@@ -1,6 +1,6 @@
-import { createHttp, MemoryCache } from '@shared/providers/http.ts';
+import { blockUntil, createHttp, MemoryCache } from '@shared/providers/http.ts';
 import { lbSpotifyIds, LB_SPOTIFY_MAPPING_URL } from '@shared/providers/listenbrainz.ts';
-import { artistMatches, resolveSpotifyPicks, titleMatches, type SpotifyPick } from '@shared/providers/spotify.ts';
+import { artistMatches, resolveKey, resolveSpotifyPicks, titleMatches, type SpotifyPick } from '@shared/providers/spotify.ts';
 import { laneReject } from '@shared/engine/lanes.ts';
 import { emptyProfile } from '@shared/engine/profile.ts';
 
@@ -122,6 +122,101 @@ describe('resolving curator picks', () => {
     const res = await resolveSpotifyPicks([{ artist: 'A', track: 'One', laneId: 'melodic-house' }, { artist: 'B', track: 'Two', laneId: 'melodic-house' }], { http: createHttp(new MemoryCache(), fetchImpl), env }, { allowSearch: false, accept: accept() });
     expect(res.items).toEqual([]);
     expect(res.stats.rejected).toEqual({ unplayable: 1, compilation: 1 });
+  });
+});
+
+describe('rate limits and cache-only resolution', () => {
+  const lanes = { 'melodic-house': { regional: false, era: { from: 2011 } } } as const;
+  const accept = (item: import('@shared/types.ts').ContentItem, pk: SpotifyPick) => laneReject(item, lanes[pk.laneId as keyof typeof lanes], { profile: emptyProfile() });
+
+  it('a 429 on single-track lookups is reported as a lookup limit (not a search limit) and stops all Spotify calls', async () => {
+    const { fetchImpl, log } = fakeNet({ lb: { 'A|One': [id(11)], 'B|Two': [id(12)], 'C|Three': [id(13)] }, tracks: {} });
+    const limited = (async (u: string, init?: RequestInit) => {
+      if (String(u).includes('/v1/tracks/')) {
+        log.push({ url: String(u), method: 'GET' });
+        return new Response('slow down', { status: 429 });
+      }
+      return fetchImpl(u, init);
+    }) as unknown as typeof fetch;
+    const picks: SpotifyPick[] = [{ artist: 'A', track: 'One', laneId: 'melodic-house' }, { artist: 'B', track: 'Two', laneId: 'melodic-house' }, { artist: 'C', track: 'Three', laneId: 'melodic-house' }];
+    const res = await resolveSpotifyPicks(picks, { http: createHttp(new MemoryCache(), limited), env }, { allowSearch: true, accept, concurrency: 1 });
+    expect(res.lookupLimitedSec).toBe(60); // no Retry-After header → 60 s
+    expect(res.rateLimitedSec).toBeUndefined(); // the 'spotify' (search) block is left alone
+    expect(log.filter((c) => c.url.includes('/v1/tracks/'))).toHaveLength(1);
+    expect(log.filter((c) => c.url.includes('/v1/search'))).toEqual([]);
+  });
+
+  it('while lookups are blocked, resolves from cached resolutions only: no token, ListenBrainz or Spotify call', async () => {
+    const { fetchImpl, log } = fakeNet({ lb: { 'Nova Lane|Glass Coast': [id(1)] }, tracks: { [id(1)]: { name: 'Glass Coast', artist: 'Nova Lane', date: '2019-04-01' } } });
+    const http = createHttp(new MemoryCache(), fetchImpl);
+    const warm: SpotifyPick[] = [{ artist: 'Nova Lane', track: 'Glass Coast', laneId: 'melodic-house' }];
+    await resolveSpotifyPicks(warm, { http, env }, { allowSearch: false, accept });
+    log.length = 0;
+    const res = await resolveSpotifyPicks([...warm, { artist: 'Never Seen', track: 'New Song', laneId: 'melodic-house' }], { http, env }, { allowSearch: true, allowLookups: false, accept });
+    expect(res.items.map((r) => [r.item.title, r.via])).toEqual([['Glass Coast', 'cache']]);
+    expect(res.stats.unresolved).toBe(1);
+    expect(log).toEqual([]);
+  });
+});
+
+describe('non-Latin names and alternate releases', () => {
+  const accept = (item: import('@shared/types.ts').ContentItem) => laneReject(item, { regional: false, era: { from: 2011 } }, { profile: emptyProfile() });
+
+  it('keys Arabic-script picks apart, so each one is mapped and checked on its own', async () => {
+    const a1 = { artist: 'فنان أول', track: 'أغنية الليل', laneId: 'arabic-pop' };
+    const a2 = { artist: 'فنان ثاني', track: 'أغنية البحر', laneId: 'arabic-pop' };
+    expect(resolveKey(a1)).not.toBe(resolveKey(a2));
+    expect(resolveKey(a1)).not.toMatch(/:\|$/);
+    // A Latin-script artist with Arabic-script titles: one key per song, not "artist|".
+    expect(resolveKey({ artist: 'Nova Lane', track: 'أغنية الليل' })).not.toBe(resolveKey({ artist: 'Nova Lane', track: 'أغنية البحر' }));
+    const { fetchImpl, log } = fakeNet({
+      lb: { [`${a1.artist}|${a1.track}`]: [id(21)], [`${a2.artist}|${a2.track}`]: [id(22)] },
+      tracks: { [id(21)]: { name: a1.track, artist: a1.artist, date: '2021-01-01' }, [id(22)]: { name: a2.track, artist: a2.artist, date: '2022-01-01' } },
+    });
+    const http = createHttp(new MemoryCache(), fetchImpl);
+    const first = await resolveSpotifyPicks([a1], { http, env }, { allowSearch: false, accept });
+    expect(first.items.map((r) => r.item.title)).toEqual([a1.track]);
+    // The second pick is a different song: it goes to ListenBrainz instead of reusing the first one's cached id.
+    const second = await resolveSpotifyPicks([a2], { http, env }, { allowSearch: false, accept });
+    expect(second.items.map((r) => [r.item.title, r.via])).toEqual([[a2.track, 'listenbrainz']]);
+    expect(log.filter((c) => c.url === LB_SPOTIFY_MAPPING_URL)).toHaveLength(2);
+  });
+
+  it('compares titles in any script and never accepts a title it cannot compare', () => {
+    expect(titleMatches('أغنية الليل', 'أغنية الليل (feat. Someone)')).toBe(true);
+    expect(titleMatches('أغنية الليل', 'أغنية البحر')).toBe(false);
+    expect(titleMatches('Lil Song', 'أغنية الليل')).toBe(false); // different scripts: not verifiable
+    expect(titleMatches('Glass Coast', 'Glass Coast - Radio Edit')).toBe(true);
+    expect(artistMatches('فنان أول', ['فنان أول'])).toBe(true);
+    expect(artistMatches('فنان أول', ['فنان ثاني'])).toBe(false);
+    expect(artistMatches('Beyoncé', ['Beyonce'])).toBe(true);
+  });
+
+  it('drops a pick when ANY of its ListenBrainz ids is a song the user already has', async () => {
+    const { fetchImpl, log } = fakeNet({
+      lb: { 'Nova Lane|Glass Coast': [id(31), id(32)] },
+      tracks: { [id(31)]: { name: 'Glass Coast', artist: 'Nova Lane', date: '2019-04-01' } },
+    });
+    // The user liked the album version (id 32); ListenBrainz lists the single (id 31) first.
+    const res = await resolveSpotifyPicks([{ artist: 'Nova Lane', track: 'Glass Coast', laneId: 'melodic-house' }], { http: createHttp(new MemoryCache(), fetchImpl), env }, {
+      allowSearch: false, accept, excludeIds: new Set([`spotify:track:${id(32)}`]),
+    });
+    expect(res.items).toEqual([]);
+    expect(res.stats.rejected).toEqual({ excluded: 1 });
+    expect(log.filter((c) => c.url.includes('/v1/tracks/'))).toEqual([]);
+  });
+});
+
+describe('provider blocks', () => {
+  it('never shortens an existing block (a short 429 elsewhere must not cut a 19 h penalty)', () => {
+    const now = Date.UTC(2026, 10, 16, 12);
+    const long = now + 19 * 3600_000;
+    expect(blockUntil('spotify', now, 60, long)).toBe(long);
+    expect(blockUntil('spotify', now, undefined, long)).toBe(long);
+    expect(blockUntil('spotify', now, 68195, now + 60_000)).toBe(now + 68195_000);
+    expect(blockUntil('spotify', now)).toBe(now + 120_000);
+    expect(blockUntil('youtube', now)).toBe(now + 6 * 3600_000);
+    expect(blockUntil('spotify', now, 10 * 86400)).toBe(now + 86400_000);
   });
 });
 

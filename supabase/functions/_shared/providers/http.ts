@@ -82,6 +82,16 @@ export function createHttp(cache: CacheStore, fetchImpl: typeof fetch = fetch): 
   return client;
 }
 
+/**
+ * When a provider block (provider_status.blocked_until) should end, in ms: now + Retry-After (capped at a
+ * day); YouTube's daily quota resets at midnight Pacific (conservative 6 h); without a hint, 2 minutes.
+ * Never earlier than a block already in place: a short 429 elsewhere must not cut a ~19 h penalty short.
+ */
+export function blockUntil(provider: string, now: number, retryAfterSec?: number, existingUntil?: number): number {
+  const wait = retryAfterSec && retryAfterSec > 0 ? Math.min(retryAfterSec, 86400) * 1000 : provider === 'youtube' ? 6 * 3600_000 : 120_000;
+  return Math.max(now + wait, existingUntil !== undefined && Number.isFinite(existingUntil) ? existingUntil : 0);
+}
+
 export async function hashKey(s: string): Promise<string> {
   const buf = await crypto.subtle.digest('SHA-1', new TextEncoder().encode(s));
   return [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('').slice(0, 24);

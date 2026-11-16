@@ -8,8 +8,8 @@ import { ProviderError, type HttpClient } from '../providers/http.ts';
 import type { Env, Provider } from '../providers/types.ts';
 import { aiConfig, mergeHint, sanitizeHint } from './ai.ts';
 import { applyUnderstanding, llmUnderstand } from './understand.ts';
-import { curateMusic, laneFallback, laneRules, musicQuotaFor, planMusic, type MusicPlan } from './curator.ts';
-import { laneReject, laneTagOf, LANE_BY_ID, laneOfGenres } from './lanes.ts';
+import { curateMusic, laneFallback, laneLooseMusic, musicQuotaFor, planMusic, SEARCH_ORDER, STORED_ORDER, type MusicPlan } from './curator.ts';
+import { laneTagOf, MIX_LANE, type LibrarySongs } from './lanes.ts';
 import { analyzeItem } from './analyze.ts';
 import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
 import { parseIntent, refineIntent } from './intent.ts';
@@ -22,11 +22,15 @@ export interface PipelineDeps {
   http: HttpClient;
   profile: TasteProfile;
   excludeIds?: Set<string>;
+  /** The user's liked/saved songs by ISRC and artist|title: never served again under another id. */
+  library?: LibrarySongs;
   evidence?: EvidenceItem[];
   previousIntent?: Intent | null;
   previousResults?: AnalyzedItem[];
-  /** Providers temporarily blocked (e.g. quota exhausted today). */
+  /** Providers temporarily blocked (e.g. quota exhausted today). 'spotify' = Spotify search. */
   blockedProviders?: Set<ProviderId>;
+  /** Spotify single-track lookups rate-limited (their own block): the curator resolves from cache only. */
+  spotifyLookupBlocked?: boolean;
   collaborative?: (ids: string[]) => Promise<Map<string, number>>;
   /** Optional text embedder (Supabase gte-small). */
   embed?: (texts: string[]) => Promise<number[][]>;
@@ -44,6 +48,8 @@ export interface PipelineResult extends DiscoverResponse {
   quotaErrors: ProviderId[];
   /** Seconds a provider asked us to wait (Retry-After), when it said so. */
   quotaRetryAfter: Partial<Record<ProviderId, number>>;
+  /** Spotify single-track lookups answered 429: seconds to wait (blocked separately from search). */
+  spotifyLookupLimitedSec?: number;
 }
 
 const CATEGORY_NOUN: Record<Category, string> = { youtube: 'videos', music: 'music', screen: 'films & series', books: 'books', podcasts: 'podcasts' };
@@ -218,6 +224,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   // "sleep/ambient" filler), so the optional LLM proposes real songs per taste lane (generic words
   // only) and every pick is resolved and checked on Spotify. Runs in parallel with provider searches.
   let spotifyLimitedSec: number | undefined;
+  let spotifyLookupLimitedSec: number | undefined;
   const musicPicks = (async (): Promise<{ items: ContentItem[]; detail: string; perLane: Record<string, number> } | null> => {
     if (!curatorOn || !musicPlan || !ai) return null;
     // Open feed: briefed from the MUSIC taste (+ chosen moods) only; video/book themes never steer songs.
@@ -230,9 +237,11 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     const words = musicConcepts.map((c) => conceptLabel(c).toLowerCase()).join(', ');
     const moods = intent.moods.filter((m) => CONCEPT_BY_ID[m]).map((m) => conceptLabel(m).toLowerCase());
     const r = await curateMusic(musicPlan, {
-      ai, http: deps.http, env: deps.env, profile: deps.profile, intent, words, moods, concepts, excludeIds: deps.excludeIds, searchBlocked, seed: deps.seed ?? 0, now: deps.now,
+      ai, http: deps.http, env: deps.env, profile: deps.profile, intent, words, moods, concepts, excludeIds: deps.excludeIds, library: deps.library, searchBlocked,
+      lookupBlocked: deps.spotifyLookupBlocked, seed: deps.seed ?? 0, now: deps.now,
     });
     if (r.rateLimitedSec !== undefined) spotifyLimitedSec = r.rateLimitedSec;
+    if (r.lookupLimitedSec !== undefined) spotifyLookupLimitedSec = r.lookupLimitedSec;
     return r;
   })().catch((e) => ({ items: [] as ContentItem[], detail: `AI music picks skipped (${(e as Error).message.slice(0, 60)})`, perLane: {} as Record<string, number> }));
   const settled = await Promise.allSettled(plan.map((q) => q.provider.search(q.params, { http: deps.http, env: deps.env })));
@@ -271,9 +280,21 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     raw.push(...mp.items);
     pipeline.push({ step: 'music-ai', ms: 0, detail: mp.detail });
   }
+  // Only a SEARCH 429 blocks 'spotify'; a track-lookup 429 is reported separately (spotifyLookupLimitedSec).
   if (spotifyLimitedSec !== undefined) {
     if (!quotaErrors.includes('spotify')) quotaErrors.push('spotify');
     quotaRetryAfter.spotify = Math.max(quotaRetryAfter.spotify ?? 0, spotifyLimitedSec);
+  }
+  // Music that didn't come from the curator (Spotify search results) still gets a lane and passes the
+  // lane rules (era / regional 2015+, exclusions, library, disliked artists) before it can be served.
+  if (musicPlan) {
+    const loose = raw.filter((i) => i.category === 'music' && !laneTagOf(i));
+    if (loose.length) {
+      const kept = laneLooseMusic(loose, musicPlan, { profile: deps.profile, excludeIds: deps.excludeIds, library: deps.library, now: deps.now, text: query, order: SEARCH_ORDER });
+      for (let i = raw.length - 1; i >= 0; i--) if (raw[i].category === 'music' && !laneTagOf(raw[i])) raw.splice(i, 1);
+      raw.push(...kept);
+      if (kept.length < loose.length) pipeline.push({ step: 'music-rules', ms: 0, detail: `${loose.length - kept.length} of ${loose.length} searched songs failed the era/regional, library or taste rules` });
+    }
   }
   const spotifyDown = searchBlocked || quotaErrors.includes('spotify');
   // Spotify search rate-limited: podcasts come from stored, already-verified Spotify shows/episodes.
@@ -286,24 +307,19 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   if (musicPlan && deps.catalogFallback) {
     const have = mp?.perLane ?? {};
     const open = musicPlan.order.reduce((s, id) => s + Math.max(0, (musicPlan.targets[id] ?? 0) - (have[id] ?? 0)), 0);
-    const musicCount = raw.filter((i) => i.category === 'music').length;
+    // Distinct songs: several searches often return the same track.
+    const musicCount = new Set(raw.filter((i) => i.category === 'music').map((i) => i.id)).size;
     if (open > 0 && (musicPlan.mode === 'lanes' || spotifyDown || musicCount < 3)) {
       const stored = await deps.catalogFallback('spotify', ['music']).catch(() => [] as ContentItem[]);
       if (musicPlan.mode === 'lanes') {
-        const fill = laneFallback(stored, musicPlan, { profile: deps.profile, excludeIds: deps.excludeIds, have, now: deps.now });
+        const fill = laneFallback(stored, musicPlan, { profile: deps.profile, excludeIds: deps.excludeIds, library: deps.library, have, now: deps.now });
         raw.push(...fill);
         pipeline.push({ step: 'fallback', ms: 0, detail: `${fill.length} stored songs fit ${open} open lane slots` });
       } else {
-        // A request: stored songs rank as ordinary candidates, still under the era/regional rules.
-        const rules = laneRules(musicPlan, deps.profile, deps.excludeIds, deps.now);
-        const ok = stored
-          .filter((s) => s.category === 'music' && !s.metadata?.imported)
-          .filter((s) => !laneReject(s, { ...musicPlan.lanes[0], regional: !!LANE_BY_ID[laneTagOf(s)?.id ?? laneOfGenres(s.genres) ?? '']?.regional }, rules))
-          .slice(0, 40)
-          .map((s) => {
-            const { lane: _lane, laneEra: _era, laneMood: _mood, lastShownAt: _shown, aiOrder: _order, ...meta } = s.metadata ?? {};
-            return { ...s, metadata: { ...meta, aiPick: false, fallback: true } };
-          });
+        // A request: stored songs join the request lane after the fresh picks, still under the era/regional rules.
+        const ok = laneLooseMusic(stored.filter((s) => s.category === 'music' && !s.metadata?.imported), musicPlan, {
+          profile: deps.profile, excludeIds: deps.excludeIds, library: deps.library, now: deps.now, text: query, order: STORED_ORDER, fallback: true,
+        }).slice(0, 40);
         raw.push(...ok);
         pipeline.push({ step: 'fallback', ms: 0, detail: `${spotifyDown ? 'Spotify rate-limited' : 'Few fresh songs'}: ${ok.length} stored songs added` });
       }
@@ -370,7 +386,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     limit,
     mix: req.mix,
     now: deps.now,
-    musicLanes: musicPlan ? { order: musicPlan.order, targets: musicPlan.targets } : undefined,
+    musicLanes: musicPlan ? rankLanePlan(musicPlan, candidates) : undefined,
   });
   pipeline.push({ step: 'ranking', ms: t(), detail: `exploration ${Math.round(exploration * 100)}% · ${recommendations.length} picks after diversity` });
 
@@ -399,5 +415,23 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     candidates,
     quotaErrors,
     quotaRetryAfter,
+    spotifyLookupLimitedSec,
   };
+}
+
+/**
+ * Lane plan for the ranker. An open feed whose songs partly came from search (no AI curator) shows them
+ * in an extra "Fresh picks" lane after the taste lanes, sized to the slots the lanes can't fill.
+ */
+export function rankLanePlan(plan: MusicPlan, candidates: Array<{ category: string; metadata?: Record<string, unknown> }>): { order: string[]; targets: Record<string, number> } {
+  const base = { order: plan.order, targets: plan.targets };
+  if (plan.order.includes(MIX_LANE.id)) return base;
+  const have: Record<string, number> = {};
+  for (const c of candidates) {
+    const id = c.category === 'music' ? laneTagOf(c)?.id : undefined;
+    if (id) have[id] = (have[id] ?? 0) + 1;
+  }
+  if (!have[MIX_LANE.id]) return base;
+  const filled = plan.order.reduce((s, id) => s + Math.min(plan.targets[id] ?? 0, have[id] ?? 0), 0);
+  return { order: [...plan.order, MIX_LANE.id], targets: { ...plan.targets, [MIX_LANE.id]: Math.max(0, plan.total - filled) } };
 }

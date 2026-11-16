@@ -1,6 +1,7 @@
 import { analyzeLibrary, applyLibraryImport, tracksFromCsv, trackToItem } from '@shared/importer.ts';
 import {
-  chooseLanes, isrcYear, laneOfGenre, laneOfGenres, laneReject, laneTargets, lanesFromGenres, passesEra, recordingYear, VERSION_RE, DEFAULT_POLICY,
+  applyLanePolicy, chooseLanes, isrcYear, laneOfGenre, laneOfGenres, laneReject, laneTargets, lanesFromGenres, librarySongIndex, passesEra, recordingYear, VERSION_RE, DEFAULT_POLICY,
+  withoutPerUser,
 } from '@shared/engine/lanes.ts';
 import { emptyProfile } from '@shared/engine/profile.ts';
 import type { ContentItem, MusicLane } from '@shared/types.ts';
@@ -55,6 +56,9 @@ describe('taste lanes from a library export', () => {
 
   it('reads the audio-feature columns', () => {
     expect(tracks[0]).toMatchObject({ acousticness: expect.any(Number), speechiness: expect.any(Number), instrumentalness: expect.any(Number), tempo: expect.any(Number), loudness: expect.any(Number), popularity: expect.any(Number) });
+    // The ISRC travels with the imported song: liked songs are recognised under another release's id.
+    expect(tracks[0].isrc).toBe('XX0000000000');
+    expect(trackToItem(tracks[0]).metadata?.isrc).toBe('XX0000000000');
   });
 
   it('places untagged songs by their nearest tagged neighbours, never into regional lanes', () => {
@@ -174,5 +178,96 @@ describe('lane rules for resolved songs', () => {
     expect(laneReject(song({ metadata: { albumType: 'compilation' } }), lane, ctx)).toBe('compilation');
     // The user explicitly asked for older music: era rules are lifted.
     expect(laneReject(song({ releaseDate: '1976-01-01' }), lane, { ...ctx, era: false })).toBeNull();
+  });
+
+  it('rejects a library song served back under another id (same ISRC, or same artist + title in any script)', () => {
+    const library = librarySongIndex([
+      { title: 'Glass Coast', creators: ['Nova Lane', 'Guest Singer'], isrc: 'USAB12000001' },
+      { title: 'أغنية الليل', creators: ['فنان أول'] },
+    ]);
+    const ctx = { profile: emptyProfile(), library };
+    const free = { regional: false, era: { from: 2011 } };
+    // Single vs album version: different id and decorated title, same recording.
+    expect(laneReject(song({ id: 'spotify:track:single', title: 'Glass Coast - Single Version', creators: ['Nova Lane'] }), free, ctx)).toBe('library');
+    expect(laneReject(song({ id: 'spotify:track:feat', title: 'Glass Coast (feat. Guest Singer)', creators: ['Guest Singer'] }), free, ctx)).toBe('library');
+    expect(laneReject(song({ id: 'spotify:track:relinked', title: 'Renamed', metadata: { isrc: 'US-AB1-20-00001' } }), free, ctx)).toBe('library');
+    expect(laneReject(song({ id: 'spotify:track:ar', title: 'أغنية الليل', creators: ['فنان أول'] }), lane, ctx)).toBe('library');
+    // Another song by the same artist is a discovery.
+    expect(laneReject(song({ id: 'spotify:track:new', title: 'Paper Mountain', creators: ['Nova Lane'] }), free, ctx)).toBeNull();
+    expect(laneReject(song({ id: 'spotify:track:ar2', title: 'أغنية البحر', creators: ['فنان أول'] }), lane, ctx)).toBeNull();
+  });
+
+  it('keeps per-user fields out of shared catalog rows', () => {
+    const meta = { lane: { id: 'french', label: 'French pop & rap' }, aiPick: true, isrc: 'X', lastShownAt: '2026-11-15', laneEra: { from: 2015, to: 2025 }, laneMood: 'warm', aiOrder: 3, fallback: true };
+    expect(withoutPerUser(meta)).toEqual({ lane: { id: 'french', label: 'French pop & rap' }, aiPick: true, isrc: 'X' });
+  });
+});
+
+describe('owner policy edge cases', () => {
+  const l = (id: string, share: number, regional: boolean) => ({ id, share, regional, era: { from: 2010, to: 2025 } });
+
+  it('treats the regional share as a cap, never inflating rare French/Arabic', () => {
+    // 0.5% French stays tiny (then falls under the 3% floor) instead of becoming a 12% lane.
+    expect(applyLanePolicy([l('hiphop-rnb', 0.6, false), l('rock-metal', 0.395, false), l('french', 0.005, true)]).map((x) => x.id)).toEqual(['hiphop-rnb', 'rock-metal']);
+    const mid = applyLanePolicy([l('hiphop-rnb', 0.62, false), l('rock-metal', 0.3, false), l('french', 0.08, true)]);
+    expect(mid.find((x) => x.id === 'french')!.share).toBeCloseTo(0.08, 3);
+    const big = applyLanePolicy([l('hiphop-rnb', 0.3, false), l('rock-metal', 0.1, false), l('french', 0.4, true), l('arabic-pop', 0.2, true)]);
+    expect(big.filter((x) => x.regional).reduce((s, x) => s + x.share, 0)).toBeCloseTo(0.12, 3);
+    // One French like among a big genre profile does not create a French lane.
+    const p = { ...emptyProfile(), genres: { 'hip hop': 2, rap: 1.5, 'afro house': 1, rock: 1, 'pop urbaine': 0.1 } };
+    expect(lanesFromGenres(p, NOW).find((x) => x.id === 'french')).toBeUndefined();
+  });
+
+  it('uses the ISRC year only for reissues (ISRCs are often registered the year before release)', () => {
+    const regional = { regional: true, era: { from: 2015 } };
+    expect(recordingYear({ releaseDate: '2016-01-01', metadata: { isrc: 'FRX201400001' } })).toBe(2016);
+    expect(passesEra(recordingYear({ releaseDate: '2016-01-01', metadata: { isrc: 'FRX201400001' } }), regional)).toBe(true);
+    expect(recordingYear({ releaseDate: '2017-03-01', metadata: { isrc: 'FRX201400001' } })).toBe(2014);
+    expect(recordingYear({ metadata: { isrc: 'FRX201900001' } })).toBe(2019);
+  });
+});
+
+describe('lane rotation under feedback', () => {
+  const lane = (id: string, share: number, regional = false): MusicLane => ({
+    id, label: id, share, descriptors: [], era: { from: regional ? 2015 : 2005, to: 2026 }, energy: 0.6, danceability: 0.7, valence: 0.4, popularity: { p25: 30, p50: 50, p75: 70 }, regional, genres: [],
+  });
+  const withRegional = [lane('hiphop-rnb', 0.3), lane('rock-metal', 0.18), lane('melodic-house', 0.16), lane('afro-latin', 0.13), lane('edm', 0.11), lane('french', 0.06, true), lane('arabic-pop', 0.06, true)];
+  const N = 3000;
+
+  it('likes cannot raise the regional share above the policy; they only re-balance between regional lanes', () => {
+    const count = (fb?: Record<string, number>) => {
+      let any = 0;
+      let french = 0;
+      let arabic = 0;
+      for (let s = 0; s < N; s++) {
+        const c = chooseLanes(withRegional, s, 3, { feedback: fb, regionalShare: 0.12 });
+        if (c.some((x) => x.regional)) any++;
+        if (c.some((x) => x.id === 'french')) french++;
+        if (c.some((x) => x.id === 'arabic-pop')) arabic++;
+      }
+      return { any: any / N, french, arabic };
+    };
+    const neutral = count();
+    const both = count({ french: 1, 'arabic-pop': 1 });
+    const one = count({ french: 1 });
+    expect(both.any).toBeCloseTo(neutral.any, 5); // fully capped: same weights as without feedback
+    expect(one.any).toBeLessThanOrEqual(neutral.any + 0.02);
+    expect(one.french).toBeGreaterThan(one.arabic * 1.5);
+    // Dislikes still lower them.
+    expect(count({ french: -1, 'arabic-pop': -1 }).any).toBeLessThan(neutral.any);
+  });
+
+  it('feedback on one lane never reshuffles the others (a re-fetched feed keeps its lanes)', () => {
+    const plain = withRegional.filter((x) => !x.regional);
+    for (let s = 0; s < 500; s++) {
+      const before = chooseLanes(plain, s).map((x) => x.id);
+      // A skip on a lane of this refresh: at most that lane is swapped out.
+      const target = before[0];
+      const after = chooseLanes(plain, s, 3, { feedback: { [target]: -0.05 } }).map((x) => x.id);
+      expect(before.filter((id) => id !== target).every((id) => after.includes(id))).toBe(true);
+      // A dislike on a lane outside this refresh changes nothing.
+      const outside = plain.find((x) => !before.includes(x.id))!.id;
+      expect(chooseLanes(plain, s, 3, { feedback: { [outside]: -1 } }).map((x) => x.id)).toEqual(before);
+    }
   });
 });

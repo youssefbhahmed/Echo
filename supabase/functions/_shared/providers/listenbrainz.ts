@@ -3,6 +3,7 @@
 // {artist_name, release_name, track_name}; each answer row carries spotify_track_ids (partial coverage).
 // Used to resolve curator picks without Spotify's rate-limited search endpoint.
 import { hashKey, type HttpClient } from './http.ts';
+import { fold } from '../engine/text.ts';
 
 export const LB_SPOTIFY_MAPPING_URL = 'https://labs.api.listenbrainz.org/spotify-id-from-metadata/json';
 export const LB_CHUNK = 25;
@@ -15,7 +16,8 @@ interface LbRow {
   spotify_track_ids?: unknown;
 }
 
-const key = (artist: string, track: string) => `${artist}|${track}`.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9|]/g, '');
+// Any script survives (an Arabic-script name must not fold to '' and collide with every other one).
+const key = (artist: string, track: string) => `${fold(artist) || artist.trim().toLowerCase()}|${fold(track) || track.trim().toLowerCase()}`;
 const SPOTIFY_ID = /^[A-Za-z0-9]{22}$/;
 
 /**

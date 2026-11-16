@@ -8,8 +8,8 @@ import { resolveSpotifyPicks, type SpotifyPick } from '../providers/spotify.ts';
 import { musicBrief } from '../importer.ts';
 import { llmMusicPicks, type AiConfig, type CuratorBrief, type CuratorLane } from './ai.ts';
 import {
-  chooseLanes, DEFAULT_MIN_YEAR, effectiveLanes, eraFloor, LANE_BY_ID, laneBlocked, laneOfGenre, laneOfGenres, laneReject, laneTag, laneTagOf, laneTargets, MIX_LANE, moodPhrase,
-  musicPolicy, popularityPhrase, REQUEST_LANE, type LaneRuleContext,
+  chooseLanes, DEFAULT_MIN_YEAR, effectiveLanes, eraFloor, LANE_BY_ID, laneBlocked, laneOfGenre, laneOfGenres, laneReject, laneTag, laneTagOf, laneTargets, MIX_LANE, mixLane, moodPhrase,
+  musicPolicy, popularityPhrase, REQUEST_LANE, withoutPerUser, type LaneRuleContext, type LibrarySongs,
 } from './lanes.ts';
 import { CONCEPT_BY_ID } from './concepts.ts';
 import { categoryQuotas } from './rank.ts';
@@ -72,7 +72,7 @@ export function planMusic(profile: TasteProfile, opts: { hasQuery: boolean; seed
     return { mode: 'request', lanes: [requestLane(rules, now)], order: [REQUEST_LANE.id], targets: { [REQUEST_LANE.id]: opts.total }, total: opts.total, policy, rules };
   }
   const n = Math.max(1, Math.min(3, Math.floor(opts.total / 3)));
-  const chosen = chooseLanes(effectiveLanes(profile, now), opts.seed, n, { feedback: profile.laneFeedback, blocked: (l) => laneBlocked(l, profile) });
+  const chosen = chooseLanes(effectiveLanes(profile, now), opts.seed, n, { feedback: profile.laneFeedback, blocked: (l) => laneBlocked(l, profile), regionalShare: policy.regionalShare });
   if (!chosen.length) return null;
   const t = laneTargets(chosen, opts.total, 3);
   return {
@@ -138,8 +138,12 @@ export interface CurateDeps {
   /** Concept ids items are retrieved for (weak, inherited evidence for ranking). */
   concepts?: string[];
   excludeIds?: Set<string>;
+  /** Liked/saved songs by ISRC and artist|title (a liked song never comes back under another id). */
+  library?: LibrarySongs;
   /** Spotify search is rate-limited: resolve via cache, ListenBrainz and single-track lookups only. */
   searchBlocked?: boolean;
+  /** Spotify single-track lookups are rate-limited: resolve from cached resolutions only. */
+  lookupBlocked?: boolean;
   seed?: number;
   now?: Date;
 }
@@ -147,13 +151,31 @@ export interface CurateDeps {
 export interface CurateResult {
   items: ContentItem[];
   detail: string;
+  /** Spotify search answered 429 (seconds to wait). */
   rateLimitedSec?: number;
+  /** Spotify single-track lookups answered 429 (seconds to wait); recorded under its own block key. */
+  lookupLimitedSec?: number;
   perLane: Record<string, number>;
 }
 
-/** Rules a song must pass for a lane (era/regional, exclusions, disliked artists, versions). */
-export function laneRules(plan: MusicPlan, profile: TasteProfile, excludeIds?: Set<string>, now?: Date): LaneRuleContext {
-  return { profile, policy: plan.policy, excludeIds, era: plan.rules.era, now };
+/** Rules a song must pass for a lane (era/regional, exclusions, library, disliked artists, versions). */
+export function laneRules(plan: MusicPlan, profile: TasteProfile, excludeIds?: Set<string>, now?: Date, library?: LibrarySongs): LaneRuleContext {
+  return { profile, policy: plan.policy, excludeIds, library, era: plan.rules.era, now };
+}
+
+const isRegionalHint = (h: string | string[] | undefined) => {
+  const id = Array.isArray(h) ? laneOfGenres(h) : h ? laneOfGenre(h) : null;
+  return !!(id && LANE_BY_ID[id]?.regional);
+};
+
+/**
+ * The lane rules for a song outside the curator's lanes (a typed request, or the open "Fresh picks"
+ * lane): regional (modern only) when its own style, the search that found it or the request is
+ * French / Arabic / Maghreb.
+ */
+export function ruleLaneFor(plan: MusicPlan, hints: Array<string | string[] | undefined>, now?: Date): MusicLane {
+  const lane = plan.mode === 'request' ? plan.lanes[0] : plan.lanes.find((l) => l.id === MIX_LANE.id) ?? mixLane(now);
+  return { ...lane, regional: hints.some(isRegionalHint) };
 }
 
 /** Brief → curator → resolve on Spotify → items tagged with their lane, in the curator's order. */
@@ -175,17 +197,14 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
     style.set(sp, plan.mode === 'request' ? p.lane : undefined);
     spicks.push(sp);
   }
-  const rules = laneRules(plan, deps.profile, deps.excludeIds, deps.now);
-  // A request's songs follow the regional rule when their style is French / Arabic / Maghreb.
-  const ruleLane = (pk: SpotifyPick) => {
-    const lane = byId.get(pk.laneId)!;
-    if (plan.mode !== 'request') return lane;
-    const s = style.get(pk);
-    const def = s ? LANE_BY_ID[laneOfGenre(s) ?? ''] : undefined;
-    return { ...lane, regional: !!def?.regional };
-  };
+  const rules = laneRules(plan, deps.profile, deps.excludeIds, deps.now, deps.library);
+  // A request's songs follow the regional rule when their style (or the request) is French / Arabic / Maghreb.
+  const requestText = deps.intent?.rawText ?? '';
+  const ruleLane = (pk: SpotifyPick) => (plan.mode === 'request' ? ruleLaneFor(plan, [style.get(pk), requestText], deps.now) : byId.get(pk.laneId)!);
   const need = Object.fromEntries(plan.order.map((id) => [id, (plan.targets[id] ?? 3) + 2]));
-  const res = await resolveSpotifyPicks(spicks, { http: deps.http, env: deps.env }, { allowSearch: !deps.searchBlocked, need, accept: (item, pk) => laneReject(item, ruleLane(pk), rules) });
+  const res = await resolveSpotifyPicks(spicks, { http: deps.http, env: deps.env }, {
+    allowSearch: !deps.searchBlocked && !deps.lookupBlocked, allowLookups: !deps.lookupBlocked, need, excludeIds: deps.excludeIds, accept: (item, pk) => laneReject(item, ruleLane(pk), rules),
+  });
   const perLane: Record<string, number> = {};
   const items = res.items.map((r) => {
     const lane = byId.get(r.pick.laneId)!;
@@ -209,8 +228,8 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
     } as ContentItem;
   });
   const rejected = Object.entries(res.stats.rejected).map(([k, v]) => `${k} ${v}`).join(', ');
-  const detail = `${items.length}/${picks.length} curator picks resolved for ${plan.mode === 'request' ? 'the request' : plan.lanes.map((l) => l.label).join(' · ')} (cache ${res.stats.cached}, ListenBrainz ${res.stats.listenbrainz}, search ${res.stats.searched}${deps.searchBlocked ? ' blocked' : ''}${rejected ? `; rejected: ${rejected}` : ''})`;
-  return { items, detail, rateLimitedSec: res.rateLimitedSec, perLane };
+  const detail = `${items.length}/${picks.length} curator picks resolved for ${plan.mode === 'request' ? 'the request' : plan.lanes.map((l) => l.label).join(' · ')} (cache ${res.stats.cached}, ListenBrainz ${res.stats.listenbrainz}, search ${res.stats.searched}${deps.searchBlocked ? ' blocked' : ''}${deps.lookupBlocked ? ', lookups blocked: cache only' : ''}${rejected ? `; rejected: ${rejected}` : ''})`;
+  return { items, detail, rateLimitedSec: res.rateLimitedSec, lookupLimitedSec: res.lookupLimitedSec, perLane };
 }
 
 /**
@@ -218,10 +237,10 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
  * lane tag or genres mapped through the taxonomy), passing the era/regional, exclusion and
  * disliked-artist rules, least recently shown first. Never other users' imported libraries.
  */
-export function laneFallback(stored: ContentItem[], plan: MusicPlan, ctx: { profile: TasteProfile; excludeIds?: Set<string>; have?: Record<string, number>; now?: Date }): ContentItem[] {
+export function laneFallback(stored: ContentItem[], plan: MusicPlan, ctx: { profile: TasteProfile; excludeIds?: Set<string>; library?: LibrarySongs; have?: Record<string, number>; now?: Date }): ContentItem[] {
   if (plan.mode !== 'lanes') return [];
   const now = ctx.now ?? new Date();
-  const rules = laneRules(plan, ctx.profile, ctx.excludeIds, now);
+  const rules = laneRules(plan, ctx.profile, ctx.excludeIds, now, ctx.library);
   const usable = stored.filter((s) => s.category === 'music' && s.kind === 'track' && s.provider === 'spotify' && !!s.embed && !s.metadata?.imported);
   const fit = (s: ContentItem) => {
     const tag = laneTagOf(s)?.id;
@@ -250,11 +269,10 @@ export function laneFallback(stored: ContentItem[], plan: MusicPlan, ctx: { prof
     for (const { s } of ranked) {
       taken.add(s.id);
       // Per-user and per-lane fields are rebuilt here, never carried over from the shared catalog row.
-      const { lastShownAt: _shown, laneEra: _era, laneMood: _mood, ...meta } = s.metadata ?? {};
       out.push({
         ...s,
         metadata: {
-          ...meta,
+          ...withoutPerUser(s.metadata),
           lane: laneTag(lane),
           aiPick: false,
           aiOrder: 1000 + out.length,
@@ -264,6 +282,39 @@ export function laneFallback(stored: ContentItem[], plan: MusicPlan, ctx: { prof
         },
       });
     }
+  }
+  return out;
+}
+
+/** aiOrder of songs that didn't come from the curator: after its picks in their lane, ranked by score among themselves. */
+export const SEARCH_ORDER = 1500;
+export const STORED_ORDER = 2000;
+
+/**
+ * Songs that didn't come from the curator (Spotify search results; stored songs for a request) still
+ * follow the shared contract (metadata.lane) and the lane rules (era / regional 2015+, exclusions,
+ * library, disliked artists, versions): a request's songs join the request lane, an open feed's join the
+ * open "Fresh picks" lane. Songs failing the rules are dropped. Non-music items pass through untouched.
+ */
+export function laneLooseMusic(
+  items: ContentItem[],
+  plan: MusicPlan,
+  ctx: { profile: TasteProfile; excludeIds?: Set<string>; library?: LibrarySongs; now?: Date; text?: string; order: number; fallback?: boolean },
+): ContentItem[] {
+  const rules = laneRules(plan, ctx.profile, ctx.excludeIds, ctx.now, ctx.library);
+  const tag = laneTag(plan.mode === 'request' ? REQUEST_LANE : MIX_LANE);
+  const out: ContentItem[] = [];
+  for (const s of items) {
+    if (s.category !== 'music') {
+      out.push(s);
+      continue;
+    }
+    const by = typeof s.metadata?.retrievedBy === 'string' ? (s.metadata.retrievedBy as string) : undefined;
+    const lane = ruleLaneFor(plan, [s.genres, by, plan.mode === 'request' ? ctx.text : undefined], ctx.now);
+    // A stored song once served in a regional lane keeps the regional rule.
+    const storedRegional = !!LANE_BY_ID[laneTagOf(s)?.id ?? '']?.regional;
+    if (laneReject(s, storedRegional ? { ...lane, regional: true } : lane, rules)) continue;
+    out.push({ ...s, metadata: { ...withoutPerUser(s.metadata), lane: tag, aiPick: false, aiOrder: ctx.order, ...(ctx.fallback ? { fallback: true } : {}) } });
   }
   return out;
 }

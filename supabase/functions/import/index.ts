@@ -22,6 +22,7 @@ const Track = z.object({
   loudness: z.number().min(-80).max(10).optional(),
   popularity: z.number().min(0).max(100).optional(),
   addedAt: z.string().max(40).optional(),
+  isrc: z.string().regex(/^[A-Za-z0-9-]{12,15}$/).optional(),
 });
 const Body = z.object({ source: z.literal('spotify-liked-csv'), tracks: z.array(Track).min(1).max(5000) });
 

@@ -26,6 +26,8 @@ export interface ImportedTrack {
   /** Spotify popularity 0..100 at export time. */
   popularity?: number;
   addedAt?: string;
+  /** Recording identity across single/album/deluxe ids (so a liked song isn't served back under another id). */
+  isrc?: string;
 }
 
 /** Minimal RFC-4180 CSV parser (quoted fields, escaped quotes, CRLF). */
@@ -75,6 +77,7 @@ export function tracksFromCsv(text: string): ImportedTrack[] {
   const iLoud = idx('loudness');
   const iPop = idx('popularity');
   const iAdded = idx('added at');
+  const iIsrc = idx('isrc');
   if (iUri < 0 || iName < 0) throw new Error('This CSV has no "Track URI" / "Track Name" columns. Export Liked Songs with Exportify (exportify.app).');
   const out: ImportedTrack[] = [];
   for (const r of rows) {
@@ -99,6 +102,7 @@ export function tracksFromCsv(text: string): ImportedTrack[] {
       loudness: num(iLoud),
       popularity: num(iPop),
       addedAt: iAdded >= 0 ? r[iAdded] : undefined,
+      ...(iIsrc >= 0 && /^[A-Za-z0-9-]{12,15}$/.test((r[iIsrc] ?? '').trim()) ? { isrc: r[iIsrc].trim().toUpperCase() } : {}),
     });
   }
   const seen = new Set<string>();
@@ -111,7 +115,7 @@ export function trackToItem(t: ImportedTrack): AnalyzedItem {
     id: `spotify:track:${t.id}`, category: 'music', kind: 'track', provider: 'spotify', externalId: t.id, title: t.name, creators: t.artists,
     genres: t.genres, tags: t.album ? [t.album] : [], durationSec: t.durationMs ? Math.round(t.durationMs / 1000) : undefined, releaseDate: t.releaseDate,
     externalUrl: `https://open.spotify.com/track/${t.id}`, embed: { type: 'spotify', uri: `spotify:track:${t.id}`, kind: 'track' },
-    metadata: { album: t.album, imported: 'spotify-liked', valence: t.valence, energy: t.energy },
+    metadata: { album: t.album, imported: 'spotify-liked', valence: t.valence, energy: t.energy, ...(t.isrc ? { isrc: t.isrc } : {}) },
   };
   // Song titles are not descriptions ("All Of The Lights", "Power"), so imported songs are analysed
   // only from their genres and audio mood data.

@@ -8,11 +8,12 @@
 import type { ContentItem } from '../types.ts';
 import { ProviderError, stripHtml } from './http.ts';
 import { lbSpotifyIds } from './listenbrainz.ts';
+import { fold, foldTitle } from '../engine/text.ts';
 import { tagRetrieval, type Provider, type ProviderContext } from './types.ts';
 
 interface Img { url: string; width?: number }
 interface SArtist { id: string; name: string }
-interface STrack { id: string; name: string; artists: SArtist[]; album: { name: string; images: Img[]; release_date?: string; id: string }; duration_ms: number; external_urls: { spotify: string }; preview_url?: string | null; popularity?: number; explicit?: boolean }
+interface STrack { id: string; name: string; artists: SArtist[]; album: { name: string; images: Img[]; release_date?: string; id: string }; duration_ms: number; external_urls: { spotify: string }; preview_url?: string | null; popularity?: number; explicit?: boolean; external_ids?: { isrc?: string } }
 interface SAlbum { id: string; name: string; artists: SArtist[]; images: Img[]; release_date?: string; total_tracks?: number; external_urls: { spotify: string }; album_type?: string }
 interface SPlaylist { id: string; name: string; description?: string; owner?: { display_name?: string }; images?: Img[]; external_urls: { spotify: string } }
 interface SShow { id: string; name: string; description?: string; publisher?: string; images: Img[]; languages?: string[]; external_urls: { spotify: string }; total_episodes?: number }
@@ -28,7 +29,8 @@ export function mapSpotify(type: 'track' | 'album' | 'playlist' | 'show' | 'epis
       return { id: `spotify:track:${t.id}`, category: 'music', kind: 'track', provider: 'spotify', externalId: t.id, title: t.name, creators: t.artists.map((a) => a.name),
         genres: [], tags: [t.album?.name].filter(Boolean) as string[], artworkUrl: img(t.album?.images), durationSec: Math.round(t.duration_ms / 1000), releaseDate: t.album?.release_date,
         externalUrl: t.external_urls.spotify, embed: { type: 'spotify', uri: `spotify:track:${t.id}`, kind: 'track' }, popularity: t.popularity !== undefined ? t.popularity / 100 : undefined,
-        metadata: { album: t.album?.name, previewUrl: t.preview_url ?? null } };
+        // ISRC: the recording's identity across its single/album ids (library matching, reissue detection).
+        metadata: { album: t.album?.name, previewUrl: t.preview_url ?? null, ...(t.external_ids?.isrc ? { isrc: t.external_ids.isrc } : {}) } };
     }
     case 'album': {
       const a = x as SAlbum;
@@ -106,23 +108,19 @@ export const spotify: Provider = {
   },
 };
 
-const simplify = (x: string) => x.toLowerCase().normalize('NFKD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]/g, '');
+/** Comparable form of a title: decorations dropped, any script kept; '' only for symbol-only titles. */
+const titleKey = (x: string) => foldTitle(x) || fold(x);
 
-/** Title without version/feature decorations: "Song (feat. X) - Radio Edit" → "song". */
-function simplifyTitle(x: string): string {
-  return simplify(x.replace(/\s[-–]\s.*$/, '').replace(/[([].*?[)\]]/g, '').replace(/\b(feat|ft|featuring)\b.*$/i, ''));
-}
-
-/** True when one of the pick's credited artists is one of the track's artists (accents/punctuation ignored). */
+/** True when one of the pick's credited artists is one of the track's artists (accents/punctuation ignored, any script). */
 export function artistMatches(pickArtist: string, trackArtists: string[]): boolean {
   // "The", "&"/"and" and punctuation never decide a match ("Mumford & Sons" = "Mumford and Sons").
-  const norm = (x: string) => simplify(x.replace(/&/g, ' and ').replace(/^\s*the\s+/i, '').replace(/\band\b/gi, ' '));
+  const norm = (x: string) => fold(x.replace(/&/g, ' and ').replace(/^\s*the\s+/i, '').replace(/\band\b/gi, ' '));
   // The full credit first, then each credited artist ("Beyonce & Jay-Z" → "Jay-Z").
   const parts = [pickArtist, ...pickArtist.split(/\s*(?:,|&|\+|\/|\bx\b|\band\b|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b)\s*/i)].map((p) => p.trim()).filter(Boolean);
   return parts.some((p) => trackArtists.some((a) => {
     const sp = norm(p);
     const sa = norm(a);
-    if (!sp || !sa) return p.toLowerCase().trim() === a.toLowerCase().trim();
+    if (!sp || !sa) return !sp && !sa && p.toLowerCase().trim() === a.toLowerCase().trim();
     if (sp === sa) return true;
     // Near-identical spellings only: "Drake" is not "Drake Bell".
     const [short, long] = sp.length <= sa.length ? [sp, sa] : [sa, sp];
@@ -130,11 +128,15 @@ export function artistMatches(pickArtist: string, trackArtists: string[]): boole
   }));
 }
 
-/** Loose title check ("Song" ~ "Song (feat. X)" ~ "Song - 2019"); titles in other scripts are left to the artist check. */
+/**
+ * Loose title check ("Song" ~ "Song (feat. X)" ~ "Song - 2019"), in any script. A title that can't be
+ * compared (different scripts, or nothing left after folding) is NOT a match: accepting it let another
+ * song by the same artist through.
+ */
 export function titleMatches(pickTrack: string, title: string): boolean {
-  const a = simplifyTitle(pickTrack);
-  const b = simplifyTitle(title);
-  if (!a || !b) return true;
+  const a = titleKey(pickTrack);
+  const b = titleKey(title);
+  if (!a || !b) return !a && !b && pickTrack.toLowerCase().trim() === title.toLowerCase().trim();
   if (a === b) return true;
   const [short, long] = a.length <= b.length ? [a, b] : [b, a];
   return short.length >= 3 && long.includes(short);
@@ -142,7 +144,6 @@ export function titleMatches(pickTrack: string, title: string): boolean {
 
 interface STrackFull extends STrack {
   is_playable?: boolean;
-  external_ids?: { isrc?: string };
   album: STrack['album'] & { album_type?: string };
 }
 
@@ -151,6 +152,13 @@ export function mapSpotifyTrack(t: STrackFull): ContentItem {
   const base = mapSpotify('track', t)!;
   return { ...base, metadata: { ...(base.metadata ?? {}), isrc: t.external_ids?.isrc, albumType: t.album?.album_type, explicit: t.explicit } };
 }
+
+/**
+ * provider_status key for Spotify's single-track lookups (/v1/tracks/{id}). Spotify rate-limits
+ * endpoints separately (a ~19 h penalty on /v1/search left /v1/tracks working), so a lookup 429 is
+ * recorded here and never touches the 'spotify' (search) block, and vice versa.
+ */
+export const SPOTIFY_LOOKUP_BLOCK = 'spotify-lookup';
 
 export interface SpotifyPick {
   artist: string;
@@ -162,12 +170,19 @@ export interface SpotifyPick {
 export interface ResolveOptions {
   /** false while Spotify search is blocked/rate-limited: only the cache, ListenBrainz and single-track lookups run. */
   allowSearch: boolean;
+  /** false while single-track lookups are rate-limited: cached resolutions only, no Spotify or ListenBrainz call at all. */
+  allowLookups?: boolean;
   /** Search calls allowed for this refresh (default 8). */
   maxSearches?: number;
   /** Accepted songs wanted per lane; a lane stops resolving once it has them. */
   need?: Record<string, number>;
   /** Taste/era rules: a rejection reason, or null to accept. */
   accept?: (item: ContentItem, pick: SpotifyPick) => string | null;
+  /**
+   * Item ids never to serve (liked/saved/finished/disliked, recently shown). A pick is dropped when ANY
+   * of its candidate ids is listed: the same recording has several ids (single, album, deluxe).
+   */
+  excludeIds?: Set<string>;
   concurrency?: number;
 }
 
@@ -181,45 +196,48 @@ export interface ResolvedPick {
 export interface ResolveResult {
   /** Accepted songs, in the curator's order. */
   items: ResolvedPick[];
-  /** Set when Spotify answered 429: seconds to wait (Retry-After). */
+  /** Set when Spotify SEARCH answered 429: seconds to wait (Retry-After) → the 'spotify' block. */
   rateLimitedSec?: number;
+  /** Set when a single-track lookup (or the app token) answered 429 → the SPOTIFY_LOOKUP_BLOCK block. */
+  lookupLimitedSec?: number;
   stats: { cached: number; listenbrainz: number; searched: number; unresolved: number; rejected: Record<string, number> };
 }
 
 type ResolveCache = { id: string } | { none: true };
-const resolveKey = (pk: { artist: string; track: string }) => `spotify:resolve:v2:${simplify(pk.artist)}|${simplify(pk.track)}`;
+/** Any script survives folding; a part that folds to nothing keys on its raw text so picks never share a key. */
+const keyPart = (x: string) => fold(x) || `~${x.trim().toLowerCase()}`;
+export const resolveKey = (pk: { artist: string; track: string }) => `spotify:resolve:v3:${keyPart(pk.artist)}|${keyPart(pk.track)}`;
+const trackKey = (id: string, market: string) => `spotify:track:${id}:${market}`;
 
 /**
  * Resolve curator picks to real, playable Spotify tracks:
  *   (a) per-pick resolution cache → (b) ListenBrainz metadata mapping (batch, keyless) →
  *   (c) GET /v1/tracks/{id} (single lookups, 3 at a time, cached 30 days), accepted only when an
- *       artist matches and the track is playable → (d) only if search isn't blocked: exact
- *       track+artist search, at most 8 per refresh, stopping at the first 429.
+ *       artist and the title match and the track is playable → (d) only if search isn't blocked:
+ *       exact track+artist search, at most 8 per refresh, stopping at the first 429.
+ * While lookups are rate-limited only (a) runs, against cached track details.
  * There is no "any song by this artist" fallback: an unresolvable pick is dropped.
  */
 export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderContext, opts: ResolveOptions): Promise<ResolveResult> {
   const stats: ResolveResult['stats'] = { cached: 0, listenbrainz: 0, searched: 0, unresolved: 0, rejected: {} };
   const result: ResolvedPick[] = [];
   if (!picks.length) return { items: result, stats };
+  const allowLookups = opts.allowLookups !== false;
   let rateLimitedSec: number | undefined;
-  const limited = (e: unknown) => {
-    if (!(e instanceof ProviderError && e.kind === 'quota')) return false;
-    rateLimitedSec = Math.max(rateLimitedSec ?? 0, e.retryAfterSec ?? 60);
-    return true;
+  let lookupLimitedSec: number | undefined;
+  const quotaWait = (e: unknown) => (e instanceof ProviderError && e.kind === 'quota' ? e.retryAfterSec ?? 60 : undefined);
+  const lookupLimited = (e: unknown) => {
+    const s = quotaWait(e);
+    if (s !== undefined) lookupLimitedSec = Math.max(lookupLimitedSec ?? 0, s);
+    return s !== undefined;
   };
-  let token: string;
-  try {
-    token = await spotifyAppToken(ctx);
-  } catch (e) {
-    limited(e);
-    return { items: result, rateLimitedSec, stats: { ...stats, unresolved: picks.length } };
-  }
   const market = ctx.env('SPOTIFY_MARKET') ?? 'US';
   const cache = ctx.http.cache;
   const accepted = new Map<string, number>();
   const wants = (pk: SpotifyPick) => opts.need?.[pk.laneId] === undefined || (accepted.get(pk.laneId) ?? 0) < opts.need[pk.laneId];
   const done = new Set<number>(); // resolved to a real track (accepted or rejected by taste rules)
   const reject = (reason: string) => (stats.rejected[reason] = (stats.rejected[reason] ?? 0) + 1);
+  const excluded = (ids: string[]) => !!opts.excludeIds && ids.some((id) => opts.excludeIds!.has(`spotify:track:${id}`));
 
   const take = (index: number, item: ContentItem, via: ResolvedPick['via']) => {
     done.add(index);
@@ -236,34 +254,51 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
   cached.forEach((c, i) => {
     if (c && 'none' in c) done.add(i); // known unresolvable
   });
-  // (b) ListenBrainz mapping for the rest
-  const lbIdx = picks.map((_, i) => i).filter((i) => !cached[i]);
+  // (b) ListenBrainz mapping for the rest (not while lookups are blocked: its ids couldn't be checked)
+  const lbIdx = allowLookups ? picks.map((_, i) => i).filter((i) => !cached[i]) : [];
   const lbIds = lbIdx.length ? await lbSpotifyIds(lbIdx.map((i) => picks[i]), ctx.http) : [];
   const candidates = new Map<number, { ids: string[]; via: ResolvedPick['via'] }>();
   cached.forEach((c, i) => c && 'id' in c && candidates.set(i, { ids: [c.id], via: 'cache' }));
-  lbIdx.forEach((i, j) => lbIds[j]?.length && candidates.set(i, { ids: lbIds[j].slice(0, 2), via: 'listenbrainz' }));
+  lbIdx.forEach((i, j) => lbIds[j]?.length && candidates.set(i, { ids: lbIds[j], via: 'listenbrainz' }));
+  // A pick whose recording the user already has (or was just shown) under any of its ids is dropped up front.
+  for (const [i, cand] of candidates) {
+    if (!excluded(cand.ids)) continue;
+    candidates.delete(i);
+    done.add(i);
+    reject('excluded');
+  }
 
-  // (c) single-track lookups
+  // (c) single-track lookups (cache only while lookups are blocked)
+  let token: string | undefined;
+  if (allowLookups && (candidates.size || opts.allowSearch)) {
+    try {
+      token = await spotifyAppToken(ctx);
+    } catch (e) {
+      lookupLimited(e);
+    }
+  }
+  let stopLookups = false;
   const lookup = async (id: string): Promise<STrackFull | null> => {
+    if (!token) return ((await cache?.get(trackKey(id, market)).catch(() => undefined)) as STrackFull | undefined) ?? null;
     try {
       return await ctx.http.json<STrackFull>(`https://api.spotify.com/v1/tracks/${id}?market=${encodeURIComponent(market)}`, {
-        init: { headers: { Authorization: `Bearer ${token}` } }, cacheKey: `spotify:track:${id}:${market}`, ttl: 30 * 86400, provider: 'spotify',
+        init: { headers: { Authorization: `Bearer ${token}` } }, cacheKey: trackKey(id, market), ttl: 30 * 86400, provider: 'spotify',
       });
     } catch (e) {
-      limited(e);
+      if (lookupLimited(e)) stopLookups = true;
       return null;
     }
   };
   const order = picks.map((_, i) => i).filter((i) => candidates.has(i));
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(opts.concurrency ?? 3, order.length) }, async () => {
-    while (next < order.length && rateLimitedSec === undefined) {
+    while (next < order.length && !stopLookups) {
       const i = order[next++];
       if (!wants(picks[i])) continue;
       const cand = candidates.get(i)!;
-      for (const id of cand.ids) {
+      for (const id of cand.ids.slice(0, 2)) {
         const t = await lookup(id);
-        if (rateLimitedSec !== undefined) return;
+        if (stopLookups) return;
         if (!t?.id || !artistMatches(picks[i].artist, (t.artists ?? []).map((a) => a.name)) || !titleMatches(picks[i].track, t.name)) continue;
         if (t.is_playable === false) {
           done.add(i);
@@ -279,9 +314,9 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
     }
   }));
 
-  // (d) exact search, only when allowed and budget remains
+  // (d) exact search, only when allowed, lookups aren't limited, and budget remains
   const budget = opts.maxSearches ?? 8;
-  if (opts.allowSearch && rateLimitedSec === undefined) {
+  if (opts.allowSearch && token && lookupLimitedSec === undefined) {
     for (let i = 0; i < picks.length && stats.searched < budget; i++) {
       const pk = picks[i];
       if (done.has(i) || !wants(pk)) continue;
@@ -294,16 +329,23 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
           init: { headers: { Authorization: `Bearer ${token}` } }, cacheKey: `spotify:search-track:${params}`, ttl: 30 * 86400, provider: 'spotify',
         });
       } catch (e) {
-        if (limited(e)) break; // stop immediately: Spotify's penalties grow with every extra call
+        const wait = quotaWait(e);
+        if (wait !== undefined) {
+          rateLimitedSec = Math.max(rateLimitedSec ?? 0, wait);
+          break; // stop immediately: Spotify's penalties grow with every extra call
+        }
         continue;
       }
       const hit = (data.tracks?.items ?? []).find((t) => t?.id && t.is_playable !== false && artistMatches(pk.artist, (t.artists ?? []).map((a) => a.name)) && titleMatches(pk.track, t.name));
       if (cache) await cache.set(resolveKey(pk), (hit ? { id: hit.id } : { none: true }) satisfies ResolveCache, (hit ? 30 : 14) * 86400).catch(() => undefined);
-      if (hit) take(i, mapSpotifyTrack(hit), 'search');
+      if (hit && excluded([hit.id])) {
+        done.add(i);
+        reject('excluded');
+      } else if (hit) take(i, mapSpotifyTrack(hit), 'search');
       else done.add(i);
     }
   }
   stats.unresolved = picks.length - done.size;
   result.sort((a, b) => a.index - b.index);
-  return { items: result, rateLimitedSec, stats };
+  return { items: result, rateLimitedSec, lookupLimitedSec, stats };
 }
