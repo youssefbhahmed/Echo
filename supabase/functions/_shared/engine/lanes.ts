@@ -1,0 +1,376 @@
+// Taste lanes: coherent listening "lanes" of a music library (e.g. "Afro & melodic house").
+// The taxonomy mirrors the library analysis (scratch csv_analysis.py LANES) and is shared by the
+// importer (lane shares), the curator (briefs), the resolver (era/regional rules) and the fallback.
+// Pure functions, generic words only: no track or artist names live here.
+import type { ContentItem, LaneTag, MusicLane, MusicPolicy, TasteProfile } from '../types.ts';
+import { inBlockedFamily } from './music.ts';
+import { normalize, normKey } from './text.ts';
+
+export interface LaneDef {
+  id: string;
+  label: string;
+  /** French / Arabic / Maghreb: capped share, modern releases only (owner policy). */
+  regional: boolean;
+  /** Matched against laneKey(genre); first matching lane wins (order matters, like the analysis script). */
+  re: RegExp;
+  /** Second pass for broad labels no specific rule matched ("uk hip hop", "electronic"). */
+  broad?: RegExp;
+  /** Style families (engine/music.ts) the lane belongs to; a lane is off when all of them are blocked. */
+  families: string[];
+  /** Generic sub-genre words used when the library has too few tags for the lane. */
+  descriptors: string[];
+  /** Instrumental by nature (vocals rule relaxed). */
+  instrumental?: boolean;
+}
+
+// Order = priority for a single genre label (as in the analysis script): regional lanes first so
+// "rap français" is French and "hip-hop arabe" is Arabic, never US hip-hop.
+export const LANES: LaneDef[] = [
+  {
+    id: 'maghreb-fusion', label: 'Maghreb fusion', regional: true, families: ['maghreb'],
+    re: /\b(gnaoui|gnawa|gnawi|sufi|amazigh|berbere?|andalou(se)?|mizrahi|rai|chaabi(?! egyptien))\b/,
+    descriptors: ['modern gnawa fusion', 'raï', 'chaâbi'],
+  },
+  {
+    id: 'arabic-pop', label: 'Arabic rap & pop', regional: true, families: ['maghreb'],
+    re: /mahraganat|khalee?ji|chaabi egyptien|\b(arabe?|arabic|arab|marocaine?|moroccan|egyptienne?|egyptian|libanaise?|lebanese|algerienne?|algerian|tunisienne?|tunisian|maghrebi?|darija)\b/,
+    descriptors: ['Moroccan rap', 'Arabic pop', 'Arabic hip-hop'],
+  },
+  {
+    id: 'french', label: 'French pop & rap', regional: true, families: ['french-rap', 'french-chanson'],
+    // "house française" is electronic, not French pop.
+    re: /^(?!.*\b(house|techno)\b).*\b(francaise?|french|chanson|variete|pop urbaine|queb\w*|electro swing|rap belge|drill francaise)\b/,
+    descriptors: ['French pop', 'pop urbaine', 'French rap'],
+  },
+  {
+    id: 'hiphop-rnb', label: 'Hip-hop & R&B', regional: false, families: ['hip-hop', 'rnb'],
+    re: /^rap$|^hip hop$|east coast|west coast|old school|southern hip hop|g funk|trap soul|^r b$|^rnb$|r b alternatif|alternative r b|contemporary r b|dark r b|uk r b|gangster|hyphy|jazz rap|neo soul|crunk|grime|rage rap|rap melodique|melodic rap|hip hop hardcore|^trap$|r b indie|indie r b|pop soul|afroswing|uk hip hop|uk rap|uk drill|pop rap|conscious hip hop|underground hip hop|boom bap|cloud rap|emo rap|new jack swing/,
+    broad: /\b(hip hop|rap|trap|drill|r b|rnb)\b/,
+    descriptors: ['hip-hop', 'R&B', 'melodic rap'],
+  },
+  {
+    id: 'rock-metal', label: 'Rock & metal', regional: false, families: ['rock'],
+    re: /rock|metal|punk|grunge|stoner|sludge|doom|shoegaze|\bemo\b/,
+    descriptors: ['alternative rock', 'hard rock', 'metal'],
+  },
+  {
+    id: 'blues-soul', label: 'Blues, soul & Americana', regional: false, families: ['blues-jazz', 'folk'],
+    re: /southern gothic|blues|^soul$|retro soul|indie soul|country|americana|folk|bluegrass|red dirt|motown|northern soul|soul classique|classic soul|singer songwriter/,
+    descriptors: ['southern gothic', 'blues', 'soul', 'Americana'],
+  },
+  {
+    id: 'melodic-house', label: 'Afro & melodic house', regional: false, families: ['house'],
+    re: /afro house|house organique|organic house|house tribale|tribal house|afro tech|house melodique|melodic house|techno melodique|melodic techno|downtempo|deep house|jazz house|trip hop|^electro$|electronique|electronica|^electronic$|techno|basse melodique|melodic bass|house francaise|french house|house lo fi|lo fi house|dub techno|house progressive|progressive house|nu disco|chillwave|chillstep|lo fi|indie dance|organic electronic/,
+    broad: /\b(house|electro|electronic|chill)\b/,
+    descriptors: ['afro house', 'organic house', 'melodic house', 'downtempo'],
+  },
+  {
+    id: 'edm', label: 'EDM & tropical house', regional: false, families: ['house'],
+    re: /^edm$|\bedm\b|tropical house|slap house|big room|moombahton|brazilian bass|future house|future bass|dubstep|^house$|house latino|stutter house|electro house|bass house|drumstep|hardstyle|trance|g house|tech house|europop|jersey club|3 step|drum (and )?bass/,
+    descriptors: ['EDM', 'tropical house', 'festival house'],
+  },
+  {
+    id: 'afro-latin', label: 'Afro, Latin & Caribbean', regional: false, families: ['afro', 'latin'],
+    re: /afropop|afro pop|afrosoul|afro soul|afrobeats?|r b afro|afro r b|afropiano|amapiano|dancehall|kizomba|ragga|soca|kompa|zouk|reggae|latino|latin|reggaeton|cumbia|bachata|salsa|urbano|dembow|azonto|hiplife|highlife|gqom|kuduro|\balte\b|maskandi|funk bresilien\w*|brazilian funk|baile funk|forro|\bmpb\b|piseiro|\bdub\b|riddim|lover|techengue|tango|afro adura/,
+    broad: /\bafro\b/,
+    descriptors: ['afrobeats', 'amapiano', 'reggaeton', 'dancehall'],
+  },
+  {
+    id: 'jazz-classical', label: 'Jazz, classical & soundtrack', regional: false, families: ['blues-jazz', 'cinematic'], instrumental: true,
+    re: /jazz|classique|classical|piano|concerto|chambre|baroque|bande originale|soundtrack|impressionnisme|expressionnisme|neo classique|neoclassical|neo classical|symphon|orchestr|opera|fado|swing|comedies musicales|\banime\b|medievale/,
+    broad: /\b(ambient|new age|score|cinematic|minimalism|experimental|avant garde)\b/,
+    descriptors: ['jazz', 'modern classical', 'film score'],
+  },
+];
+
+export const LANE_BY_ID: Record<string, LaneDef> = Object.fromEntries(LANES.map((l) => [l.id, l]));
+
+export const DEFAULT_POLICY: MusicPolicy = { regionalShare: 0.12, regionalMinYear: 2015, familiarity: 'library' };
+/** Non-regional lanes default to releases from this year on when the library says nothing else. */
+export const DEFAULT_MIN_YEAR = 2005;
+/** Release-year tolerance when checking a song against its lane's era (non-regional lanes). */
+export const ERA_TOLERANCE = 2;
+export const MIN_LANE_SHARE = 0.03;
+export const MIN_JAZZ_SHARE = 0.06;
+
+/** Pseudo-lanes: a typed request (chat/search) and a listener with no library yet. */
+export const REQUEST_LANE: LaneTag = { id: 'request', label: 'For your request' };
+export const MIX_LANE: LaneTag = { id: 'mix', label: 'Fresh picks' };
+
+/** Normalised genre label for the taxonomy ("Hip-Hop", "hip-hop" → "hip hop"; "R&B" → "r b"; accents stripped). */
+export function laneKey(genre: string): string {
+  return normalize(genre).replace(/-/g, ' ').replace(/\s+/g, ' ').trim();
+}
+
+/** Lane of one genre label, or null when no rule matches ("pop", "dance pop"). */
+export function laneOfGenre(genre: string): string | null {
+  const k = laneKey(genre);
+  if (!k) return null;
+  return LANES.find((l) => l.re.test(k))?.id ?? LANES.find((l) => l.broad?.test(k))?.id ?? null;
+}
+
+/** Lane of a tagged track: majority vote of its genres (ties: the first label's lane). */
+export function laneOfGenres(genres: string[]): string | null {
+  const votes = new Map<string, number>();
+  for (const g of genres) {
+    const l = laneOfGenre(g);
+    if (l) votes.set(l, (votes.get(l) ?? 0) + 1);
+  }
+  let best: string | null = null;
+  let n = 0;
+  for (const [l, c] of votes) if (c > n) [best, n] = [l, c];
+  return best;
+}
+
+export function laneTag(l: { id: string; label: string }): LaneTag {
+  return { id: l.id, label: l.label };
+}
+
+export function laneTagOf(item: { metadata?: Record<string, unknown> }): LaneTag | null {
+  const l = item.metadata?.lane as Partial<LaneTag> | undefined;
+  return l && typeof l.id === 'string' && typeof l.label === 'string' ? { id: l.id, label: l.label } : null;
+}
+
+// ───────────── owner policy ─────────────
+
+const sum = (xs: number[]) => xs.reduce((a, b) => a + b, 0);
+
+/** Regional lanes share policy.regionalShare between them (proportionally); the rest share the remainder. */
+function rescale<T extends { share: number; regional: boolean }>(lanes: T[], policy: MusicPolicy): T[] {
+  const reg = lanes.filter((l) => l.regional);
+  const other = lanes.filter((l) => !l.regional);
+  const rs = sum(reg.map((l) => l.share));
+  const os = sum(other.map((l) => l.share));
+  const regTotal = !other.length ? 1 : !reg.length ? 0 : policy.regionalShare;
+  return lanes.map((l) => ({ ...l, share: l.regional ? (rs ? (l.share / rs) * regTotal : 0) : os ? (l.share / os) * (1 - regTotal) : 0 }));
+}
+
+/**
+ * Owner policy: regional lanes (French, Arabic rap & pop, Maghreb fusion) get a combined share of
+ * policy.regionalShare and modern releases only; lanes under 3% are dropped (jazz/classical under 6%);
+ * shares are renormalised. Sorted by share.
+ */
+export function applyLanePolicy<T extends { id: string; share: number; regional: boolean; era: { from: number; to: number } }>(lanes: T[], policy: MusicPolicy = DEFAULT_POLICY): T[] {
+  const first = rescale(lanes.filter((l) => l.share > 0), policy);
+  const kept = first.filter((l) => l.share >= (l.id === 'jazz-classical' ? MIN_JAZZ_SHARE : MIN_LANE_SHARE));
+  return rescale(kept, policy)
+    .map((l) => (l.regional ? { ...l, era: { from: Math.max(l.era.from, policy.regionalMinYear), to: Math.max(l.era.to, policy.regionalMinYear) } } : l))
+    .sort((a, b) => b.share - a.share);
+}
+
+// ───────────── generic words for briefs ─────────────
+
+const finite = (x: number | undefined): x is number => typeof x === 'number' && Number.isFinite(x);
+
+/** "bittersweet but danceable, mid-energy" from a lane's audio medians ('' when unknown). */
+export function moodPhrase(l: { energy: number; danceability: number; valence: number }): string {
+  if (!finite(l.valence) || !finite(l.energy)) return '';
+  const tone = l.valence < 0.35 ? 'melancholic' : l.valence < 0.5 ? 'bittersweet' : l.valence < 0.65 ? 'warm' : 'upbeat';
+  const energy = l.energy < 0.45 ? 'mellow' : l.energy < 0.7 ? 'mid-energy' : 'high-energy';
+  const dance = finite(l.danceability) && l.danceability >= 0.65 ? 'danceable' : '';
+  if (dance && (tone === 'melancholic' || tone === 'bittersweet')) return `${tone} but danceable, ${energy}`;
+  return [tone, dance, energy].filter(Boolean).join(', ');
+}
+
+export function tempoWord(bpm: number | undefined): string {
+  if (!finite(bpm) || bpm <= 0) return '';
+  return bpm < 90 ? 'slow tempo' : bpm < 118 ? 'mid-tempo' : 'uptempo';
+}
+
+/** Familiarity in words from the lane's Spotify popularity quartiles ('' when unknown). */
+export function popularityPhrase(p: { p25: number; p50: number; p75: number } | undefined): string {
+  if (!p || !finite(p.p50) || p.p50 <= 0) return '';
+  if (p.p50 >= 60) return 'mostly popular songs, hits welcome';
+  if (p.p50 >= 40) return 'mostly mid-popularity songs well known in the scene, a couple of bigger hits';
+  return 'songs known within the scene rather than chart hits (never obscure)';
+}
+
+export function decadeLabel(y: number): string {
+  return `${Math.floor(y / 10) * 10}s`;
+}
+
+// ───────────── lane choice per refresh ─────────────
+
+/** Small deterministic PRNG (mulberry32) so a refresh seed always gives the same lanes. */
+export function seededRandom(seed: number): () => number {
+  let a = (Math.imul((seed | 0) ^ 0x9e3779b9, 0x85ebca6b) >>> 0) || 0x2545f491;
+  return () => {
+    a = (a + 0x6d2b79f5) >>> 0;
+    let t = a;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/** A lane is off when every style family it belongs to is blocked ("never" in My Taste → Music mix). */
+export function laneBlocked(l: { id: string; genres?: string[] }, profile: TasteProfile): boolean {
+  const blocked = profile.explicit.blockedFamilies ?? [];
+  if (!blocked.length) return false;
+  const def = LANE_BY_ID[l.id];
+  if (def) return def.families.every((f) => blocked.includes(f));
+  return !!l.genres?.length && inBlockedFamily(l.genres, profile);
+}
+
+/**
+ * Lanes for one refresh: share-weighted draws without replacement (the top lane comes up often),
+ * nudged by lane feedback. Regional lanes only enter with their policy weight (~12% combined) and at
+ * most one per refresh. Returned strongest first.
+ */
+export function chooseLanes(lanes: MusicLane[], seed: number, n = 3, opts: { feedback?: Record<string, number>; blocked?: (l: MusicLane) => boolean } = {}): MusicLane[] {
+  const rnd = seededRandom(seed);
+  const pool = lanes
+    .filter((l) => l.share > 0 && !opts.blocked?.(l))
+    .map((l) => ({ l, w: l.share * Math.exp(Math.max(-1, Math.min(1, opts.feedback?.[l.id] ?? 0))) }));
+  const out: Array<{ l: MusicLane; w: number }> = [];
+  while (out.length < n && pool.length) {
+    const total = sum(pool.map((x) => x.w));
+    let r = rnd() * total;
+    let idx = pool.findIndex((x) => (r -= x.w) < 0);
+    if (idx < 0) idx = pool.length - 1;
+    const [picked] = pool.splice(idx, 1);
+    out.push(picked);
+    if (picked.l.regional) for (let i = pool.length - 1; i >= 0; i--) if (pool[i].l.regional) pool.splice(i, 1);
+  }
+  return out.sort((a, b) => b.w - a.w).map((x) => x.l);
+}
+
+/** Split `total` picks across lanes by share, at least `min` each (fewer lanes when total is small). */
+export function laneTargets(lanes: Array<{ share: number }>, total: number, min = 3): number[] {
+  const n = lanes.length;
+  if (!n || total <= 0) return lanes.map(() => 0);
+  if (total <= min * n) {
+    const base = Math.floor(total / n);
+    return lanes.map((_, i) => base + (i < total - base * n ? 1 : 0));
+  }
+  const s = sum(lanes.map((l) => l.share)) || 1;
+  const raw = lanes.map((l) => (total * (l.share || 1 / n)) / s);
+  const t = raw.map((x) => Math.max(min, Math.floor(x)));
+  while (sum(t) > total) {
+    let i = -1;
+    for (let j = 0; j < n; j++) if (t[j] > min && (i < 0 || t[j] - raw[j] > t[i] - raw[i])) i = j;
+    if (i < 0) break;
+    t[i]--;
+  }
+  while (sum(t) < total) {
+    let i = 0;
+    for (let j = 1; j < n; j++) if (raw[j] - t[j] > raw[i] - t[i]) i = j;
+    t[i]++;
+  }
+  return t;
+}
+
+// ───────────── lanes for any profile ─────────────
+
+const nowYear = (now = new Date()) => now.getUTCFullYear();
+
+/** Lanes without a library import: grouped from learned genre weights (no audio medians). */
+export function lanesFromGenres(profile: TasteProfile, now = new Date(), policy: MusicPolicy = DEFAULT_POLICY): MusicLane[] {
+  const acc = new Map<string, { w: number; genres: Array<[string, number]> }>();
+  for (const [g, w] of Object.entries(profile.genres)) {
+    if (w <= 0) continue;
+    const id = laneOfGenre(g);
+    if (!id) continue;
+    const e = acc.get(id) ?? { w: 0, genres: [] };
+    e.w += w;
+    e.genres.push([g, w]);
+    acc.set(id, e);
+  }
+  const lanes: MusicLane[] = [...acc.entries()].map(([id, e]) => {
+    const def = LANE_BY_ID[id];
+    const genres = e.genres.sort((a, b) => b[1] - a[1]).slice(0, 6).map(([g]) => g);
+    return {
+      id, label: def.label, share: e.w, descriptors: genres.slice(0, 4), era: { from: def.regional ? policy.regionalMinYear : DEFAULT_MIN_YEAR, to: nowYear(now) },
+      energy: NaN, danceability: NaN, valence: NaN, popularity: { p25: NaN, p50: NaN, p75: NaN }, regional: def.regional, genres, source: 'genres',
+    };
+  });
+  return applyLanePolicy(lanes, policy);
+}
+
+export function mixLane(now = new Date()): MusicLane {
+  return {
+    ...MIX_LANE, share: 1, descriptors: [], era: { from: DEFAULT_MIN_YEAR, to: nowYear(now) }, energy: NaN, danceability: NaN, valence: NaN,
+    popularity: { p25: NaN, p50: NaN, p75: NaN }, regional: false, genres: [], source: 'default',
+  };
+}
+
+/** The lanes ECHO curates from: the imported library's lanes, else lanes from learned genres, else one open lane. */
+export function effectiveLanes(profile: TasteProfile, now = new Date()): MusicLane[] {
+  const policy = musicPolicy(profile);
+  if (profile.music?.lanes?.length) return profile.music.lanes;
+  const fromGenres = lanesFromGenres(profile, now, policy);
+  return fromGenres.length ? fromGenres : [mixLane(now)];
+}
+
+export function musicPolicy(profile: TasteProfile): MusicPolicy {
+  return { ...DEFAULT_POLICY, ...(profile.music?.policy ?? {}) };
+}
+
+// ───────────── release-era and taste rules ─────────────
+
+export function yearOf(date: string | undefined | null): number | undefined {
+  const y = Number(String(date ?? '').slice(0, 4));
+  return y > 1900 && y < 2100 ? y : undefined;
+}
+
+/** ISRC "CC-XXX-YY-NNNNN": YY is the recording's registration year. */
+export function isrcYear(isrc: string | undefined | null, now = new Date()): number | undefined {
+  const m = /^[A-Z]{2}[A-Z0-9]{3}(\d{2})\d{5}$/i.exec(String(isrc ?? '').replace(/-/g, ''));
+  if (!m) return undefined;
+  const yy = Number(m[1]);
+  return yy <= (nowYear(now) % 100) + 1 ? 2000 + yy : 1900 + yy;
+}
+
+/** Best estimate of when a recording was first released: the album date, or the ISRC year when older (reissues). */
+export function recordingYear(item: Pick<ContentItem, 'releaseDate' | 'metadata'>, now = new Date()): number | undefined {
+  const a = yearOf(item.releaseDate);
+  const i = isrcYear(item.metadata?.isrc as string | undefined, now);
+  return a && i ? Math.min(a, i) : a ?? i;
+}
+
+/** First allowed release year for a lane (regional lanes never before policy.regionalMinYear). */
+export function eraFloor(l: { regional: boolean; era?: { from: number } }, policy: MusicPolicy = DEFAULT_POLICY): number {
+  const from = l.era?.from && l.era.from > 1900 ? l.era.from : DEFAULT_MIN_YEAR;
+  return l.regional ? Math.max(policy.regionalMinYear, from) : from;
+}
+
+/** Era rule: within the lane's era with a 2-year tolerance; regional lanes strictly from policy.regionalMinYear. */
+export function passesEra(year: number | undefined, l: { regional: boolean; era?: { from: number } }, policy: MusicPolicy = DEFAULT_POLICY): boolean {
+  if (year === undefined) return !l.regional;
+  if (l.regional) return year >= Math.max(policy.regionalMinYear, eraFloor(l, policy) - ERA_TOLERANCE);
+  return year >= eraFloor(l, policy) - ERA_TOLERANCE;
+}
+
+/** Alternate versions the curator must not serve (suffix only, so "Live Your Life" is fine). */
+export const VERSION_RE = /(\s[-–]\s|[([]).*\b(live|remix(ed)?|re-?mix|sped up|slowed|reverb|nightcore|karaoke|instrumental|acapella|a cappella|8d audio|cover)\b/i;
+
+export function isDislikedArtist(artists: string[], profile: TasteProfile): boolean {
+  const dislikes = new Set(profile.explicit.dislikes.map(normKey));
+  return artists.some((a) => {
+    const k = normKey(a);
+    return !!k && ((profile.creators[k] ?? 0) <= -0.5 || dislikes.has(k));
+  });
+}
+
+export interface LaneRuleContext {
+  profile: TasteProfile;
+  policy?: MusicPolicy;
+  excludeIds?: Set<string>;
+  /** false when the user explicitly asked for older music. */
+  era?: boolean;
+  now?: Date;
+}
+
+/** Why a resolved song may not be served in a lane (null = fine). */
+export function laneReject(item: ContentItem, lane: { regional: boolean; era?: { from: number } }, ctx: LaneRuleContext): string | null {
+  if (ctx.excludeIds?.has(item.id)) return 'excluded';
+  if (isDislikedArtist(item.creators, ctx.profile)) return 'disliked';
+  if (VERSION_RE.test(item.title)) return 'version';
+  if (item.metadata?.albumType === 'compilation') return 'compilation';
+  if (ctx.era !== false) {
+    const y = recordingYear(item, ctx.now);
+    if (!passesEra(y, lane, ctx.policy ?? DEFAULT_POLICY)) return 'era';
+  }
+  if (inBlockedFamily(item.genres, ctx.profile)) return 'blocked';
+  return null;
+}

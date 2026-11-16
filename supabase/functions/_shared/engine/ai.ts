@@ -3,7 +3,7 @@
 // Only the user's own request text is sent — never catalog content (Spotify's
 // Developer Policy forbids feeding Spotify Content into AI models).
 import { CATEGORIES, type Category, type Intent } from '../types.ts';
-import type { HttpClient } from '../providers/http.ts';
+import { hashKey, type HttpClient } from '../providers/http.ts';
 import type { Env } from '../providers/types.ts';
 import { CONCEPT_BY_ID, CONCEPT_IDS, MOOD_IDS } from './concepts.ts';
 import { round } from './text.ts';
@@ -146,20 +146,111 @@ export async function llmEnrichIntent(intent: Intent, cfg: AiConfig, http: HttpC
 
 export interface MusicPick {
   artist: string;
-  track?: string;
-  album?: string;
-  /** Curator's short style label (e.g. "alternative rock", "afro house"). */
-  style?: string;
+  track: string;
+  /** Feed: the lane id the curator filed the song under. Request: a short style label ("afro house"). */
+  lane?: string;
+}
+
+/** One lane of the listener's taste, described in generic words only (never track/artist names). */
+export interface CuratorLane {
+  id: string;
+  label: string;
+  descriptors: string[];
+  /** "bittersweet but danceable, mid-energy" */
+  mood?: string;
+  /** Familiarity in words, from the lane's popularity quartiles. */
+  popularity?: string;
+  fromYear: number;
+  regional: boolean;
+  /** Lane whose style is instrumental by nature (jazz, classical, scores). */
+  instrumental?: boolean;
+  count: number;
+}
+
+/** A typed request (chat/search); rules apply unless the user asked otherwise. */
+export interface CuratorRequest {
+  text: string;
+  themes?: string;
+  background?: string;
+  arc?: string;
+  count: number;
+  /** Undefined when the user asked for older music. */
+  fromYear?: number;
+  regionalMinYear?: number;
+  vocals: boolean;
+  familiar: boolean;
+}
+
+export interface CuratorBrief {
+  lanes?: CuratorLane[];
+  request?: CuratorRequest;
+  /** Session moods (generic words). */
+  moods?: string[];
+  /** User-typed dislikes only. */
+  avoid?: string[];
+}
+
+const NEVER_STOCK = 'never novelty, meme, comedy, parody, children\'s, sleep, meditation, relaxation, study, frequency or stock music, and no compilations or "best of" collections';
+
+/** System + user messages for the music curator. Pure: tests check what is (and isn't) sent. */
+export function curatorPrompt(brief: CuratorBrief): { system: string; user: string } {
+  const avoid = (brief.avoid ?? []).map((a) => a.trim()).filter(Boolean).slice(0, 20);
+  const avoidLine = avoid.length ? `\nAvoid: ${avoid.join(', ').slice(0, 300)}` : '';
+  if (brief.request) {
+    const r = brief.request;
+    const rules = [
+      `Give ${r.count} real, officially released songs that are on Spotify and fit the request.`,
+      r.vocals ? 'Songs with vocals, in their original studio version: no live, remix, sped-up, slowed, cover, karaoke or instrumental versions.' : '',
+      r.fromYear ? `Songs first released in or after ${r.fromYear}${r.regionalMinYear ? `; French, Arabic or Maghreb songs only from ${r.regionalMinYear} on (modern, never traditional or classic-era recordings)` : ''}.` : '',
+      r.familiar ? 'Familiar like the listener\'s own library: songs well known in their scene, mostly mid-popularity with a couple of bigger hits; never obscure, avant-garde or experimental.' : '',
+      'One song per artist; never an artist or style listed under "avoid".',
+      'If the request describes an arc (from one mood to another), list the songs in listening order along it; otherwise order them for a smooth listening flow.',
+      `${NEVER_STOCK.charAt(0).toUpperCase()}${NEVER_STOCK.slice(1)}.`,
+    ].filter(Boolean);
+    return {
+      system: `You are ECHO's music curator. Return ONLY JSON: {"items":[{"artist":"...","track":"...","lane":"<short style label, e.g. afro house>"}]}.\n${rules.map((x) => `- ${x}`).join('\n')}`,
+      user: `Request: ${r.text.slice(0, 500)}${r.themes ? `\nThemes: ${r.themes}` : ''}${r.arc ? `\nArc: ${r.arc}` : ''}${r.background ? `\nListener background: ${r.background.slice(0, 400)}` : ''}${avoidLine}`,
+    };
+  }
+  const lanes = brief.lanes ?? [];
+  const instrumentalLane = lanes.some((l) => l.instrumental);
+  const system = `You are ECHO's music curator for one listener. Return ONLY JSON: {"items":[{"artist":"...","track":"...","lane":"<lane id>"}]}.
+Choose real, officially released songs that are on Spotify:
+- Songs with vocals, in their original studio version: no live, remix, sped-up, slowed, cover, karaoke or instrumental versions${instrumentalLane ? ' (a lane marked "instrumental style" may include instrumentals)' : ''}.
+- Only songs first released in or after the year given for their lane.
+- Familiar like the listener's own library: songs that are well known in their scene, mostly solid mid-popularity tracks plus a couple of bigger hits, at most one deeper cut per lane. Never obscure, avant-garde, experimental, ambient, noise, jazz or classical (unless the lane is that style); ${NEVER_STOCK}.
+- Match each lane's mood and energy.
+- One song per artist across the whole list; never an artist or style listed under "avoid".
+- Within each lane, order the songs for a smooth listening flow: energy and mood glide from one song to the next.
+- Give the requested number of songs for every lane, each tagged with its lane id.`;
+  const laneLine = (l: CuratorLane) =>
+    [
+      `- lane "${l.id}" (${l.label}): ${l.descriptors.join(', ')}`,
+      l.mood ? `feel: ${l.mood}` : '',
+      l.popularity ?? '',
+      l.instrumental ? 'instrumental style' : '',
+      l.regional ? `modern only: released ${l.fromYear} or later, no traditional or classic-era songs` : `released ${l.fromYear} or later`,
+      `${l.count} songs`,
+    ].filter(Boolean).join('; ');
+  const user = `Lanes for this listener:\n${lanes.map(laneLine).join('\n')}${brief.moods?.length ? `\nSession mood: ${brief.moods.join(', ')}` : ''}${avoidLine}`;
+  return { system, user };
+}
+
+/** Cache key: stable for the same seed + brief, different for every refresh seed. */
+export async function curatorCacheKey(model: string, prompt: { system: string; user: string }, seed: number): Promise<string> {
+  return `ai:music:v2:${await hashKey(`${model}\n${prompt.system}\n${prompt.user}`)}:${seed}`;
 }
 
 /**
- * Ask the LLM for real, acclaimed music matching a description. Only ECHO's own taste words
- * (and the user's request text) are sent, never catalog/Spotify data. Every pick is then verified
- * against Spotify before it can be shown, so hallucinated titles are dropped.
+ * Ask the LLM for real songs for each taste lane (or a typed request). Only generic taste words and
+ * the user's own text are sent, never catalog/Spotify data. Every pick is then resolved on Spotify
+ * and checked (artist, era, exclusions) before it can be shown, so hallucinated songs are dropped.
  */
-export async function llmMusicPicks(description: string, cfg: AiConfig, http: HttpClient, opts: { avoid?: string[]; count?: number; cacheKey?: string } = {}): Promise<MusicPick[]> {
-  const n = opts.count ?? 12;
+export async function llmMusicPicks(brief: CuratorBrief, cfg: AiConfig, http: HttpClient, opts: { seed?: number } = {}): Promise<MusicPick[]> {
   const model = cfg.musicModel ?? cfg.model;
+  const prompt = curatorPrompt(brief);
+  const cacheKey = await curatorCacheKey(model, prompt, opts.seed ?? 0);
+  const total = brief.request ? brief.request.count : (brief.lanes ?? []).reduce((s, l) => s + l.count, 0);
   const res = await withRateLimitRetry(() => http.json<{ choices: Array<{ message: { content: string } }> }>(`${cfg.baseUrl}/chat/completions`, {
     init: {
       method: 'POST',
@@ -170,32 +261,36 @@ export async function llmMusicPicks(description: string, cfg: AiConfig, http: Ht
         temperature: 0.7,
         response_format: { type: 'json_object' },
         messages: [
-          {
-            role: 'system',
-            content: `You are a music curator with deep, eclectic knowledge. Return ONLY JSON: {"items":[{"artist":"...","track":"...","style":"..."} or {"artist":"...","album":"...","style":"..."}]} where "style" is a short genre label (e.g. "alternative rock", "east coast hip-hop", "afro house", "raï").
-Give ${n} real, existing recordings by acclaimed or cult artists that fit the description. Mix eras, countries and genres; include lesser-known gems alongside classics; at most one item per artist.
-Never suggest generic sleep/meditation/relaxation/study/frequency/stock music, compilations or "best of" collections.
-If the description mentions an arc (from one mood to another), list the items in listening order along that arc.
-When the description gives a target mix with percentages, follow those proportions across the picks (round sensibly) and never over-represent one region or language beyond its share; never pick from styles listed under "avoid".`,
-          },
-          { role: 'user', content: `Description: ${description.slice(0, 600)}${opts.avoid?.length ? `\nAvoid: ${opts.avoid.join(', ').slice(0, 200)}` : ''}` },
+          { role: 'system', content: prompt.system },
+          { role: 'user', content: prompt.user },
         ],
       }),
     },
-    timeoutMs: 14000,
+    timeoutMs: 20000,
     provider: 'ai',
-    cacheKey: opts.cacheKey,
-    ttl: opts.cacheKey ? 86400 : undefined,
+    cacheKey,
+    ttl: 86400,
   }));
-  const content = res.choices?.[0]?.message?.content ?? '{}';
+  return parseMusicPicks(res.choices?.[0]?.message?.content ?? '{}', total + 6);
+}
+
+/** Validate the curator's JSON: real-looking artist + track, one song per artist. */
+export function parseMusicPicks(content: string, max = 60): MusicPick[] {
   const json = JSON.parse(content.replace(/^```(json)?|```$/g, '').trim()) as { items?: unknown[] };
-  const str = (v: unknown) => (typeof v === 'string' && v.trim().length > 0 && v.length < 120 ? v.trim() : undefined);
+  const str = (v: unknown, n = 120) => (typeof v === 'string' && v.trim().length > 0 && v.length < n ? v.trim() : undefined);
   const seen = new Set<string>();
-  return (json.items ?? [])
-    .map((x) => (x && typeof x === 'object' ? (x as Record<string, unknown>) : {}))
-    .map((x) => ({ artist: str(x.artist), track: str(x.track), album: str(x.album), style: str(x.style)?.toLowerCase().slice(0, 40) }))
-    .filter((x) => !!x.artist && !!(x.track || x.album))
-    .map((x) => ({ artist: x.artist!, ...(x.track ? { track: x.track } : { album: x.album }), ...(x.style ? { style: x.style } : {}) }) as MusicPick)
-    .filter((x) => !seen.has(x.artist.toLowerCase()) && seen.add(x.artist.toLowerCase()))
-    .slice(0, n);
+  const out: MusicPick[] = [];
+  for (const raw of Array.isArray(json.items) ? json.items : []) {
+    const x = raw && typeof raw === 'object' ? (raw as Record<string, unknown>) : {};
+    const artist = str(x.artist);
+    const track = str(x.track);
+    if (!artist || !track) continue;
+    const key = artist.toLowerCase();
+    if (seen.has(key)) continue;
+    seen.add(key);
+    const lane = str(x.lane, 60) ?? str(x.style, 60);
+    out.push({ artist, track, ...(lane ? { lane: lane.toLowerCase() } : {}) });
+    if (out.length >= max) break;
+  }
+  return out;
 }

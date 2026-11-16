@@ -6,12 +6,10 @@ import type { AnalyzedItem, Category, ContentItem, DiscoverRequest, DiscoverResp
 import { PROVIDERS, providersFor } from '../providers/index.ts';
 import { ProviderError, type HttpClient } from '../providers/http.ts';
 import type { Env, Provider } from '../providers/types.ts';
-import { aiConfig, llmMusicPicks, mergeHint, sanitizeHint } from './ai.ts';
+import { aiConfig, mergeHint, sanitizeHint } from './ai.ts';
 import { applyUnderstanding, llmUnderstand } from './understand.ts';
-import { verifySpotifyPicks } from '../providers/spotify.ts';
-import { musicBrief, topStyles } from '../importer.ts';
-import { familyMix, inBlockedFamily, mixBrief } from './music.ts';
-import { hashKey } from '../providers/http.ts';
+import { curateMusic, laneFallback, laneRules, musicQuotaFor, planMusic, type MusicPlan } from './curator.ts';
+import { laneReject, laneTagOf, LANE_BY_ID, laneOfGenres } from './lanes.ts';
 import { analyzeItem } from './analyze.ts';
 import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
 import { parseIntent, refineIntent } from './intent.ts';
@@ -202,7 +200,14 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   }
   // A follow-up with nothing new to search for ("they're bad") explores fresh themes instead of repeating searches.
   const nothingToSearch = effectiveHasQuery && !intent.keywords.length && !topKeys(positivePart(intent.target), 1, 0.15).length && !intent.references.length && !intent.genres.length;
-  const curatorOn = categories.includes('music') && !!ai && deps.useLlm !== false && !!PROVIDERS.spotify?.configured(deps.env) && !deps.blockedProviders?.has('spotify');
+  const limit = Math.max(1, Math.min(req.limit ?? 12, 60));
+  // Music is curated by taste lanes: which lanes this refresh serves and how many songs each.
+  const searchBlocked = !!deps.blockedProviders?.has('spotify');
+  const musicPlan: MusicPlan | null = categories.includes('music')
+    ? planMusic(deps.profile, { hasQuery: effectiveHasQuery, seed: deps.seed ?? 0, total: musicQuotaFor(categories, limit, req.mix, effectiveHasQuery), text: query, now: deps.now })
+    : null;
+  // The curator keeps working while Spotify search is rate-limited: picks resolve via ListenBrainz + single-track lookups.
+  const curatorOn = !!musicPlan && !!ai && deps.useLlm !== false && !!PROVIDERS.spotify?.configured(deps.env);
   const plan = planRetrieval(intent, deps.profile, categories, { env: deps.env, exploration, hasQuery: effectiveHasQuery && !nothingToSearch, seed: deps.seed, mix: req.mix, budget: (req.limit ?? 12) > 20 ? 18 : 12 }, extraConcepts)
     .filter((q) => !deps.blockedProviders?.has(q.provider.id))
     // When the AI curator runs, Spotify mood-word searches for music are discarded anyway: don't spend calls on them.
@@ -210,11 +215,11 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   for (const id of deps.blockedProviders ?? []) statuses.set(id, { id, status: 'quota', message: 'Daily quota reached; using cached results until it resets.' });
   const callsBefore = deps.http.calls;
   // Music discovery: Spotify's dev-mode search can't find music by mood or genre (it returns stock
-  // "sleep/ambient" filler), so the optional LLM proposes real artists/recordings for the user's
-  // taste words and every pick is verified on Spotify. Runs in parallel with provider searches.
+  // "sleep/ambient" filler), so the optional LLM proposes real songs per taste lane (generic words
+  // only) and every pick is resolved and checked on Spotify. Runs in parallel with provider searches.
   let spotifyLimitedSec: number | undefined;
-  const musicPicks = (async (): Promise<{ items: ContentItem[]; detail: string } | null> => {
-    if (!categories.includes('music') || !ai || deps.useLlm === false || !PROVIDERS.spotify?.configured(deps.env) || deps.blockedProviders?.has('spotify')) return null;
+  const musicPicks = (async (): Promise<{ items: ContentItem[]; detail: string; perLane: Record<string, number> } | null> => {
+    if (!curatorOn || !musicPlan || !ai) return null;
     // Open feed: briefed from the MUSIC taste (+ chosen moods) only; video/book themes never steer songs.
     const concepts = (effectiveHasQuery
       ? topKeys(positivePart(intent.target), 5, 0.15)
@@ -223,30 +228,13 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     const SOUND_THEMES = new Set(['cosmic', 'nature', 'spiritual', 'love', 'loss', 'solitude', 'time-memory', 'identity', 'travel']);
     const musicConcepts = effectiveHasQuery ? concepts : concepts.filter((c) => CONCEPT_BY_ID[c].group === 'mood' || SOUND_THEMES.has(c));
     const words = musicConcepts.map((c) => conceptLabel(c).toLowerCase()).join(', ');
-    const desc = effectiveHasQuery
-      ? `${intent.rawText}${words ? ` (themes: ${words})` : ''}${deps.profile.music ? `. Listener background: ${musicBrief(deps.profile.music, { styles: false })}` : ''}${intent.trajectory ? `; arc from ${intent.trajectory.from} to ${intent.trajectory.to}` : ''}; ${exploration >= 0.6 ? 'favour lesser-known, distinctive artists over chart hits' : exploration <= 0.3 ? 'well-loved classics are welcome' : 'mix beloved classics with lesser-known gems; avoid obvious chart hits'}`
-      : (() => {
-          // Style words learned from the user's library (generic genre terms, never track/artist names).
-          const styles = topStyles(deps.profile, 8);
-          // Live style mix (reflects every like, dislike and removal), plus stable background from the import.
-          const mix = mixBrief(familyMix(deps.profile));
-          const bg = deps.profile.music ? musicBrief(deps.profile.music, { styles: false }) : '';
-          const base = mix ? `a listener with this ${mix}${bg ? `; background: ${bg}` : ''}` : styles.length ? `a listener whose favourite styles are ${styles.join(', ')}` : 'a listener';
-          const reach = exploration >= 0.6
-            ? 'suggest artists from neighbouring styles and scenes they probably do not know yet'
-            : exploration <= 0.3
-              ? 'suggest strong artists squarely within these styles that they may not have heard'
-              : 'mostly within these styles, plus a few adjacent discoveries';
-          return `music for ${base}${words ? `; moods/themes they respond to: ${words}` : ''}; ${reach}. Prefer artists outside the obvious mainstream.`;
-        })();
-    const avoid = [...deps.profile.explicit.dislikes, ...intent.excludes.filter((x) => !CONCEPT_BY_ID[x])];
-    const picks = await llmMusicPicks(desc, ai, deps.http, { avoid, count: 16, cacheKey: `ai:music:${await hashKey(`${desc}|${avoid.join(',')}`)}:${(deps.seed ?? 0) % 4}` });
-    const { items: verified, rateLimitedSec } = await verifySpotifyPicks(picks, { http: deps.http, env: deps.env });
-    if (rateLimitedSec !== undefined) spotifyLimitedSec = rateLimitedSec;
-    const styleOf = new Map(picks.map((pk) => [pk.artist.toLowerCase(), pk.style]));
-    const items = verified.filter((i) => !inBlockedFamily([styleOf.get((i.creators[0] ?? '').toLowerCase()) ?? '', ...i.genres], deps.profile)).map((i, idx) => ({ ...i, genres: i.genres.length ? i.genres : [styleOf.get((i.creators[0] ?? '').toLowerCase()) ?? ''].filter(Boolean), popularity: 0.75, metadata: { ...(i.metadata ?? {}), aiPick: true, aiOrder: idx, aiFor: words, retrievedBy: `ai:${i.creators[0] ?? i.id}`, retrievedFor: concepts.slice(0, 3) } }));
-    return { items, detail: `${verified.length}/${picks.length} AI music picks verified on Spotify` };
-  })().catch((e) => ({ items: [] as ContentItem[], detail: `AI music picks skipped (${(e as Error).message.slice(0, 60)})` }));
+    const moods = intent.moods.filter((m) => CONCEPT_BY_ID[m]).map((m) => conceptLabel(m).toLowerCase());
+    const r = await curateMusic(musicPlan, {
+      ai, http: deps.http, env: deps.env, profile: deps.profile, intent, words, moods, concepts, excludeIds: deps.excludeIds, searchBlocked, seed: deps.seed ?? 0, now: deps.now,
+    });
+    if (r.rateLimitedSec !== undefined) spotifyLimitedSec = r.rateLimitedSec;
+    return r;
+  })().catch((e) => ({ items: [] as ContentItem[], detail: `AI music picks skipped (${(e as Error).message.slice(0, 60)})`, perLane: {} as Record<string, number> }));
   const settled = await Promise.allSettled(plan.map((q) => q.provider.search(q.params, { http: deps.http, env: deps.env })));
   const raw: ContentItem[] = [];
   const quotaErrors: ProviderId[] = [];
@@ -287,14 +275,39 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     if (!quotaErrors.includes('spotify')) quotaErrors.push('spotify');
     quotaRetryAfter.spotify = Math.max(quotaRetryAfter.spotify ?? 0, spotifyLimitedSec);
   }
-  // Spotify rate-limited (or too few fresh songs): fill music from stored, already-verified Spotify items.
-  const spotifyCats = categories.filter((c) => c === 'music' || c === 'podcasts');
-  const spotifyDown = deps.blockedProviders?.has('spotify') || quotaErrors.includes('spotify');
-  const musicCount = raw.filter((i) => i.category === 'music').length;
-  if (spotifyCats.length && deps.catalogFallback && (spotifyDown || (categories.includes('music') && musicCount < 12))) {
-    const fb = await deps.catalogFallback('spotify', spotifyDown ? spotifyCats : ['music']).catch(() => [] as ContentItem[]);
+  const spotifyDown = searchBlocked || quotaErrors.includes('spotify');
+  // Spotify search rate-limited: podcasts come from stored, already-verified Spotify shows/episodes.
+  if (categories.includes('podcasts') && deps.catalogFallback && spotifyDown) {
+    const fb = await deps.catalogFallback('spotify', ['podcasts']).catch(() => [] as ContentItem[]);
     raw.push(...fb);
-    pipeline.push({ step: 'fallback', ms: 0, detail: `${spotifyDown ? 'Spotify rate-limited' : 'Few fresh songs'}: ${fb.length} stored Spotify items added` });
+    pipeline.push({ step: 'fallback', ms: 0, detail: `Spotify rate-limited: ${fb.length} stored podcasts added` });
+  }
+  // Lanes the curator left short: stored songs that fit the lane and pass its rules (never tracks failing era/regional rules).
+  if (musicPlan && deps.catalogFallback) {
+    const have = mp?.perLane ?? {};
+    const open = musicPlan.order.reduce((s, id) => s + Math.max(0, (musicPlan.targets[id] ?? 0) - (have[id] ?? 0)), 0);
+    const musicCount = raw.filter((i) => i.category === 'music').length;
+    if (open > 0 && (musicPlan.mode === 'lanes' || spotifyDown || musicCount < 3)) {
+      const stored = await deps.catalogFallback('spotify', ['music']).catch(() => [] as ContentItem[]);
+      if (musicPlan.mode === 'lanes') {
+        const fill = laneFallback(stored, musicPlan, { profile: deps.profile, excludeIds: deps.excludeIds, have, now: deps.now });
+        raw.push(...fill);
+        pipeline.push({ step: 'fallback', ms: 0, detail: `${fill.length} stored songs fit ${open} open lane slots` });
+      } else {
+        // A request: stored songs rank as ordinary candidates, still under the era/regional rules.
+        const rules = laneRules(musicPlan, deps.profile, deps.excludeIds, deps.now);
+        const ok = stored
+          .filter((s) => s.category === 'music' && !s.metadata?.imported)
+          .filter((s) => !laneReject(s, { ...musicPlan.lanes[0], regional: !!LANE_BY_ID[laneTagOf(s)?.id ?? laneOfGenres(s.genres) ?? '']?.regional }, rules))
+          .slice(0, 40)
+          .map((s) => {
+            const { lane: _lane, laneEra: _era, laneMood: _mood, lastShownAt: _shown, aiOrder: _order, ...meta } = s.metadata ?? {};
+            return { ...s, metadata: { ...meta, aiPick: false, fallback: true } };
+          });
+        raw.push(...ok);
+        pipeline.push({ step: 'fallback', ms: 0, detail: `${spotifyDown ? 'Spotify rate-limited' : 'Few fresh songs'}: ${ok.length} stored songs added` });
+      }
+    }
   }
   pipeline.push({ step: 'retrieval', ms: t(), detail: `${plan.length} queries → ${raw.length} items (${deps.http.calls - callsBefore} network calls, rest cached)` });
 
@@ -344,7 +357,6 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
 
   // ── Steps 5–7: ranking, diversity, explanation ──
   t = timer();
-  const limit = Math.max(1, Math.min(req.limit ?? 12, 60));
   const recommendations = rankCandidates(candidates, intent, deps.profile, {
     exploration,
     hasQuery: effectiveHasQuery,
@@ -358,6 +370,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     limit,
     mix: req.mix,
     now: deps.now,
+    musicLanes: musicPlan ? { order: musicPlan.order, targets: musicPlan.targets } : undefined,
   });
   pipeline.push({ step: 'ranking', ms: t(), detail: `exploration ${Math.round(exploration * 100)}% · ${recommendations.length} picks after diversity` });
 

@@ -172,29 +172,67 @@ export async function getItems(ids: string[]): Promise<AnalyzedItem[]> {
   return ids.map((id) => map.get(id)).filter((x): x is AnalyzedItem => !!x);
 }
 
-/** Stored items from one provider, minus what this user was shown in the last two days. */
+/**
+ * Stored items from one provider, minus what this user was shown lately (2 days; 3 for music),
+ * liked/saved/finished or disliked. Each item carries metadata.lastShownAt (last 30 days) so music
+ * lanes can prefer songs not shown recently. Music: only songs ECHO curated before (lane-tagged or
+ * curator picks) — never other users' imported libraries or raw search filler.
+ */
 export function catalogFallbackFn(userId: string) {
   return async (provider: string, categories: string[]): Promise<AnalyzedItem[]> => {
     const db = serviceClient();
-    const since = new Date(Date.now() - 2 * 86400_000).toISOString();
-    const [items, recent, excluded] = await Promise.all([
-      db.from('content_items').select(ITEM_COLUMNS).eq('provider', provider).in('category', categories).not('embed', 'is', null).eq('stale', false).order('updated_at', { ascending: false }).limit(1500),
-      db.from('recommendation_events').select('item_id').eq('user_id', userId).gte('created_at', since).limit(3000),
+    const music = categories.includes('music');
+    const now = Date.now();
+    const base = () => db.from('content_items').select(ITEM_COLUMNS).eq('provider', provider).in('category', categories).not('embed', 'is', null).eq('stale', false);
+    const [items, laneTagged, curated, recent, excluded] = await Promise.all([
+      base().order('updated_at', { ascending: false }).limit(1000),
+      // Music: songs ECHO curated before, fetched explicitly so an imported library (1,000+ rows) can't crowd them out.
+      music ? base().not('metadata->lane', 'is', null).order('updated_at', { ascending: false }).limit(600) : Promise.resolve({ data: [] as unknown[] }),
+      music ? base().eq('metadata->>aiPick', 'true').order('updated_at', { ascending: false }).limit(600) : Promise.resolve({ data: [] as unknown[] }),
+      db.from('recommendation_events').select('item_id, created_at').eq('user_id', userId).gte('created_at', new Date(now - 30 * 86400_000).toISOString()).order('created_at', { ascending: false }).limit(1000),
       excludedIds(db, userId),
     ]);
-    // Not shown in the last two days, not already liked/saved/finished, not disliked.
-    const shown = new Set([...(recent.data ?? []).map((r) => r.item_id as string), ...excluded]);
-    return (items.data ?? []).map((r) => rowToItem(r as Record<string, unknown>)).filter((i) => !shown.has(i.id)).slice(0, 150);
+    const lastShown = new Map<string, string>();
+    for (const r of recent.data ?? []) if (!lastShown.has(r.item_id as string)) lastShown.set(r.item_id as string, r.created_at as string);
+    const cutoff = now - (music ? 3 : 2) * 86400_000;
+    const rows = new Map<string, Record<string, unknown>>();
+    for (const r of [...(laneTagged.data ?? []), ...(curated.data ?? []), ...(items.data ?? [])] as Array<Record<string, unknown>>) if (!rows.has(r.id as string)) rows.set(r.id as string, r);
+    return [...rows.values()]
+      .map((r) => rowToItem(r))
+      .filter((i) => !excluded.has(i.id) && !(lastShown.has(i.id) && new Date(lastShown.get(i.id)!).getTime() >= cutoff))
+      .filter((i) => i.category !== 'music' || (!i.metadata?.imported && (!!i.metadata?.lane || !!i.metadata?.aiPick)))
+      .map((i) => (lastShown.has(i.id) ? { ...i, metadata: { ...(i.metadata ?? {}), lastShownAt: lastShown.get(i.id) } } : i))
+      .slice(0, music ? 400 : 150);
   };
+}
+
+/**
+ * Songs not to serve again yet: music recommended to this user in the last `days` days (so refreshes
+ * don't repeat) and songs they skipped in the last two weeks.
+ */
+export async function recentMusicIds(userId: string, days = 3): Promise<Set<string>> {
+  const db = serviceClient();
+  const isMusic = (id: string) => id.startsWith('spotify:track:') || id.startsWith('spotify:album:');
+  const [shown, skipped] = await Promise.all([
+    db.from('recommendation_events').select('item_id').eq('user_id', userId).like('item_id', 'spotify:%').gte('created_at', new Date(Date.now() - days * 86400_000).toISOString()).limit(2000),
+    db.from('interactions').select('item_id').eq('user_id', userId).eq('type', 'skip').like('item_id', 'spotify:%').gte('created_at', new Date(Date.now() - 14 * 86400_000).toISOString()).limit(1000),
+  ]);
+  return new Set([...(shown.data ?? []), ...(skipped.data ?? [])].map((r) => r.item_id as string).filter(isMusic));
 }
 
 /** Items the user disliked or finished — never recommend them again. */
 export async function excludedIds(db: SupabaseClient, userId: string): Promise<Set<string>> {
-  const [inter, lib] = await Promise.all([
-    db.from('interactions').select('item_id').eq('user_id', userId).in('type', ['dislike']).limit(1000),
-    db.from('library_items').select('item_id').eq('user_id', userId).or('status.eq.consumed,saved.eq.true,liked.eq.true').limit(2000),
-  ]);
-  return new Set([...(inter.data ?? []), ...(lib.data ?? [])].map((r) => r.item_id as string));
+  // Paged: an imported library alone is over the API's 1,000-row page size.
+  const lib: Array<{ item_id: unknown }> = [];
+  const libraryPage = (from: number) =>
+    db.from('library_items').select('item_id').eq('user_id', userId).or('status.eq.consumed,saved.eq.true,liked.eq.true').order('item_id').range(from, from + 999);
+  const [inter, first] = await Promise.all([db.from('interactions').select('item_id').eq('user_id', userId).in('type', ['dislike']).limit(1000), libraryPage(0)]);
+  lib.push(...(first.data ?? []));
+  for (let from = 1000; from < 10_000 && (first.data?.length ?? 0) === 1000 && lib.length === from; from += 1000) {
+    const { data } = await libraryPage(from);
+    lib.push(...(data ?? []));
+  }
+  return new Set([...(inter.data ?? []), ...lib].map((r) => r.item_id as string));
 }
 
 /** Recently liked/saved items, used for grounded "because you liked X" explanations. */

@@ -2,6 +2,7 @@
 // POST /functions/v1/profile — { action: 'edit' | 'onboarding' | 'reset' }
 import { buildInsights } from '../_shared/engine/insights.ts';
 import { FAMILIES, familyMix } from '../_shared/engine/music.ts';
+import { effectiveLanes, laneBlocked } from '../_shared/engine/lanes.ts';
 import { applyEdit, applyFeedback, emptyProfile, seedProfile } from '../_shared/engine/profile.ts';
 import { aiConfig } from '../_shared/engine/ai.ts';
 import { providerStatus } from '../_shared/providers/index.ts';
@@ -25,6 +26,8 @@ serve(async (req) => {
       model,
       insights: buildInsights(profile, (snap.data?.concepts as Record<string, number>) ?? null),
       musicMix: { ...familyMix(profile), blocked: (profile.explicit.blockedFamilies ?? []).map((id) => ({ id, label: FAMILIES.find((f) => f.id === id)?.label ?? id })) },
+      // Taste lanes the music curator rotates through (owner policy applied), with learned lane bias.
+      musicLanes: effectiveLanes(profile).map((l) => ({ id: l.id, label: l.label, share: l.share, regional: l.regional, era: l.era, descriptors: l.descriptors, bias: profile.laneFeedback?.[l.id] ?? 0, off: laneBlocked(l, profile) })),
       stats: { library: libCount.count ?? 0, interactions: interCount.count ?? 0 },
       server: {
         providers: providerStatus(env).map(({ id, label, configured, categories, setup }) => ({ id, label, configured, categories, setup: configured ? undefined : setup })),

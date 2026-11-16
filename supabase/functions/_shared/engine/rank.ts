@@ -3,6 +3,7 @@ import type { AnalyzedItem, Category, ConceptVector, Explanation, Intent, Recomm
 import { conceptPhrase, CONCEPT_BY_ID } from './concepts.ts';
 import { creatorKeys, genreKeys } from './profile.ts';
 import { familyOf, inBlockedFamily } from './music.ts';
+import { laneTagOf, laneTargets, MIX_LANE, REQUEST_LANE, yearOf } from './lanes.ts';
 import { itemWorld } from './worlds.ts';
 import { contentTokens, cosine, denseCosine, negativePart, normalize, normKey, positivePart, round } from './text.ts';
 
@@ -40,6 +41,13 @@ export interface RankContext {
   limit?: number;
   mix?: Partial<Record<AnalyzedItem['category'], number>>;
   now?: Date;
+  /** Music lanes of this response: shelf order and songs per lane (items carry metadata.lane). */
+  musicLanes?: LanePlan;
+}
+
+export interface LanePlan {
+  order: string[];
+  targets: Record<string, number>;
 }
 
 const LANG_NAMES: Record<string, string> = { en: 'English', fr: 'French', es: 'Spanish', de: 'German', it: 'Italian', pt: 'Portuguese', ja: 'Japanese', ko: 'Korean', zh: 'Chinese', ar: 'Arabic', ru: 'Russian', hi: 'Hindi' };
@@ -290,7 +298,9 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
     let bestVal = -Infinity;
     for (let i = 0; i < pool.length; i++) {
       const { cand, f, maxSim } = pool[i];
-      if (f.creators.some((cr) => (creatorCount.get(cr) ?? 0) >= 2)) continue;
+      // One song per artist across the feed; other media allow two per creator.
+      const creatorCap = cand.item.category === 'music' ? 1 : 2;
+      if (f.creators.some((cr) => (creatorCount.get(cr) ?? 0) >= creatorCap)) continue;
       const q = f.query;
       if (strict && q && (queryCount.get(q) ?? 0) >= perQuery) continue;
       const quota = opts.quotas?.get(cand.item.category);
@@ -358,6 +368,26 @@ function kindNoun(kind: AnalyzedItem['kind'], plural = false): string {
 }
 
 /**
+ * "From your <lane> lane" + one concrete reason that can be checked: the release year against the
+ * lane's era in the user's own saves, or (for curator picks without a date) the mood it was briefed for.
+ * Request/open lanes return nothing (the generic curator reason applies).
+ */
+export function laneExplanation(item: AnalyzedItem, now = new Date()): Explanation['reasons'] {
+  const lane = item.category === 'music' ? laneTagOf(item) : null;
+  if (!lane || lane.id === REQUEST_LANE.id || lane.id === MIX_LANE.id) return [];
+  const out: Explanation['reasons'] = [{ kind: 'profile', detail: `From your ${lane.label} lane` }];
+  const y = yearOf(item.releaseDate);
+  const era = item.metadata?.laneEra as { from?: number; to?: number } | undefined;
+  const mood = typeof item.metadata?.laneMood === 'string' ? (item.metadata.laneMood as string) : '';
+  if (y && era?.from && era.to && y >= era.from && y <= era.to) out.push({ kind: 'context', detail: `Released ${y}, inside the ${era.from}–${era.to} span of your saves in this lane` });
+  else if (y && era?.to && y > era.to) out.push({ kind: 'context', detail: `A ${y} release, newer than most of your saves in this lane` });
+  else if (y && y >= now.getUTCFullYear() - 1) out.push({ kind: 'context', detail: `A recent release (${y})` });
+  else if (mood && item.metadata?.aiPick) out.push({ kind: 'context', detail: `Chosen by ECHO's curator for the lane's ${mood} feel` });
+  else if (y) out.push({ kind: 'context', detail: `Released ${y}` });
+  return out;
+}
+
+/**
  * Build a grounded explanation. Every clause is derived from (a) concepts found
  * in the item's own provider metadata, (b) the parsed request, or (c) the
  * user's recorded profile/feedback. Nothing is invented.
@@ -369,7 +399,8 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
   const strong = (cv: ConceptVector, min = 0.25) => Object.keys(cv).filter((k) => !inherited.has(k) && (item.concepts[k] ?? 0) >= min && cv[k] > 0);
   const matchedConcepts = Object.entries(item.concepts).filter(([k, v]) => v >= 0.25 && !inherited.has(k)).sort((a, b) => b[1] - a[1]).map(([k]) => k);
 
-  if (item.metadata?.aiPick) {
+  const laneReasons = laneExplanation(item, ctx.now);
+  if (item.metadata?.aiPick && !laneReasons.length) {
     reasons.push({ kind: ctx.hasQuery ? 'query' : 'profile', detail: ctx.hasQuery ? `Picked by ECHO's AI curator for your request and verified on Spotify` : `Picked from your music taste by ECHO's AI curator${item.genres[0] ? ` (${item.genres[0].toLowerCase()})` : ''}, verified on Spotify` });
   }
   const refTitle = ctx.referenceSimilar?.get(item.id);
@@ -465,7 +496,8 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
   }
 
   const order: Explanation['reasons'][number]['kind'][] = ['reference', 'trajectory', 'query', 'context', 'profile', 'creator', 'novelty', 'collaborative', 'quality'];
-  const sorted = [...reasons].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind));
+  // Lane songs: "From your <lane> lane" + one concrete, checkable reason; the rest stays in the list.
+  const sorted = [...laneReasons, ...[...reasons].sort((a, b) => order.indexOf(a.kind) - order.indexOf(b.kind))];
   const top = sorted.slice(0, 2).map((r) => r.detail);
   const text = top.length ? `${top.join('. ')}.` : 'Retrieved for your request; not enough metadata to say more.';
   if (intent.language && item.language && LANG_NAMES[intent.language] && item.language.startsWith(intent.language)) sorted.push({ kind: 'query', detail: `In ${LANG_NAMES[intent.language]}` });
@@ -491,14 +523,36 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
   const cats = new Set(scored.map((s) => s.item.category));
   // Mixed feeds get per-category quotas (feed mix); a focused request just avoids topic repeats.
   const quotas = cats.size > 1 && !ctx.hasQuery ? categoryQuotas(scored.map((x) => x.item.category), limit, ctx.mix) : undefined;
-  let picked: Array<{ item: AnalyzedItem; score: ScoreBreakdown & { keywordHits: string[] }; trajectoryStep?: number }> = diversify(scored, limit, ctx.exploration, cats.size > 1, {
+  type Scored = (typeof scored)[number];
+  // Music lanes are contiguous blocks in the curator's listening order: MMR never reshuffles songs
+  // across lanes. One song per artist across the whole feed.
+  const laneOf = (s: Scored) => (s.item.category === 'music' ? laneTagOf(s.item)?.id ?? null : null);
+  const laneScored = scored.filter((s) => laneOf(s));
+  let block: Scored[] = [];
+  let rest = scored;
+  if (laneScored.length) {
+    const musicQuota = quotas?.get('music') ?? (cats.size === 1 ? limit : Math.ceil(limit / Math.max(1, cats.size)));
+    block = assembleLaneBlock(laneScored, ctx.musicLanes ?? derivedLanePlan(laneScored, musicQuota), limit);
+    const blockArtists = new Set(block.flatMap((b) => creatorKeys(b.item)));
+    rest = scored.filter((s) => !laneOf(s) && !(s.item.category === 'music' && creatorKeys(s.item).some((k) => blockArtists.has(k))));
+    if (quotas) quotas.set('music', Math.max(0, (quotas.get('music') ?? 0) - block.length));
+  }
+  let restPicked: Array<Scored & { trajectoryStep?: number }> = diversify(rest, Math.max(0, limit - block.length), ctx.exploration, cats.size > 1, {
     quotas,
     // Big feeds can take a few more from one search (each search is a different theme).
     perQuery: intent.trajectory ? 4 : limit > 20 ? 3 : 2,
     // Open feeds: at most a third of the picks from one thematic world. Focused requests are exempt.
     worldCap: ctx.hasQuery ? undefined : Math.max(2, Math.ceil(limit / 4)),
   });
-  if (intent.trajectory) picked = sequenceTrajectory(picked, intent.trajectory.from, intent.trajectory.to);
+  if (intent.trajectory) restPicked = sequenceTrajectory(restPicked, intent.trajectory.from, intent.trajectory.to);
+  let picked: Array<Scored & { trajectoryStep?: number }> = restPicked;
+  if (block.length) {
+    // The lane block sits where its best song would rank among the rest.
+    const best = Math.max(...block.map((b) => b.score.total));
+    const at = intent.trajectory ? 0 : restPicked.findIndex((p) => p.score.total < best);
+    picked = at < 0 ? [...restPicked, ...block] : [...restPicked.slice(0, at), ...block, ...restPicked.slice(at)];
+    if (intent.trajectory) picked = picked.map((p, i) => ({ ...p, trajectoryStep: i }));
+  }
   return picked.map((p) => {
     const { keywordHits, ...score } = p.score;
     return {
@@ -508,4 +562,42 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
       explanation: explain(p.item, { ...score, keywordHits }, intent, profile, views[domainOf(p.item.category)], ctx, p.trajectoryStep, picked.length),
     };
   });
+}
+
+const aiOrderOf = (i: AnalyzedItem) => (typeof i.metadata?.aiOrder === 'number' ? (i.metadata.aiOrder as number) : 1e6);
+
+/** Lanes in first-curated order, songs split evenly (used when the caller didn't pass a lane plan). */
+export function derivedLanePlan(items: Array<{ item: AnalyzedItem }>, total: number): LanePlan {
+  const first = new Map<string, number>();
+  for (const { item } of items) {
+    const id = laneTagOf(item)?.id;
+    if (id) first.set(id, Math.min(first.get(id) ?? Infinity, aiOrderOf(item)));
+  }
+  const order = [...first.entries()].sort((a, b) => a[1] - b[1]).map(([id]) => id);
+  const t = laneTargets(order.map(() => ({ share: 1 })), Math.max(total, 1), 3);
+  return { order, targets: Object.fromEntries(order.map((id, i) => [id, t[i]])) };
+}
+
+/**
+ * Music block of a feed: lane by lane (plan order), each lane's songs in the curator's listening
+ * order (stored fallback songs after them), up to the lane's target, one song per artist, skipping
+ * songs under a hard penalty (blocked style, functional music, explicit dislikes).
+ */
+export function assembleLaneBlock<T extends { item: AnalyzedItem; score: ScoreBreakdown }>(items: T[], plan: LanePlan, limit: number): T[] {
+  const used = new Set<string>();
+  const out: T[] = [];
+  for (const id of plan.order) {
+    const want = plan.targets[id] ?? 0;
+    const lane = items.filter((x) => laneTagOf(x.item)?.id === id && x.score.penalty < 0.5).sort((a, b) => aiOrderOf(a.item) - aiOrderOf(b.item) || b.score.total - a.score.total);
+    let n = 0;
+    for (const x of lane) {
+      if (n >= want || out.length >= limit) break;
+      const ck = creatorKeys(x.item);
+      if (ck.some((k) => used.has(k))) continue;
+      ck.forEach((k) => used.add(k));
+      out.push(x);
+      n++;
+    }
+  }
+  return out;
 }

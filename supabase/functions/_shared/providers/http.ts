@@ -35,12 +35,15 @@ export interface HttpClient {
   /** Number of network calls made (cache hits excluded). */
   calls: number;
   cacheHits: number;
+  /** The provider cache behind json(), for small derived entries (e.g. resolved song ids). */
+  cache?: CacheStore;
 }
 
 export const USER_AGENT = 'ECHO-discovery/0.1 (+https://github.com/; personal discovery app)';
 
 export function createHttp(cache: CacheStore, fetchImpl: typeof fetch = fetch): HttpClient {
   const client: HttpClient = {
+    cache,
     calls: 0,
     cacheHits: 0,
     async json<T>(url: string, opts: { init?: RequestInit; cacheKey?: string; ttl?: number; timeoutMs?: number; provider?: string } = {}): Promise<T> {

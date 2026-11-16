@@ -128,13 +128,24 @@ describe('AI music picks', () => {
       return new Response('{}', { status: 404 });
     }) as unknown as typeof fetch;
     const { make } = await import('./fixtures');
-    const stored = [make({ title: 'Stored Song', category: 'music', creators: ['Someone'], genres: ['Indie'] })].map((i) => ({ ...i, provider: 'spotify' as const, embed: { type: 'spotify' as const, uri: 'spotify:track:abc', kind: 'track' as const } }));
+    // Stored songs must fit a lane and pass the era rules to be used as fallback.
+    const asStored = (i: ReturnType<typeof make>) => ({ ...i, provider: 'spotify' as const, embed: { type: 'spotify' as const, uri: `spotify:track:${i.id}`, kind: 'track' as const } });
+    const stored = [
+      make({ title: 'Stored Song', category: 'music', creators: ['Someone'], genres: ['indie rock'], releaseDate: '2019-03-01' }),
+      make({ title: 'Old Stored Song', category: 'music', creators: ['Old Timer'], genres: ['indie rock'], releaseDate: '1976-01-01' }),
+      make({ title: 'Untyped Stored Song', category: 'music', creators: ['Nobody'], genres: [], releaseDate: '2020-01-01' }),
+    ].map(asStored);
     const env = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b', AI_BASE_URL: 'https://ai.test/v1', AI_MODEL: 'm' } as Record<string, string>)[n];
     const res = await runPipeline({ categories: ['music'], limit: 5 }, { env, http: createHttp(new MemoryCache(), fake), profile: emptyProfile(), catalogFallback: async () => stored });
-    expect(searches.length).toBeLessThanOrEqual(3);
+    // Search stops at the first 429 (no retries that lengthen Spotify's penalty).
+    expect(searches.length).toBe(1);
     expect(res.quotaErrors).toContain('spotify');
     expect(res.quotaRetryAfter.spotify).toBe(68195);
-    expect(res.recommendations.map((r) => r.item.title)).toContain('Stored Song');
+    const titles = res.recommendations.map((r) => r.item.title);
+    expect(titles).toContain('Stored Song');
+    expect(titles).not.toContain('Old Stored Song'); // fails the era rule
+    expect(titles).not.toContain('Untyped Stored Song'); // fits no lane
+    expect(res.recommendations[0].item.metadata?.lane).toEqual({ id: 'mix', label: 'Fresh picks' });
   });
 
   it('only shows LLM music picks that verify on Spotify, and filters stock music', async () => {
@@ -167,6 +178,9 @@ describe('AI music picks', () => {
     expect(calls.filter((u) => u.includes('/v1/search') && !/Holocene|Fake|Bon|Imaginary/.test(decodeURIComponent(u)))).toEqual([]);
     const holo = res.recommendations.find((r) => r.item.title === 'Holocene')!;
     expect(holo.explanation.text).toMatch(/AI curator.*verified on Spotify/);
+    expect(holo.item.metadata).toMatchObject({ aiPick: true, lane: { id: 'mix' } });
     expect(res.pipeline.find((p) => p.step === 'music-ai')?.detail).toMatch(/1\/2/);
+    // No "any song by this artist" fallback: the unverifiable pick costs exactly one exact search.
+    expect(calls.filter((u) => u.includes('/v1/search') && /Imaginary/.test(decodeURIComponent(u)))).toHaveLength(1);
   });
 });
