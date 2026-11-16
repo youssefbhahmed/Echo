@@ -35,12 +35,15 @@ export interface HttpClient {
   /** Number of network calls made (cache hits excluded). */
   calls: number;
   cacheHits: number;
+  /** The provider cache behind json(), for small derived entries (e.g. resolved song ids). */
+  cache?: CacheStore;
 }
 
 export const USER_AGENT = 'ECHO-discovery/0.1 (+https://github.com/; personal discovery app)';
 
 export function createHttp(cache: CacheStore, fetchImpl: typeof fetch = fetch): HttpClient {
   const client: HttpClient = {
+    cache,
     calls: 0,
     cacheHits: 0,
     async json<T>(url: string, opts: { init?: RequestInit; cacheKey?: string; ttl?: number; timeoutMs?: number; provider?: string } = {}): Promise<T> {
@@ -77,6 +80,16 @@ export function createHttp(cache: CacheStore, fetchImpl: typeof fetch = fetch): 
     },
   };
   return client;
+}
+
+/**
+ * When a provider block (provider_status.blocked_until) should end, in ms: now + Retry-After (capped at a
+ * day); YouTube's daily quota resets at midnight Pacific (conservative 6 h); without a hint, 2 minutes.
+ * Never earlier than a block already in place: a short 429 elsewhere must not cut a ~19 h penalty short.
+ */
+export function blockUntil(provider: string, now: number, retryAfterSec?: number, existingUntil?: number): number {
+  const wait = retryAfterSec && retryAfterSec > 0 ? Math.min(retryAfterSec, 86400) * 1000 : provider === 'youtube' ? 6 * 3600_000 : 120_000;
+  return Math.max(now + wait, existingUntil !== undefined && Number.isFinite(existingUntil) ? existingUntil : 0);
 }
 
 export async function hashKey(s: string): Promise<string> {

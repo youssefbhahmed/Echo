@@ -143,6 +143,8 @@ export interface TasteProfile {
   music?: MusicDna | null;
   /** 2 = music and non-music taste kept apart (see separateMusicTaste). */
   domainsVersion?: number;
+  /** Learned per-lane bias from feedback on lane picks (lane id → -1..1); scales how often a lane is chosen. */
+  laneFeedback?: Record<string, number>;
 }
 
 export interface MusicDna {
@@ -154,6 +156,50 @@ export interface MusicDna {
   languages: string[];
   mood: { valence: number; energy: number; danceability: number; topQuadrant: string };
   importedAt: string;
+  /** Taste lanes of the library (see engine/lanes.ts), owner policy applied, shares sum to 1. */
+  lanes?: MusicLane[];
+  /** Rules the music curator and resolver always apply. */
+  policy?: MusicPolicy;
+}
+
+/** A coherent listening lane of the user's library ("Afro & melodic house"). Generic words only: no track/artist names. */
+export interface MusicLane {
+  id: string;
+  /** Human shelf title, e.g. "Hip-hop & R&B". */
+  label: string;
+  /** Share of the music picks this lane should get (0..1). */
+  share: number;
+  /** Generic descriptors (sub-genres, mood, tempo/energy, era) used to brief the curator. */
+  descriptors: string[];
+  /** Release-year window of the lane (regional lanes never start before policy.regionalMinYear). */
+  era: { from: number; to: number };
+  /** Medians of the lane's audio features (0..1). */
+  energy: number;
+  danceability: number;
+  valence: number;
+  /** Spotify popularity quartiles (0..100) of the user's songs in this lane. */
+  popularity: { p25: number; p50: number; p75: number };
+  /** French / Arabic / Maghreb lanes: capped share, modern releases only. */
+  regional: boolean;
+  /** Top sub-genre tags of the lane (generic labels). */
+  genres: string[];
+  /** Where the lane came from: the imported library (measured), learned genre weights, or a default open lane. */
+  source?: 'library' | 'genres' | 'default';
+}
+
+export interface MusicPolicy {
+  /** Combined share of all regional lanes. */
+  regionalShare: number;
+  /** Regional lanes only take releases from this year on. */
+  regionalMinYear: number;
+  /** 'library' = songs known in their scene at the popularity of the user's own library; never obscure or experimental. */
+  familiarity: 'library';
+}
+
+/** Lane tag carried by every music recommendation the engine produces (item.metadata.lane). */
+export interface LaneTag {
+  id: string;
+  label: string;
 }
 
 export interface ScoreBreakdown {

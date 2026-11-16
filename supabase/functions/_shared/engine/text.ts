@@ -181,3 +181,24 @@ export function denseCosine(a: number[] | null | undefined, b: number[] | null |
 export function normKey(s: string): string {
   return normalize(s).replace(/\s+/g, ' ').trim();
 }
+
+/**
+ * Letters and digits of any script, lowercased, accents and diacritics removed: "Beyoncé" → "beyonce",
+ * an Arabic-script name stays Arabic (normalize/normKey keep [a-z0-9] only and would empty it).
+ * Used to compare and key song/artist names coming from different sources.
+ */
+export function fold(s: string): string {
+  return s.toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '').replace(/ـ/g, '').replace(/[^\p{L}\p{N}]/gu, '');
+}
+
+/** Song title without version/feature decorations, folded: "Song (feat. X) - Radio Edit" → "song". */
+export function foldTitle(title: string): string {
+  return fold(title.replace(/\s[-–]\s.*$/, '').replace(/[([].*?[)\]]/g, '').replace(/\b(feat|ft|featuring)\b.*$/i, ''));
+}
+
+/** "artist|title" identity of a recording across its single/album/deluxe ids ('' when either part folds to nothing). */
+export function songKey(artist: string, title: string): string {
+  const a = fold(artist);
+  const t = foldTitle(title) || fold(title);
+  return a && t ? `${a}|${t}` : '';
+}

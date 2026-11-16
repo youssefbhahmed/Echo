@@ -1,5 +1,5 @@
 // POST /functions/v1/feedback — pipeline step 8: learn from an interaction.
-import { applyFeedback } from '../_shared/engine/profile.ts';
+import { applyFeedback, creatorKeys } from '../_shared/engine/profile.ts';
 import { FeedbackBody } from '../_shared/schemas.ts';
 import { getItems, HttpError, json, loadProfile, rateLimit, readJson, requireUser, saveProfile, serve, serviceClient } from '../_shared/server.ts';
 import { topKeys } from '../_shared/engine/text.ts';
@@ -47,5 +47,13 @@ serve(async (req) => {
 
   // Report what changed so the UI can show that ECHO actually learned something.
   const changed = topKeys(Object.fromEntries(Object.keys(profile.concepts).map((k) => [k, Math.abs((profile.concepts[k] ?? 0) - (before.concepts[k] ?? 0))])), 3, 0.01);
-  return json(req, { ok: true, library, learned: changed.map((k) => ({ concept: k, from: before.concepts[k] ?? 0, to: profile.concepts[k] ?? 0 })), interactionCount: profile.interactionCount });
+  // Songs teach the artist and lane weights (a skip/dislike keeps the artist out of the next refreshes).
+  const lane = (item.metadata?.lane as { id?: string; label?: string } | undefined) ?? undefined;
+  const music = item.category === 'music'
+    ? {
+      artists: creatorKeys(item).map((k) => ({ artist: k, from: before.creators[k] ?? 0, to: profile.creators[k] ?? 0, filtered: (profile.creators[k] ?? 0) <= -0.5 })),
+      ...(lane?.id ? { lane: { id: lane.id, label: lane.label, from: before.laneFeedback?.[lane.id] ?? 0, to: profile.laneFeedback?.[lane.id] ?? 0 } } : {}),
+    }
+    : undefined;
+  return json(req, { ok: true, library, learned: changed.map((k) => ({ concept: k, from: before.concepts[k] ?? 0, to: profile.concepts[k] ?? 0 })), music, interactionCount: profile.interactionCount });
 });

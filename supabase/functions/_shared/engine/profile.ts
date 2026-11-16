@@ -83,6 +83,15 @@ export const FEEDBACK_SIGNAL: Record<Exclude<FeedbackType, 'rate'>, number> = {
   dislike: -1,
 };
 
+/** Music skips and dislikes are mostly about the artist (absolute steps, not scaled by the learning rate). */
+export const MUSIC_SKIP_ARTIST = -0.35;
+export const MUSIC_SKIP_GENRE = -0.05;
+export const MUSIC_DISLIKE_ARTIST = -1.2;
+export const MUSIC_DISLIKE_GENRE = -0.3;
+
+/** How feedback on a lane song moves that lane's weight in the refresh rotation (-1..1). */
+const LANE_SIGNAL: Partial<Record<FeedbackType, number>> = { like: 0.12, save: 0.08, consumed: 0.05, play: 0.02, unlike: -0.08, skip: -0.05, dislike: -0.15 };
+
 export function feedbackSignal(type: FeedbackType, rating?: number): number {
   if (type === 'rate') {
     const r = Math.min(5, Math.max(1, rating ?? 3));
@@ -120,6 +129,7 @@ export function decayProfile(p: TasteProfile, now = new Date()): TasteProfile {
     genres: scaleMap(p.genres, fl),
     creators: scaleMap(p.creators, fl),
     shortTerm: { concepts: scaleMap(p.shortTerm.concepts, fs, 0.02), updatedAt: p.shortTerm.updatedAt },
+    ...(p.laneFeedback ? { laneFeedback: scaleMap(p.laneFeedback, fl) } : {}),
   };
 }
 
@@ -185,9 +195,22 @@ export function applyFeedback(
   const isMusic = item.category === 'music';
   const concepts = isMusic ? p.concepts : updateConcepts(p.concepts, item.concepts, conceptDelta);
   const catConcepts = updateConcepts(p.conceptsByCategory[item.category] ?? {}, item.concepts, conceptDelta);
-  const genres = updateMap(p.genres, genreKeys(item), lr * s * 0.8);
-  const creators = updateMap(p.creators, creatorKeys(item), lr * s * 1.2);
+  let genres = updateMap(p.genres, genreKeys(item), lr * s * 0.8);
+  let creators = updateMap(p.creators, creatorKeys(item), lr * s * 1.2);
+  // Songs: a skip or dislike is about the artist first. The next refresh filters artists at ≤ -0.5.
+  if (isMusic && type === 'skip') {
+    creators = updateMap(p.creators, creatorKeys(item), MUSIC_SKIP_ARTIST);
+    genres = updateMap(p.genres, genreKeys(item), MUSIC_SKIP_GENRE);
+  } else if (isMusic && type === 'dislike') {
+    creators = { ...p.creators };
+    for (const k of creatorKeys(item)) creators[k] = Math.min(bounded(creators[k] ?? 0, MUSIC_DISLIKE_ARTIST), MUSIC_DISLIKE_ARTIST);
+    genres = updateMap(p.genres, genreKeys(item), MUSIC_DISLIKE_GENRE);
+  }
   const categories = { ...p.categories, [item.category]: bounded(p.categories[item.category] ?? 0, lr * s * 0.5) };
+  const laneId = isMusic ? (item.metadata?.lane as { id?: unknown } | undefined)?.id : undefined;
+  const laneFeedback = typeof laneId === 'string' && LANE_SIGNAL[type] !== undefined
+    ? { ...(p.laneFeedback ?? {}), [laneId]: round(Math.max(-1, Math.min(1, (p.laneFeedback?.[laneId] ?? 0) + LANE_SIGNAL[type]!))) }
+    : p.laneFeedback;
 
   const st = { ...p.shortTerm.concepts };
   if (s > 0 && !isMusic) for (const [c, x] of Object.entries(item.concepts)) st[c] = round(Math.min(1.5, (st[c] ?? 0) + s * x * 0.6));
@@ -212,6 +235,7 @@ export function applyFeedback(
     interactionCount: p.interactionCount + 1,
     updatedAt: now.toISOString(),
     embedding,
+    ...(laneFeedback ? { laneFeedback } : {}),
   };
 }
 
