@@ -25,7 +25,7 @@ export class MemoryCache implements CacheStore {
 export type ProviderErrorKind = 'quota' | 'auth' | 'unavailable' | 'bad_request' | 'timeout' | 'error';
 
 export class ProviderError extends Error {
-  constructor(public provider: string, public kind: ProviderErrorKind, message: string, public status?: number) {
+  constructor(public provider: string, public kind: ProviderErrorKind, message: string, public status?: number, public retryAfterSec?: number) {
     super(`${provider}: ${message}`);
   }
 }
@@ -68,7 +68,8 @@ export function createHttp(cache: CacheStore, fetchImpl: typeof fetch = fetch): 
         const body = await res.text().catch(() => '');
         const kind: ProviderErrorKind =
           res.status === 429 || /quota|rateLimit|dailyLimit/i.test(body) ? 'quota' : res.status === 401 || res.status === 403 ? 'auth' : res.status >= 500 ? 'unavailable' : 'bad_request';
-        throw new ProviderError(provider, kind, `HTTP ${res.status} ${body.slice(0, 200)}`, res.status);
+        const ra = Number(res.headers.get('retry-after'));
+        throw new ProviderError(provider, kind, `HTTP ${res.status} ${body.slice(0, 200)}`, res.status, Number.isFinite(ra) && ra > 0 ? ra : undefined);
       }
       const data = (await res.json()) as T;
       if (key && opts.ttl) await cache.set(key, data, opts.ttl);

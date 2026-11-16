@@ -5,6 +5,7 @@ import { MotionConfig } from 'motion/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { registerSW } from 'virtual:pwa-register';
 import { AuthProvider } from './lib/auth';
+import { PlayerProvider } from './lib/player';
 import { Toaster } from './components/Toast';
 import App from './App';
 import './index.css';
@@ -29,8 +30,10 @@ createRoot(document.getElementById('root')!).render(
       <MotionConfig reducedMotion="user">
       <BrowserRouter>
         <AuthProvider>
+          <PlayerProvider>
           <App />
           <Toaster />
+          </PlayerProvider>
         </AuthProvider>
       </BrowserRouter>
       </MotionConfig>

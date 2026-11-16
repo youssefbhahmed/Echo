@@ -26,8 +26,10 @@ describe('Spotify liked-songs import', () => {
     const p = applyLibraryImport(emptyProfile(), tracks.map(trackToItem), tracks.map((t) => t.addedAt), new Date('2026-11-14'));
     expect(p.creators.labess).toBeGreaterThan(p.creators['system of a down']);
     expect(topStyles(p)).toContain('gnaoui');
-    expect(p.concepts.spiritual).toBeGreaterThan(0);
-    for (const v of Object.values(p.concepts)) expect(Math.abs(v)).toBeLessThanOrEqual(3);
+    expect(p.conceptsByCategory.music?.spiritual).toBeGreaterThan(0);
+    // Songs only teach the music taste; films/videos/books are not steered by them.
+    expect(p.concepts.spiritual).toBeUndefined();
+    for (const v of Object.values(p.conceptsByCategory.music ?? {})) expect(Math.abs(v)).toBeLessThanOrEqual(3);
   });
   it('rejects files without Spotify columns', () => {
     expect(() => tracksFromCsv('title,artist\nx,y')).toThrow(/Track URI/);

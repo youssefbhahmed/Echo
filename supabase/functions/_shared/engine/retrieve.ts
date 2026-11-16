@@ -83,7 +83,9 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
   const budget = opts.budget ?? 12;
   // YouTube searches cost 100 quota units each: 2 per request at most, shared by Videos and Podcasts.
   const ytCats = categories.filter((c) => c === 'youtube' || c === 'podcasts').length;
-  let ytLeft = opts.youtubeBudget ?? ((categories.length === 1 && categories[0] === 'youtube') || intent.providers?.includes('youtube') ? 2 : Math.min(2, Math.max(1, ytCats)));
+  // Big feeds (48 picks) need more than one page of videos to fill a real Videos shelf.
+  const big = (opts.budget ?? 12) >= 18;
+  let ytLeft = opts.youtubeBudget ?? ((categories.length === 1 && categories[0] === 'youtube') || intent.providers?.includes('youtube') ? (big ? 3 : 2) : Math.min(big ? 4 : 2, Math.max(1, ytCats + (big ? 2 : 0))));
   const targetTop = topKeys(positivePart(intent.target), 4, 0.15).filter((k) => CONCEPT_BY_ID[k] && !intent.relaxed.includes(k));
   const themeTop = targetTop.filter((k) => CONCEPT_BY_ID[k].group !== 'quality');
   const concepts = opts.hasQuery
@@ -115,8 +117,12 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
     }
     // Music search works best with moods/atmospheres; abstract themes ("history") retrieve noise.
     const MUSIC_THEMES = new Set(['cosmic', 'nature', 'spiritual', 'love', 'loss', 'solitude', 'sci-fi', 'myth', 'time-memory']);
+    const musicable = (c: string) => CONCEPT_BY_ID[c]?.group === 'mood' || MUSIC_THEMES.has(c);
+    // Open feed: music is steered by the music taste alone (+ mood chips), never by video/book themes.
+    const musicSource = opts.hasQuery ? concepts : [...intent.moods, ...topKeys(positivePart(profile.conceptsByCategory.music ?? {}), 8, 0.1)];
+    const musicConcepts = [...new Set(musicSource.filter(musicable))];
     const catConcepts = category === 'music'
-      ? [...concepts.filter((c) => CONCEPT_BY_ID[c]?.group === 'mood' || MUSIC_THEMES.has(c)), ...(concepts.some((c) => CONCEPT_BY_ID[c]?.group === 'mood') ? [] : ['dreamy', 'calm'])]
+      ? [...musicConcepts, ...(musicConcepts.some((c) => CONCEPT_BY_ID[c]?.group === 'mood') ? [] : ['dreamy', 'calm'])]
       : concepts;
     // Each category starts at a different concept, so together they cover more ground.
     const rotated = opts.hasQuery ? catConcepts : rotate(catConcepts, ci + (opts.seed ?? 0));
@@ -159,7 +165,7 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
             documentary: documentary && category === 'screen',
             genres: category === 'screen' ? [...themeTop, ...intent.genres].filter((x) => x !== 'documentary') : intent.genres,
             kinds: category === 'podcasts' && opts.hasQuery && intent.keywords.length ? ['episode'] : undefined,
-            limit: category === 'youtube' ? 15 : 20,
+            limit: category === 'youtube' ? (big ? 25 : 15) : 20,
             acclaimed: intent.complexity === 'deep' || !opts.hasQuery,
           },
         });

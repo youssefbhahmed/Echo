@@ -107,14 +107,33 @@ export const spotify: Provider = {
 const simplify = (x: string) => x.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g, '').replace(/[^a-z0-9]/g, '');
 
 /** Verify AI-suggested picks exist on Spotify (exact track/album + artist match). Unverifiable picks are dropped. */
-export async function verifySpotifyPicks(picks: Array<{ artist: string; track?: string; album?: string }>, ctx: ProviderContext): Promise<ContentItem[]> {
+export async function verifySpotifyPicks(picks: Array<{ artist: string; track?: string; album?: string }>, ctx: ProviderContext): Promise<{ items: ContentItem[]; rateLimitedSec?: number }> {
   const token = await spotifyAppToken(ctx);
   const market = ctx.env('SPOTIFY_MARKET') ?? 'US';
-  const found = await Promise.all(picks.map(async (pk) => {
+  // Spotify punishes bursts with long penalties: verify a few at a time, wait out a short limit once,
+  // and stop calling entirely on a long one (cached verifications keep working).
+  let rateLimitedSec: number | undefined;
+  const verifyOne = async (pk: { artist: string; track?: string; album?: string }): Promise<ContentItem | null> => {
+    for (let attempt = 0; attempt < 2 && rateLimitedSec === undefined; attempt++) {
+      try {
+        return await lookup(pk);
+      } catch (e) {
+        if (!(e instanceof ProviderError && e.kind === 'quota')) return null;
+        const wait = e.retryAfterSec ?? 2;
+        if (attempt || wait > 5) {
+          rateLimitedSec = Math.max(wait, 60);
+          return null;
+        }
+        await new Promise((r) => setTimeout(r, wait * 1000));
+      }
+    }
+    return null;
+  };
+  const lookup = async (pk: { artist: string; track?: string; album?: string }): Promise<ContentItem | null> => {
     const type = pk.track ? 'track' : 'album';
     const q = `${type}:"${(pk.track ?? pk.album)!.replace(/"/g, '')}" artist:"${pk.artist.replace(/"/g, '')}"`;
     const params = new URLSearchParams({ q, type, limit: '3', market });
-    try {
+    {
       const data = await ctx.http.json<Record<string, { items: unknown[] }>>(`https://api.spotify.com/v1/search?${params}`, {
         init: { headers: { Authorization: `Bearer ${token}` } }, cacheKey: `spotify:verify:${params}`, ttl: 30 * 86400, provider: 'spotify',
       });
@@ -131,9 +150,15 @@ export async function verifySpotifyPicks(picks: Array<{ artist: string; track?: 
       });
       const fb = (byArtist.tracks?.items ?? []).find((it) => ((it as { artists?: Array<{ name: string }> })?.artists ?? []).some((a) => simplify(a.name) === want));
       return fb ? mapSpotify('track', fb) : null;
-    } catch {
-      return null;
+    }
+  };
+  const found: Array<ContentItem | null> = new Array(picks.length).fill(null);
+  let next = 0;
+  await Promise.all(Array.from({ length: Math.min(3, picks.length) }, async () => {
+    while (next < picks.length && rateLimitedSec === undefined) {
+      const i = next++;
+      found[i] = await verifyOne(picks[i]);
     }
   }));
-  return found.filter((x): x is ContentItem => !!x);
+  return { items: found.filter((x): x is ContentItem => !!x), rateLimitedSec };
 }

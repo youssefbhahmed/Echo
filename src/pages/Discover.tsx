@@ -2,15 +2,19 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { keepPreviousData, useQuery } from '@tanstack/react-query';
 import { AnimatePresence, motion } from 'motion/react';
-import { ArrowUpRight, RefreshCw, SlidersHorizontal, Sparkles } from 'lucide-react';
-import type { Category } from '@shared/types.ts';
+import { ArrowUpRight, Play, RefreshCw, SlidersHorizontal, Sparkles } from 'lucide-react';
+import { CATEGORIES, type Category, type Recommendation } from '@shared/types.ts';
 import { api } from '../lib/api';
 import { dbToItem, useProfile, useRecent } from '../hooks/data';
-import { Artwork, MediaCard, MediaCardSkeleton } from '../components/MediaCard';
+import { Artwork } from '../components/MediaCard';
+import { Tile } from '../components/Tile';
+import { Shelf } from '../components/Shelf';
+import { DetailSheet } from '../components/DetailSheet';
+import { Wordmark } from '../components/Echo';
+import { isQueueable, usePlayer } from '../lib/player';
 import { conceptLabel } from '@shared/engine/concepts.ts';
 import { CategoryTabs, ExplorationSlider, MoodChips } from '../components/Controls';
-import { PageHeader } from '../components/Shell';
-import { CATEGORY_META } from '../lib/meta';
+import { CATEGORY_META, displayTitle, KIND_LABEL } from '../lib/meta';
 
 function greeting() {
   const h = new Date().getHours();
@@ -55,14 +59,16 @@ export default function Discover() {
   const mix = (profile.data?.account.settings?.mix as Partial<Record<Category, number>> | undefined) ?? undefined;
   const feed = useQuery({
     queryKey: ['feed', category, moods.join(','), debouncedExp, seed, JSON.stringify(mix ?? {})],
-    queryFn: () => api.discover({ categories, moods, exploration: debouncedExp, limit: 12, seed, exclude, mix }),
+    queryFn: () => api.discover({ categories, moods, exploration: debouncedExp, limit: category === 'all' ? 48 : 24, seed, exclude, mix }),
     enabled: !!profile.data,
     staleTime: 5 * 60_000,
     placeholderData: keepPreviousData,
   });
 
   const recs = useMemo(() => (feed.data?.recommendations ?? []).filter((r) => !dismissed.has(r.item.id)), [feed.data, dismissed]);
-  const notices = (feed.data?.providers ?? []).filter((p) => p.status !== 'ok' && p.status !== 'cached');
+  // Rate limits are handled server-side (stored, verified picks fill in), so they aren't worth a warning.
+  const notices = (feed.data?.providers ?? []).filter((p) => p.status !== 'ok' && p.status !== 'cached' && p.status !== 'quota');
+  const PROVIDER_NAME: Record<string, string> = { youtube: 'YouTube', spotify: 'Spotify', tmdb: 'TMDB', tvmaze: 'TVmaze', openlibrary: 'Open Library' };
   const name = profile.data?.account.display_name;
 
   const refresh = () => {
@@ -74,132 +80,153 @@ export default function Discover() {
   const [hero, ...rest] = recs;
   const loading = feed.isLoading || (!feed.data && !feed.isError);
   const toggleMood = (m: string) => setMoods((s) => (s.includes(m) ? s.filter((x) => x !== m) : [...s, m].slice(-3)));
+  const [open, setOpenState] = useState<{ rec: Recommendation; play: boolean } | null>(null);
+  const setOpen = (rec: Recommendation | null) => setOpenState(rec ? { rec, play: false } : null);
+  const watch = (rec: Recommendation) => setOpenState({ rec, play: true });
+  const player = usePlayer();
+  const dismiss = (id: string) => setDismissed((s) => new Set(s).add(id));
+  const shelves = CATEGORIES.map((c) => ({ c, items: rest.filter((r) => r.item.category === c) })).filter((x) => x.items.length > 0);
+  const SHELF_TITLE: Record<Category, string> = { youtube: 'Videos for you', music: 'Music for you', screen: 'Films & series', books: 'Books to read', podcasts: 'Podcasts to hear' };
 
   return (
     <div>
-      <PageHeader eyebrow={greeting()} title={<>{name ? <>{name}, </> : null}<span className="text-mist italic">what will you</span> discover?</>} />
+      {/* Hero: the top pick, full-bleed */}
+      <section className="relative isolate overflow-hidden" aria-label="Today’s echo">
+        <div aria-hidden className="absolute inset-0 -z-10">
+          {hero?.item.artworkUrl && <img src={hero.item.artworkUrl} alt="" className="h-full w-full scale-125 object-cover opacity-45 blur-3xl saturate-150" />}
+          <div className="absolute inset-0 bg-gradient-to-b from-ink/30 via-ink/60 to-ink" />
+          <div className="absolute inset-0 bg-gradient-to-r from-ink/80 via-ink/20 to-transparent" />
+        </div>
+        <div className="pt-safe px-4 pb-8 md:px-10 md:pt-14 md:pb-12">
+          <div className="mb-8 md:hidden"><Wordmark /></div>
+          <p className="text-xs font-semibold tracking-[0.2em] text-ember uppercase">{greeting()}{name ? `, ${name}` : ''}</p>
+          {loading || !hero ? (
+            <div className="mt-5 flex flex-col gap-6 md:flex-row md:items-end" aria-hidden>
+              <div className="skeleton aspect-square w-44 rounded-2xl md:order-2 md:ml-auto md:w-64" />
+              <div className="flex-1 space-y-3"><div className="skeleton h-4 w-32 rounded-full" /><div className="skeleton h-10 w-4/5 rounded-xl" /><div className="skeleton h-4 w-1/2 rounded-full" /></div>
+            </div>
+          ) : (
+            <div className="mt-5 flex flex-col gap-6 md:flex-row md:items-end md:gap-10">
+              <button type="button" onClick={() => setOpen(hero)} className="group self-start md:order-2 md:ml-auto" aria-label={`Open ${hero.item.title}`}>
+                <Artwork item={hero.item} className={`shadow-[0_30px_80px_-30px_rgba(0,0,0,0.95)] transition-transform duration-500 ease-[var(--ease-echo)] group-hover:-translate-y-1 ${hero.item.category === 'youtube' ? 'w-[min(100%,26rem)] md:w-[30rem]' : hero.item.category === 'music' || hero.item.category === 'podcasts' ? 'w-48 md:w-72' : 'w-40 md:w-60'}`} />
+              </button>
+              <div className="min-w-0 max-w-2xl flex-1">
+                <p className="text-[11px] font-semibold tracking-[0.18em] text-mist uppercase">Today’s echo · <span style={{ color: CATEGORY_META[hero.item.category].color }}>{KIND_LABEL[hero.item.kind]}</span></p>
+                <h1 className="mt-2 line-clamp-3 font-display text-[38px] leading-[1.02] font-medium tracking-[-0.015em] text-balance md:text-[64px]" title={hero.item.title}>{displayTitle(hero.item)}</h1>
+                {hero.item.creators[0] && <p className="mt-2 text-base text-mist md:text-lg">{hero.item.creators.slice(0, 2).join(', ')}</p>}
+                {hero.explanation.reasons[0] && <p className="mt-4 max-w-xl text-[15px] leading-relaxed text-bone/85 md:text-[17px]">{hero.explanation.reasons[0].detail}</p>}
+                <div className="mt-6 flex flex-wrap items-center gap-2.5">
+                  <button type="button" onClick={() => (isQueueable(hero.item) ? player.playQueue(recs.filter((r) => r.item.category === hero.item.category).map((r) => r.item), 0) : hero.item.embed ? watch(hero) : setOpen(hero))} className="inline-flex h-12 items-center gap-2 rounded-full bg-bone px-6 text-[15px] font-semibold text-ink shadow-[0_14px_40px_-14px_rgba(239,232,220,0.55)] transition-transform active:scale-95">
+                    {hero.item.embed ? <><Play className="h-4 w-4 fill-current" aria-hidden /> Play</> : <>Discover it <ArrowUpRight className="h-4 w-4" aria-hidden /></>}
+                  </button>
+                  <button type="button" onClick={refresh} disabled={feed.isFetching} className="inline-flex h-12 items-center gap-2 rounded-full border border-white/15 bg-white/[0.04] px-5 text-[15px] text-bone backdrop-blur-md transition-colors hover:bg-white/[0.08] disabled:opacity-50">
+                    <RefreshCw className={`h-4 w-4 ${feed.isFetching ? 'animate-spin' : ''}`} aria-hidden /> New picks
+                  </button>
+                  <button type="button" onClick={() => setTuneOpen((o) => !o)} aria-expanded={tuneOpen} className={`inline-flex h-12 items-center gap-2 rounded-full border px-5 text-[15px] backdrop-blur-md transition-colors ${tuneOpen ? 'border-ember/50 bg-ember/10 text-bone' : 'border-white/15 bg-white/[0.04] text-bone hover:bg-white/[0.08]'}`}>
+                    <SlidersHorizontal className="h-4 w-4" aria-hidden /> {exp < 0.34 ? 'Familiar' : exp < 0.67 ? 'Balanced' : 'Adventurous'}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </section>
 
-      <div className="px-4 md:px-8">
+      {/* Ask + filters */}
+      <div className="px-4 md:px-10">
         <form
-          className="mt-6 flex items-center gap-2 rounded-2xl border border-line bg-ink-2/80 p-1.5 pl-4 shadow-[0_18px_40px_-30px_rgba(0,0,0,0.9)] transition-colors focus-within:border-ember/50 md:max-w-3xl"
+          className="flex items-center gap-2 rounded-2xl border border-line bg-ink-2/80 p-1.5 pl-4 transition-colors focus-within:border-ember/50 md:max-w-2xl"
           onSubmit={(e) => {
             e.preventDefault();
             if (ask.trim()) nav(`/echo?q=${encodeURIComponent(ask.trim())}`);
           }}
         >
           <Sparkles className="h-4 w-4 shrink-0 text-ember" aria-hidden />
-          <input value={ask} onChange={(e) => setAsk(e.target.value)} placeholder="Describe a feeling, a theme, a title…" className="min-w-0 flex-1 bg-transparent py-2.5 placeholder:text-dim focus:outline-none" aria-label="Ask Echo" />
+          <input value={ask} onChange={(e) => setAsk(e.target.value)} placeholder="Ask for a feeling, a theme, a title…" className="min-w-0 flex-1 bg-transparent py-2.5 placeholder:text-dim focus:outline-none" aria-label="Ask Echo" />
           <button className="grid h-11 w-11 place-items-center rounded-xl bg-ember text-ink transition-transform active:scale-95" aria-label="Ask Echo"><ArrowUpRight className="h-5 w-5" /></button>
         </form>
-
-        <div className="mt-6 space-y-2.5">
+        <div className="mt-5 space-y-2.5">
           <CategoryTabs value={category} onChange={(c) => { setCategory(c); setDismissed(new Set()); }} />
           <MoodChips selected={moods} onToggle={toggleMood} />
         </div>
-
+        <AnimatePresence initial={false}>
+          {tuneOpen && (
+            <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
+              <div className="pt-4 md:max-w-md"><ExplorationSlider value={exp} onChange={setExploration} /></div>
+            </motion.div>
+          )}
+        </AnimatePresence>
         {notices.length > 0 && (
-          <div className="mt-4 flex flex-wrap gap-x-4 gap-y-1 rounded-2xl border border-line bg-ink-2/60 px-4 py-2.5 text-xs text-mist">
-            {notices.map((n) => (
-              <p key={n.id}>
-                <span className="text-bone capitalize">{n.id}</span> {n.status === 'unconfigured' ? 'isn’t connected yet' : n.status === 'quota' ? 'hit its daily limit, showing other sources' : 'is temporarily unavailable'}
-                {n.status === 'unconfigured' && <> · <button type="button" onClick={() => nav('/settings')} className="text-ember underline-offset-2 hover:underline">enable</button></>}
-              </p>
+          <p className="mt-4 text-xs text-dim">
+            {notices.map((n, i) => (
+              <span key={n.id}>{i > 0 && ' · '}<span className="text-mist">{PROVIDER_NAME[n.id] ?? n.id}</span> {n.status === 'unconfigured' ? 'not connected' : 'temporarily unavailable'}</span>
             ))}
-          </div>
+            {' · '}<button type="button" onClick={() => nav('/settings')} className="text-ember hover:underline">settings</button>
+          </p>
         )}
-
         {feed.isError && (
           <div className="mt-8 rounded-2xl border border-danger/30 bg-danger/5 p-5 text-sm">
             <p className="text-bone">{(feed.error as Error).message}</p>
             <button type="button" onClick={() => feed.refetch()} className="mt-3 text-ember underline">Try again</button>
           </div>
         )}
+      </div>
 
-        {/* Top pick */}
-        {(loading || hero) && (
-          <section className="relative mt-8" aria-label="Top pick">
-            {hero?.item.artworkUrl && (
-              <div aria-hidden className="pointer-events-none absolute -inset-x-6 -inset-y-10 -z-10 opacity-40 blur-3xl saturate-150">
-                <img src={hero.item.artworkUrl} alt="" className="h-full w-full object-cover" />
-              </div>
-            )}
-            <p className="mb-3 flex items-center gap-2 text-xs font-semibold tracking-[0.18em] text-ember uppercase">
-              <span className="h-px w-6 bg-ember/60" aria-hidden /> Today’s echo
-            </p>
-            {hero && !loading ? (
-              <MediaCard key={hero.item.id} featured item={hero.item} explanation={hero.explanation} score={hero.score} source="feed" onDismiss={(id) => setDismissed((s) => new Set(s).add(id))} />
-            ) : (
-              <MediaCardSkeleton featured />
-            )}
+      {/* Shelves (everything) or a grid (one category) */}
+      <div className={`transition-opacity ${feed.isFetching && !loading ? 'opacity-60' : ''}`}>
+        {loading ? (
+          [0, 1].map((i) => (
+            <Shelf key={i} id={`sk-${i}`} title={i === 0 ? 'Finding your picks…' : ' '}>
+              {Array.from({ length: 6 }, (_, j) => <div key={j} className="w-[9.75rem] shrink-0 md:w-[11.5rem]" aria-hidden><div className="skeleton aspect-square rounded-[14px]" /><div className="skeleton mt-3 h-3.5 w-4/5 rounded-full" /><div className="skeleton mt-2 h-3 w-1/2 rounded-full" /></div>)}
+            </Shelf>
+          ))
+        ) : category === 'all' ? (
+          shelves.map(({ c, items }) => (
+            <Shelf
+              key={c}
+              id={`shelf-${c}`}
+              title={SHELF_TITLE[c]}
+              subtitle={moods.length ? `Tuned to ${moods.map((m) => conceptLabel(m).toLowerCase()).join(', ')}` : `${items.length} picks`}
+              action={items.some((r) => isQueueable(r.item)) ? (
+                <button type="button" onClick={() => player.playQueue(items.map((r) => r.item), 0)} className="inline-flex h-9 items-center gap-1.5 rounded-full bg-bone px-4 text-[13px] font-semibold text-ink transition-transform active:scale-95">
+                  <Play className="h-3.5 w-3.5 fill-current" aria-hidden /> Play all
+                </button>
+              ) : undefined}
+            >
+              {items.map((r, i) => <Tile key={r.item.id} rec={r} onOpen={setOpen} onWatch={watch} onPlay={() => player.playQueue(items.map((x) => x.item), i)} />)}
+            </Shelf>
+          ))
+        ) : (
+          <section className="mt-10 px-4 md:px-10" aria-label={CATEGORY_META[category].label}>
+            <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5">
+              {rest.map((r, i) => <Tile key={r.item.id} rec={r} onOpen={setOpen} onWatch={watch} onPlay={() => player.playQueue(rest.map((x) => x.item), i)} className="!w-auto" />)}
+            </div>
           </section>
         )}
-
-        <section className="mt-10" aria-labelledby="picks-h">
-          <div className="flex flex-wrap items-end justify-between gap-3">
-            <div>
-              <h2 id="picks-h" className="font-display text-[26px] leading-tight">Picked for you</h2>
-              <p className="mt-0.5 text-sm text-mist">{moods.length ? `Tuned to ${moods.map((m) => conceptLabel(m).toLowerCase()).join(', ')}` : category === 'all' ? 'Across everything you love' : CATEGORY_META[category].label}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              <button type="button" onClick={() => setTuneOpen((o) => !o)} aria-expanded={tuneOpen} className={`inline-flex h-10 items-center gap-2 rounded-full border px-4 text-sm transition-colors ${tuneOpen ? 'border-ember/50 bg-ember/10 text-bone' : 'border-line text-mist hover:text-bone'}`}>
-                <SlidersHorizontal className="h-4 w-4" aria-hidden />
-                {exp < 0.34 ? 'Familiar' : exp < 0.67 ? 'Balanced' : 'Adventurous'}
-              </button>
-              <button type="button" onClick={refresh} disabled={feed.isFetching} className="inline-flex h-10 items-center gap-2 rounded-full border border-line px-4 text-sm text-mist transition-colors hover:text-bone disabled:opacity-50">
-                <RefreshCw className={`h-4 w-4 ${feed.isFetching ? 'animate-spin' : ''}`} aria-hidden /> Refresh
-              </button>
-            </div>
+        {feed.data && recs.length === 0 && !feed.isFetching && (
+          <div className="px-4 py-16 text-center">
+            <p className="font-display text-2xl">Nothing new here right now.</p>
+            <p className="mt-2 text-sm text-mist">Try another mood, widen the categories, or get new picks.</p>
           </div>
-          <AnimatePresence initial={false}>
-            {tuneOpen && (
-              <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} className="overflow-hidden">
-                <div className="pt-4 md:max-w-md"><ExplorationSlider value={exp} onChange={setExploration} /></div>
-              </motion.div>
-            )}
-          </AnimatePresence>
-
-          {feed.data && recs.length === 0 && !feed.isFetching && (
-            <div className="py-16 text-center">
-              <p className="font-display text-2xl">Nothing new here right now.</p>
-              <p className="mt-2 text-sm text-mist">Try another mood, widen the categories, or refresh.</p>
-            </div>
-          )}
-
-          <div className={`mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3 ${feed.isFetching && !loading ? 'opacity-60 transition-opacity' : ''}`}>
-            {loading
-              ? Array.from({ length: 6 }, (_, i) => <MediaCardSkeleton key={i} />)
-              : (
-                <AnimatePresence mode="popLayout">
-                  {rest.map((r) => (
-                    <MediaCard key={r.item.id} item={r.item} explanation={r.explanation} score={r.score} source="feed" onDismiss={(id) => setDismissed((s) => new Set(s).add(id))} />
-                  ))}
-                </AnimatePresence>
-              )}
-          </div>
-        </section>
-
-        {(recent.data?.length ?? 0) > 0 && (
-          <section className="mt-14" aria-labelledby="recent-h">
-            <h2 id="recent-h" className="font-display text-[26px] leading-tight">Recently discovered</h2>
-            <p className="mt-0.5 text-sm text-mist">What ECHO showed you lately</p>
-            <div className="scroll-fade-x -mx-4 mt-4">
-              <div className="scrollbar-none flex snap-x gap-3 overflow-x-auto px-4 pb-2">
-                {recent.data!.filter((r) => r.content_items).map((r) => {
-                  const it = dbToItem(r.content_items!);
-                  const m = CATEGORY_META[it.category];
-                  return (
-                    <a key={r.item_id} href={it.externalUrl} target="_blank" rel="noreferrer" className="group w-[8.5rem] shrink-0 snap-start" title={r.explanation}>
-                      <Artwork item={{ ...it, category: 'music' }} rounded="rounded-xl" />
-                      <p className="mt-2 line-clamp-2 text-[13px] leading-snug text-bone/90">{it.title}</p>
-                      <p className="mt-0.5 text-[11px] font-medium tracking-wide uppercase" style={{ color: m.color }}>{m.short}</p>
-                    </a>
-                  );
-                })}
-              </div>
-            </div>
-          </section>
         )}
       </div>
+
+      {(recent.data?.length ?? 0) > 0 && (
+        <Shelf id="recent-h" title="Recently discovered" subtitle="What ECHO showed you lately">
+          {recent.data!.filter((r) => r.content_items).slice(0, 14).map((r) => {
+            const it = dbToItem(r.content_items!);
+            return (
+              <a key={r.item_id} href={it.externalUrl} target="_blank" rel="noreferrer" className="group w-[8rem] shrink-0 snap-start md:w-[9rem]" title={r.explanation}>
+                <Artwork item={{ ...it, category: 'music' }} rounded="rounded-xl" className="transition-transform duration-300 group-hover:-translate-y-1" />
+                <p className="mt-2 line-clamp-2 text-[13px] leading-snug text-bone/90">{it.title}</p>
+                <p className="mt-0.5 text-[11px] font-medium tracking-wide uppercase" style={{ color: CATEGORY_META[it.category].color }}>{CATEGORY_META[it.category].short}</p>
+              </a>
+            );
+          })}
+        </Shelf>
+      )}
+
+      <DetailSheet rec={open?.rec ?? null} autoPlay={open?.play} onClose={() => setOpenState(null)} onDismiss={dismiss} />
     </div>
   );
 }

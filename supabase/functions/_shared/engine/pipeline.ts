@@ -16,7 +16,7 @@ import { analyzeItem } from './analyze.ts';
 import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
 import { parseIntent, refineIntent } from './intent.ts';
 import { rankCandidates, type EvidenceItem, type ReferenceInfo } from './rank.ts';
-import { feedConcepts, planRetrieval, targetCategories } from './retrieve.ts';
+import { planRetrieval, targetCategories } from './retrieve.ts';
 import { positivePart, topKeys } from './text.ts';
 
 export interface PipelineDeps {
@@ -35,6 +35,8 @@ export interface PipelineDeps {
   /** Previously stored embeddings by item id. */
   storedEmbeddings?: (ids: string[]) => Promise<Map<string, number[]>>;
   useLlm?: boolean;
+  /** Stored catalog items for a provider that is down/out of quota (keeps e.g. the Videos shelf alive). */
+  catalogFallback?: (provider: ProviderId, categories: Category[]) => Promise<ContentItem[]>;
   seed?: number;
   now?: Date;
 }
@@ -42,6 +44,8 @@ export interface PipelineDeps {
 export interface PipelineResult extends DiscoverResponse {
   candidates: AnalyzedItem[];
   quotaErrors: ProviderId[];
+  /** Seconds a provider asked us to wait (Retry-After), when it said so. */
+  quotaRetryAfter: Partial<Record<ProviderId, number>>;
 }
 
 const CATEGORY_NOUN: Record<Category, string> = { youtube: 'videos', music: 'music', screen: 'films & series', books: 'books', podcasts: 'podcasts' };
@@ -198,15 +202,23 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   }
   // A follow-up with nothing new to search for ("they're bad") explores fresh themes instead of repeating searches.
   const nothingToSearch = effectiveHasQuery && !intent.keywords.length && !topKeys(positivePart(intent.target), 1, 0.15).length && !intent.references.length && !intent.genres.length;
-  const plan = planRetrieval(intent, deps.profile, categories, { env: deps.env, exploration, hasQuery: effectiveHasQuery && !nothingToSearch, seed: deps.seed, mix: req.mix }, extraConcepts).filter((q) => !deps.blockedProviders?.has(q.provider.id));
+  const curatorOn = categories.includes('music') && !!ai && deps.useLlm !== false && !!PROVIDERS.spotify?.configured(deps.env) && !deps.blockedProviders?.has('spotify');
+  const plan = planRetrieval(intent, deps.profile, categories, { env: deps.env, exploration, hasQuery: effectiveHasQuery && !nothingToSearch, seed: deps.seed, mix: req.mix, budget: (req.limit ?? 12) > 20 ? 18 : 12 }, extraConcepts)
+    .filter((q) => !deps.blockedProviders?.has(q.provider.id))
+    // When the AI curator runs, Spotify mood-word searches for music are discarded anyway: don't spend calls on them.
+    .filter((q) => !(curatorOn && !effectiveHasQuery && q.provider.id === 'spotify' && q.params.category === 'music'));
   for (const id of deps.blockedProviders ?? []) statuses.set(id, { id, status: 'quota', message: 'Daily quota reached; using cached results until it resets.' });
   const callsBefore = deps.http.calls;
   // Music discovery: Spotify's dev-mode search can't find music by mood or genre (it returns stock
   // "sleep/ambient" filler), so the optional LLM proposes real artists/recordings for the user's
   // taste words and every pick is verified on Spotify. Runs in parallel with provider searches.
+  let spotifyLimitedSec: number | undefined;
   const musicPicks = (async (): Promise<{ items: ContentItem[]; detail: string } | null> => {
     if (!categories.includes('music') || !ai || deps.useLlm === false || !PROVIDERS.spotify?.configured(deps.env) || deps.blockedProviders?.has('spotify')) return null;
-    const concepts = (effectiveHasQuery ? topKeys(positivePart(intent.target), 5, 0.15) : feedConcepts(deps.profile, exploration, intent.moods, deps.seed ?? 0)).filter((c) => CONCEPT_BY_ID[c]);
+    // Open feed: briefed from the MUSIC taste (+ chosen moods) only; video/book themes never steer songs.
+    const concepts = (effectiveHasQuery
+      ? topKeys(positivePart(intent.target), 5, 0.15)
+      : [...new Set([...intent.moods, ...topKeys(positivePart(deps.profile.conceptsByCategory.music ?? {}), 6, 0.15)])]).filter((c) => CONCEPT_BY_ID[c]);
     // Music is briefed with moods (and the few themes that translate to sound), not e.g. "politics".
     const SOUND_THEMES = new Set(['cosmic', 'nature', 'spiritual', 'love', 'loss', 'solitude', 'time-memory', 'identity', 'travel']);
     const musicConcepts = effectiveHasQuery ? concepts : concepts.filter((c) => CONCEPT_BY_ID[c].group === 'mood' || SOUND_THEMES.has(c));
@@ -229,7 +241,8 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
         })();
     const avoid = [...deps.profile.explicit.dislikes, ...intent.excludes.filter((x) => !CONCEPT_BY_ID[x])];
     const picks = await llmMusicPicks(desc, ai, deps.http, { avoid, count: 16, cacheKey: `ai:music:${await hashKey(`${desc}|${avoid.join(',')}`)}:${(deps.seed ?? 0) % 4}` });
-    const verified = await verifySpotifyPicks(picks, { http: deps.http, env: deps.env });
+    const { items: verified, rateLimitedSec } = await verifySpotifyPicks(picks, { http: deps.http, env: deps.env });
+    if (rateLimitedSec !== undefined) spotifyLimitedSec = rateLimitedSec;
     const styleOf = new Map(picks.map((pk) => [pk.artist.toLowerCase(), pk.style]));
     const items = verified.filter((i) => !inBlockedFamily([styleOf.get((i.creators[0] ?? '').toLowerCase()) ?? '', ...i.genres], deps.profile)).map((i, idx) => ({ ...i, genres: i.genres.length ? i.genres : [styleOf.get((i.creators[0] ?? '').toLowerCase()) ?? ''].filter(Boolean), popularity: 0.75, metadata: { ...(i.metadata ?? {}), aiPick: true, aiOrder: idx, aiFor: words, retrievedBy: `ai:${i.creators[0] ?? i.id}`, retrievedFor: concepts.slice(0, 3) } }));
     return { items, detail: `${verified.length}/${picks.length} AI music picks verified on Spotify` };
@@ -237,6 +250,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   const settled = await Promise.allSettled(plan.map((q) => q.provider.search(q.params, { http: deps.http, env: deps.env })));
   const raw: ContentItem[] = [];
   const quotaErrors: ProviderId[] = [];
+  const quotaRetryAfter: Partial<Record<ProviderId, number>> = {};
   settled.forEach((s, i) => {
     const pid = plan[i].provider.id;
     if (s.status === 'fulfilled') {
@@ -245,10 +259,20 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     } else {
       const e = s.reason as ProviderError;
       const kind = e instanceof ProviderError ? e.kind : 'error';
-      if (kind === 'quota') quotaErrors.push(pid);
+      if (kind === 'quota') {
+        quotaErrors.push(pid);
+        if (e instanceof ProviderError && e.retryAfterSec) quotaRetryAfter[pid] = Math.max(quotaRetryAfter[pid] ?? 0, e.retryAfterSec);
+      }
       statuses.set(pid, { id: pid, status: kind === 'quota' ? 'quota' : 'error', message: String(e?.message ?? e).slice(0, 200) });
     }
   });
+  // YouTube out of daily quota: serve its shelves from the stored, already-verified catalog instead of dropping them.
+  const ytCats = categories.filter((c) => c === 'youtube' || c === 'podcasts');
+  if (ytCats.length && deps.catalogFallback && (deps.blockedProviders?.has('youtube') || quotaErrors.includes('youtube'))) {
+    const fb = await deps.catalogFallback('youtube', ytCats).catch(() => [] as ContentItem[]);
+    raw.push(...fb);
+    pipeline.push({ step: 'fallback', ms: 0, detail: `YouTube quota reached: ${fb.length} stored videos/episodes used instead` });
+  }
   const mp = await musicPicks;
   if (mp) {
     // Enough verified curator picks → drop Spotify mood-word search results for music (mostly filler);
@@ -258,6 +282,19 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     }
     raw.push(...mp.items);
     pipeline.push({ step: 'music-ai', ms: 0, detail: mp.detail });
+  }
+  if (spotifyLimitedSec !== undefined) {
+    if (!quotaErrors.includes('spotify')) quotaErrors.push('spotify');
+    quotaRetryAfter.spotify = Math.max(quotaRetryAfter.spotify ?? 0, spotifyLimitedSec);
+  }
+  // Spotify rate-limited (or too few fresh songs): fill music from stored, already-verified Spotify items.
+  const spotifyCats = categories.filter((c) => c === 'music' || c === 'podcasts');
+  const spotifyDown = deps.blockedProviders?.has('spotify') || quotaErrors.includes('spotify');
+  const musicCount = raw.filter((i) => i.category === 'music').length;
+  if (spotifyCats.length && deps.catalogFallback && (spotifyDown || (categories.includes('music') && musicCount < 12))) {
+    const fb = await deps.catalogFallback('spotify', spotifyDown ? spotifyCats : ['music']).catch(() => [] as ContentItem[]);
+    raw.push(...fb);
+    pipeline.push({ step: 'fallback', ms: 0, detail: `${spotifyDown ? 'Spotify rate-limited' : 'Few fresh songs'}: ${fb.length} stored Spotify items added` });
   }
   pipeline.push({ step: 'retrieval', ms: t(), detail: `${plan.length} queries → ${raw.length} items (${deps.http.calls - callsBefore} network calls, rest cached)` });
 
@@ -307,7 +344,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
 
   // ── Steps 5–7: ranking, diversity, explanation ──
   t = timer();
-  const limit = Math.max(1, Math.min(req.limit ?? 12, 30));
+  const limit = Math.max(1, Math.min(req.limit ?? 12, 60));
   const recommendations = rankCandidates(candidates, intent, deps.profile, {
     exploration,
     hasQuery: effectiveHasQuery,
@@ -348,5 +385,6 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     pipeline,
     candidates,
     quotaErrors,
+    quotaRetryAfter,
   };
 }

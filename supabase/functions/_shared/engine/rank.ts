@@ -1,8 +1,8 @@
 // Pipeline steps 5–7 — personal ranking, diversity adjustment, explanation.
-import type { AnalyzedItem, ConceptVector, Explanation, Intent, Recommendation, ScoreBreakdown, TasteProfile } from '../types.ts';
+import type { AnalyzedItem, Category, ConceptVector, Explanation, Intent, Recommendation, ScoreBreakdown, TasteProfile } from '../types.ts';
 import { conceptPhrase, CONCEPT_BY_ID } from './concepts.ts';
 import { creatorKeys, genreKeys } from './profile.ts';
-import { inBlockedFamily } from './music.ts';
+import { familyOf, inBlockedFamily } from './music.ts';
 import { itemWorld } from './worlds.ts';
 import { contentTokens, cosine, denseCosine, negativePart, normalize, normKey, positivePart, round } from './text.ts';
 
@@ -84,15 +84,22 @@ export interface ProfileView {
   cold: boolean;
 }
 
-export function profileView(p: TasteProfile): ProfileView {
-  const combined: ConceptVector = { ...p.concepts };
-  for (const id of p.explicit.pinnedConcepts) combined[id] = Math.max(combined[id] ?? 0, 1.5);
+/** Taste domains never steer each other: songs shape music picks, everything else shapes the rest. */
+export type TasteDomain = 'music' | 'general';
+export const domainOf = (category: Category): TasteDomain => (category === 'music' ? 'music' : 'general');
+
+export function profileView(p: TasteProfile, domain: TasteDomain = 'general'): ProfileView {
+  const combined: ConceptVector = domain === 'music' ? { ...(p.conceptsByCategory.music ?? {}) } : { ...p.concepts };
+  // Pinned interests are themes for watching/reading/listening to talk; they don't apply to songs.
+  if (domain === 'general') for (const id of p.explicit.pinnedConcepts) combined[id] = Math.max(combined[id] ?? 0, 1.5);
   for (const id of p.explicit.blockedConcepts) combined[id] = Math.min(combined[id] ?? 0, -1.5);
   const positive = positivePart(combined);
+  const st = positivePart(p.shortTerm.concepts);
   return {
     positive,
     negative: negativePart(combined),
-    shortTerm: positivePart(p.shortTerm.concepts),
+    // A session mood colours music too; session themes don't.
+    shortTerm: domain === 'music' ? Object.fromEntries(Object.entries(st).filter(([k]) => CONCEPT_BY_ID[k]?.group === 'mood')) : st,
     cold: Object.keys(positive).length === 0 && Object.keys(p.genres).length === 0 && Object.keys(p.creators).length === 0,
   };
 }
@@ -136,7 +143,8 @@ export function scoreItem(item: AnalyzedItem, intent: Intent, profile: TasteProf
 
   // Personal relevance
   const deep = view.cold ? 0 : cosine(view.positive, item.concepts) - 0.5 * cosine(view.negative, item.concepts);
-  const g = Math.tanh(maxAffinity(profile.genres, itemGenres) / 1.5);
+  // Music styles learned from songs ("rock", "hip hop") don't score films, videos or books.
+  const g = Math.tanh(maxAffinity(profile.genres, item.category === 'music' ? itemGenres : itemGenres.filter((k) => !familyOf(k))) / 1.5);
   const c = Math.tanh(maxAffinity(profile.creators, creatorKeys(item)) / 1.5);
   const cat = Math.tanh((profile.categories[item.category] ?? 0) / 1.5);
   const surface = clamp(0.4 * g + 0.45 * c + 0.15 * cat);
@@ -228,18 +236,26 @@ export function retrievedBy(i: AnalyzedItem): string | null {
   return typeof i.metadata?.retrievedBy === 'string' ? (i.metadata.retrievedBy as string) : null;
 }
 
-export function itemSimilarity(a: AnalyzedItem, b: AnalyzedItem, multiCategory: boolean): number {
-  const ca = creatorKeys(a);
-  if (ca.length && creatorKeys(b).some((x) => ca.includes(x))) return 1;
-  const sharedGenre = genreKeys(a).some((x) => genreKeys(b).includes(x)) ? 1 : 0;
-  const sameCat = a.category === b.category ? 1 : 0;
+interface SimFeatures { item: AnalyzedItem; creators: string[]; genres: Set<string>; title: Set<string>; query: string | null }
+const simFeatures = (item: AnalyzedItem): SimFeatures => ({ item, creators: creatorKeys(item), genres: new Set(genreKeys(item)), title: titleTokens(item), query: retrievedBy(item) });
+
+function featureSimilarity(a: SimFeatures, b: SimFeatures, multiCategory: boolean): number {
+  if (a.creators.length && b.creators.some((x) => a.creators.includes(x))) return 1;
+  const sameCat = a.item.category === b.item.category ? 1 : 0;
+  let sharedGenre = 0;
+  for (const g of a.genres) if (b.genres.has(g)) { sharedGenre = 1; break; }
   // Same topic search + overlapping title words ("Greek Mythology Explained" ×5) = repetition.
-  const ta = titleTokens(a);
-  const tb = titleTokens(b);
-  const overlap = ta.size && tb.size ? [...ta].filter((x) => tb.has(x)).length / Math.min(ta.size, tb.size) : 0;
-  const sameQuery = retrievedBy(a) && retrievedBy(a) === retrievedBy(b) ? 1 : 0;
-  const base = 0.65 * cosine(a.concepts, b.concepts) + 0.2 * sharedGenre * sameCat + (multiCategory ? 0.15 * sameCat : 0);
-  return Math.min(1, Math.max(base, 0.6 * overlap + 0.3 * sameQuery + 0.2 * cosine(a.concepts, b.concepts)));
+  let shared = 0;
+  for (const x of a.title) if (b.title.has(x)) shared++;
+  const overlap = a.title.size && b.title.size ? shared / Math.min(a.title.size, b.title.size) : 0;
+  const sameQuery = a.query && a.query === b.query ? 1 : 0;
+  const cos = cosine(a.item.concepts, b.item.concepts);
+  const base = 0.65 * cos + 0.2 * sharedGenre * sameCat + (multiCategory ? 0.15 * sameCat : 0);
+  return Math.min(1, Math.max(base, 0.6 * overlap + 0.3 * sameQuery + 0.2 * cos));
+}
+
+export function itemSimilarity(a: AnalyzedItem, b: AnalyzedItem, multiCategory: boolean): number {
+  return featureSimilarity(simFeatures(a), simFeatures(b), multiCategory);
 }
 
 /** How many slots each category gets in a mixed feed (weights: 0.5 less, 1 normal, 2 more). */
@@ -258,7 +274,9 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
   opts: { quotas?: Map<AnalyzedItem['category'], number>; perQuery?: number; worldCap?: number } = {},
 ): T[] {
   const lambda = 0.78 - 0.22 * clamp(exploration, 0, 1);
-  const pool = [...ranked];
+  // Features are computed once and each candidate's similarity to the picks is updated incrementally
+  // (only against the newest pick), so 48-pick feeds over hundreds of candidates stay cheap.
+  const pool = ranked.map((cand) => ({ cand, f: simFeatures(cand.item), world: opts.worldCap ? itemWorld(cand.item) : null, maxSim: 0 }));
   const selected: T[] = [];
   const creatorCount = new Map<string, number>();
   const queryCount = new Map<string, number>();
@@ -271,17 +289,15 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
     let bestIdx = -1;
     let bestVal = -Infinity;
     for (let i = 0; i < pool.length; i++) {
-      const cand = pool[i];
-      const creators = creatorKeys(cand.item);
-      if (creators.some((cr) => (creatorCount.get(cr) ?? 0) >= 2)) continue;
-      const q = retrievedBy(cand.item);
+      const { cand, f, maxSim } = pool[i];
+      if (f.creators.some((cr) => (creatorCount.get(cr) ?? 0) >= 2)) continue;
+      const q = f.query;
       if (strict && q && (queryCount.get(q) ?? 0) >= perQuery) continue;
       const quota = opts.quotas?.get(cand.item.category);
       if (strict && quota !== undefined && (catCount.get(cand.item.category) ?? 0) >= quota) continue;
       // Tone variety: no single thematic world may dominate the feed.
-      const wld = worldCap ? itemWorld(cand.item) : null;
+      const wld = worldCap ? pool[i].world : null;
       if (strict && wld && worldCap && (worldCount.get(wld) ?? 0) >= worldCap) continue;
-      const maxSim = selected.length ? Math.max(...selected.map((s) => itemSimilarity(cand.item, s.item, multiCategory))) : 0;
       // Coverage: a pick that brings a tone not yet in the feed gets a small lift (more in adventurous mode).
       const wNew = opts.worldCap && wld && !worldCount.has(wld) ? 0.08 + 0.1 * clamp(exploration, 0, 1) : 0;
       const val = lambda * cand.score.total - (1 - lambda) * maxSim + wNew;
@@ -301,15 +317,14 @@ export function diversify<T extends { item: AnalyzedItem; score: ScoreBreakdown 
       }
       break;
     }
-    const [chosen] = pool.splice(bestIdx, 1);
-    for (const cr of creatorKeys(chosen.item)) creatorCount.set(cr, (creatorCount.get(cr) ?? 0) + 1);
-    const cq = retrievedBy(chosen.item);
+    const [picked] = pool.splice(bestIdx, 1);
+    const chosen = picked.cand;
+    for (const e of pool) e.maxSim = Math.max(e.maxSim, featureSimilarity(e.f, picked.f, multiCategory));
+    for (const cr of picked.f.creators) creatorCount.set(cr, (creatorCount.get(cr) ?? 0) + 1);
+    const cq = picked.f.query;
     if (cq) queryCount.set(cq, (queryCount.get(cq) ?? 0) + 1);
     catCount.set(chosen.item.category, (catCount.get(chosen.item.category) ?? 0) + 1);
-    if (opts.worldCap) {
-      const w = itemWorld(chosen.item);
-      if (w) worldCount.set(w, (worldCount.get(w) ?? 0) + 1);
-    }
+    if (opts.worldCap && picked.world) worldCount.set(picked.world, (worldCount.get(picked.world) ?? 0) + 1);
     selected.push(chosen);
   }
   return selected;
@@ -355,8 +370,7 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
   const matchedConcepts = Object.entries(item.concepts).filter(([k, v]) => v >= 0.25 && !inherited.has(k)).sort((a, b) => b[1] - a[1]).map(([k]) => k);
 
   if (item.metadata?.aiPick) {
-    const forWhat = typeof item.metadata.aiFor === 'string' && item.metadata.aiFor ? item.metadata.aiFor.split(', ').slice(0, 3).join(', ') : '';
-    reasons.push({ kind: ctx.hasQuery ? 'query' : 'profile', detail: ctx.hasQuery ? `Picked by ECHO's AI curator for your request and verified on Spotify` : `Picked by ECHO's AI curator for your ${forWhat || 'taste'} side, verified on Spotify` });
+    reasons.push({ kind: ctx.hasQuery ? 'query' : 'profile', detail: ctx.hasQuery ? `Picked by ECHO's AI curator for your request and verified on Spotify` : `Picked from your music taste by ECHO's AI curator${item.genres[0] ? ` (${item.genres[0].toLowerCase()})` : ''}, verified on Spotify` });
   }
   const refTitle = ctx.referenceSimilar?.get(item.id);
   if (refTitle) reasons.push({ kind: 'reference', detail: `Listed as similar to ${refTitle} by the catalog provider` });
@@ -406,7 +420,8 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
       // Cite a liked item only for qualities it really shares; across media, it must share a THEME
       // (a song and a podcast both being "joyful" is too thin to claim a connection).
       const ev = (ctx.evidence ?? [])
-        .filter((e) => e.id !== item.id)
+        // Never explain a video by a song (or a song by a video): evidence stays in its taste domain.
+        .filter((e) => e.id !== item.id && domainOf(e.category) === domainOf(item.category))
         .map((e) => {
           const cross = e.category !== item.category;
           const shared = pMatched.filter((k) => (e.concepts[k] ?? 0) >= 0.3 && (!cross || CONCEPT_BY_ID[k]?.group === 'theme'));
@@ -460,7 +475,7 @@ export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHit
 /** Full ranking: score → filter → diversify → sequence → explain. */
 export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profile: TasteProfile, ctx: RankContext): Recommendation[] {
   const limit = ctx.limit ?? 12;
-  const view = profileView(profile);
+  const views: Record<TasteDomain, ProfileView> = { general: profileView(profile, 'general'), music: profileView(profile, 'music') };
   const seen = new Set<string>();
   const scored: Array<{ item: AnalyzedItem; score: ScoreBreakdown & { keywordHits: string[] } }> = [];
   for (const item of candidates) {
@@ -468,7 +483,9 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
     seen.add(item.id);
     if (ctx.excludeIds?.has(item.id) || ctx.referenceIds?.has(item.id)) continue;
     if (intent.providers?.length && !intent.providers.includes(item.provider) && intent.categories.includes(item.category)) continue;
-    scored.push({ item, score: scoreItem(item, intent, profile, view, ctx) });
+    // Music videos belong to the music side; the Videos feed doesn't fill up with songs unless asked.
+    if (item.category === 'youtube' && item.genres.includes('Music') && !(ctx.hasQuery && intent.keywords.some((k) => /music|song|concert|album|clip/.test(k)))) continue;
+    scored.push({ item, score: scoreItem(item, intent, profile, views[domainOf(item.category)], ctx) });
   }
   scored.sort((a, b) => b.score.total - a.score.total);
   const cats = new Set(scored.map((s) => s.item.category));
@@ -476,7 +493,8 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
   const quotas = cats.size > 1 && !ctx.hasQuery ? categoryQuotas(scored.map((x) => x.item.category), limit, ctx.mix) : undefined;
   let picked: Array<{ item: AnalyzedItem; score: ScoreBreakdown & { keywordHits: string[] }; trajectoryStep?: number }> = diversify(scored, limit, ctx.exploration, cats.size > 1, {
     quotas,
-    perQuery: intent.trajectory ? 4 : 2,
+    // Big feeds can take a few more from one search (each search is a different theme).
+    perQuery: intent.trajectory ? 4 : limit > 20 ? 3 : 2,
     // Open feeds: at most a third of the picks from one thematic world. Focused requests are exempt.
     worldCap: ctx.hasQuery ? undefined : Math.max(2, Math.ceil(limit / 4)),
   });
@@ -487,7 +505,7 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
       item: p.item,
       score,
       trajectoryStep: p.trajectoryStep,
-      explanation: explain(p.item, { ...score, keywordHits }, intent, profile, view, ctx, p.trajectoryStep, picked.length),
+      explanation: explain(p.item, { ...score, keywordHits }, intent, profile, views[domainOf(p.item.category)], ctx, p.trajectoryStep, picked.length),
     };
   });
 }

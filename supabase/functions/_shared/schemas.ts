@@ -9,7 +9,7 @@ export const DiscoverBody = z.object({
   categories: z.array(category).max(5).optional(),
   moods: z.array(z.string().max(40)).max(6).optional(),
   exploration: z.number().min(0).max(1).optional(),
-  limit: z.number().int().min(1).max(30).optional(),
+  limit: z.number().int().min(1).max(60).optional(),
   exclude: z.array(itemId).max(200).optional(),
   seed: z.number().int().optional(),
   mix: z.partialRecord(z.enum(CATEGORIES), z.number().min(0).max(3)).optional(),

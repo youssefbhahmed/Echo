@@ -141,6 +141,8 @@ export interface TasteProfile {
   embedding?: number[] | null;
   /** Summary of an imported music library (styles, recent shift, eras, moods, languages). */
   music?: MusicDna | null;
+  /** 2 = music and non-music taste kept apart (see separateMusicTaste). */
+  domainsVersion?: number;
 }
 
 export interface MusicDna {

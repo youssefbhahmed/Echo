@@ -23,15 +23,42 @@ export function emptyProfile(): TasteProfile {
     interactionCount: 0,
     updatedAt: null,
     embedding: null,
+    domainsVersion: 2,
   };
+}
+
+/**
+ * v1 profiles mixed songs into the general taste vector, so liked songs ("River", "Beyond") pushed
+ * horror/mystery films and podcasts. v2 keeps `concepts` for non-music media only; music lives in
+ * conceptsByCategory.music. This removes the music share from `concepts` (pure, applied once).
+ */
+export function separateMusicTaste(p: TasteProfile): TasteProfile {
+  if ((p.domainsVersion ?? 1) >= 2) return p;
+  const music = p.conceptsByCategory.music ?? {};
+  const concepts: ConceptVector = {};
+  for (const [k, v] of Object.entries(p.concepts)) {
+    const pinned = p.explicit.pinnedConcepts.includes(k) || p.explicit.blockedConcepts.includes(k);
+    const nv = pinned ? v : round(v - (music[k] ?? 0));
+    if (Math.abs(nv) >= 0.05) concepts[k] = nv;
+  }
+  const imp = (p as TasteProfile & { importContribution?: { concepts?: ConceptVector } }).importContribution;
+  return {
+    ...p,
+    concepts,
+    // Session themes were also fed by songs; they decay within hours anyway.
+    shortTerm: { concepts: {}, updatedAt: p.shortTerm.updatedAt },
+    ...(imp ? { importContribution: { ...imp, concepts: {} } } : {}),
+    domainsVersion: 2,
+  } as TasteProfile;
 }
 
 /** Coerce possibly-partial JSON from the database into a full profile. */
 export function hydrateProfile(raw: Partial<TasteProfile> | null | undefined): TasteProfile {
   const base = emptyProfile();
   if (!raw) return base;
-  return {
+  return separateMusicTaste({
     ...base,
+    domainsVersion: 1,
     ...raw,
     shortTerm: { ...base.shortTerm, ...(raw.shortTerm ?? {}) },
     explicit: { ...base.explicit, ...(raw.explicit ?? {}) },
@@ -40,7 +67,7 @@ export function hydrateProfile(raw: Partial<TasteProfile> | null | undefined): T
     genres: raw.genres ?? {},
     creators: raw.creators ?? {},
     categories: raw.categories ?? {},
-  };
+  });
 }
 
 export const FEEDBACK_SIGNAL: Record<Exclude<FeedbackType, 'rate'>, number> = {
@@ -154,14 +181,16 @@ export function applyFeedback(
   // A single dislike says more about the creator/genre than about every concept in the item.
   const conceptDelta = lr * s * (s < 0 ? 0.5 : 1);
 
-  const concepts = updateConcepts(p.concepts, item.concepts, conceptDelta);
+  // `concepts` is the non-music taste; songs only teach the music vector (conceptsByCategory.music).
+  const isMusic = item.category === 'music';
+  const concepts = isMusic ? p.concepts : updateConcepts(p.concepts, item.concepts, conceptDelta);
   const catConcepts = updateConcepts(p.conceptsByCategory[item.category] ?? {}, item.concepts, conceptDelta);
   const genres = updateMap(p.genres, genreKeys(item), lr * s * 0.8);
   const creators = updateMap(p.creators, creatorKeys(item), lr * s * 1.2);
   const categories = { ...p.categories, [item.category]: bounded(p.categories[item.category] ?? 0, lr * s * 0.5) };
 
   const st = { ...p.shortTerm.concepts };
-  if (s > 0) for (const [c, x] of Object.entries(item.concepts)) st[c] = round(Math.min(1.5, (st[c] ?? 0) + s * x * 0.6));
+  if (s > 0 && !isMusic) for (const [c, x] of Object.entries(item.concepts)) st[c] = round(Math.min(1.5, (st[c] ?? 0) + s * x * 0.6));
 
   let embedding = p.embedding ?? null;
   if (s > 0 && item.embedding?.length) {

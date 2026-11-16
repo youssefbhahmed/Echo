@@ -2,6 +2,8 @@ import { NavLink, Outlet } from 'react-router-dom';
 import { Compass, Library, MessageCircle, Settings, Sparkles } from 'lucide-react';
 import { motion } from 'motion/react';
 import { EchoMark, Wordmark } from './Echo';
+import { MiniPlayer } from './MiniPlayer';
+import { usePlayer } from '../lib/player';
 
 const NAV = [
   { to: '/', label: 'Discover', icon: Compass, end: true },
@@ -12,6 +14,7 @@ const NAV = [
 ];
 
 export function Shell() {
+  const { current } = usePlayer();
   return (
     <div className="grain min-h-dvh md:flex">
       <a href="#main" className="sr-only focus:not-sr-only focus:fixed focus:top-2 focus:left-2 focus:z-50 focus:rounded-lg focus:bg-bone focus:px-3 focus:py-2 focus:text-ink">Skip to content</a>
@@ -37,11 +40,12 @@ export function Shell() {
           <p className="mt-2 text-xs leading-relaxed text-mist">Every like, save and skip teaches ECHO a little more about you.</p>
         </div>
       </aside>
-      <main id="main" className="min-w-0 flex-1 pb-32 md:pb-16">
+      <main id="main" className={`min-w-0 flex-1 ${current ? 'pb-56 md:pb-36' : 'pb-32 md:pb-16'}`}>
         <div className="mx-auto max-w-[1280px]">
           <Outlet />
         </div>
       </main>
+      <MiniPlayer />
       {/* Mobile tab bar */}
       <nav className="pb-safe-nav fixed inset-x-0 bottom-0 z-40 border-t border-line bg-ink/80 backdrop-blur-2xl md:hidden" aria-label="Main">
         <div className="mx-auto grid max-w-lg grid-cols-5 px-1">

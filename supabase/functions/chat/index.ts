@@ -7,7 +7,7 @@ import { createHttp } from '../_shared/providers/http.ts';
 import { ChatBody } from '../_shared/schemas.ts';
 import type { Intent } from '../_shared/types.ts';
 import {
-  blockedProviders, collaborativeFn, DbCache, embedder, env, evidenceItems, excludedIds, getItems, HttpError, json, loadProfile, markQuota, rateLimit, readJson, requireUser, saveProfile, serve, serviceClient, storedEmbeddings, upsertItems,
+  blockedProviders, catalogFallbackFn, collaborativeFn, DbCache, embedder, env, evidenceItems, excludedIds, getItems, HttpError, json, loadProfile, markQuota, rateLimit, readJson, requireUser, saveProfile, serve, serviceClient, storedEmbeddings, upsertItems,
 } from '../_shared/server.ts';
 
 serve(async (req) => {
@@ -39,10 +39,10 @@ serve(async (req) => {
 
   const http = createHttp(new DbCache());
   const result = await runPipeline(
-    { query: body.message, categories: body.categories, exploration: body.exploration, limit: 8, intentHint: body.intentHint },
-    { env, http, profile, excludeIds: exclude, evidence, previousIntent, previousResults, blockedProviders: blocked, collaborative: collaborativeFn(db), embed: embedder(), storedEmbeddings, seed: previousIds.length + Math.floor(Math.random() * 97) },
+    { query: body.message, categories: body.categories, exploration: body.exploration, limit: 12, intentHint: body.intentHint },
+    { env, http, profile, excludeIds: exclude, evidence, previousIntent, previousResults, blockedProviders: blocked, collaborative: collaborativeFn(db), embed: embedder(), storedEmbeddings, catalogFallback: catalogFallbackFn(userId), seed: previousIds.length + Math.floor(Math.random() * 97) },
   );
-  await markQuota(result.quotaErrors);
+  await markQuota(result.quotaErrors, result.quotaRetryAfter);
 
   // Memory: explicit statements → long-term profile; expressed mood → short-term context only.
   for (const s of result.intent.statements) profile = applyStatement(profile, s.subject, s.concepts, s.polarity);
@@ -67,7 +67,7 @@ serve(async (req) => {
     providers: result.providers,
   };
   await db.from('chat_messages').insert({ session_id: sessionId, user_id: userId, role: 'assistant', content: reply.slice(0, 4000) || '…', payload });
-  const { candidates: _c, quotaErrors: _q, ...rest } = result;
+  const { candidates: _c, quotaErrors: _q, quotaRetryAfter: _r, ...rest } = result;
   await db.from('chat_sessions').update({ last_intent: { ...rest.intent, statements: [] }, last_result_ids: ids.length ? ids : previousIds }).eq('id', sessionId);
   if (recs.length) {
     await serviceClient().from('recommendation_events').insert(recs.map((r, i) => ({ user_id: userId, item_id: r.item.id, source: 'chat', position: i, score: r.score, explanation: r.explanation.text.slice(0, 500) })));

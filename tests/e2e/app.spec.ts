@@ -29,15 +29,21 @@ test('full journey: signup → onboarding → discover → feedback → chat →
 
   // Discover feed with real items + explanations
   await expect(page).toHaveURL(/\/$/);
-  await expect(page.getByText('Tester,')).toBeVisible();
-  const cards = page.locator('article');
-  await expect(cards.first()).toBeVisible({ timeout: 60_000 });
-  expect(await cards.count()).toBeGreaterThan(2);
-  await expect(cards.first().getByTestId('reason')).not.toBeEmpty();
+  await expect(page.getByText(/, Tester/)).toBeVisible();
+  const tiles = page.locator('button[aria-label$="Open details"]');
+  await expect(tiles.first()).toBeVisible({ timeout: 60_000 });
+  expect(await tiles.count()).toBeGreaterThan(2);
+
+  // Tapping a tile opens the detail sheet with an explanation and actions
+  await tiles.first().click();
+  const sheet = page.getByRole('dialog');
+  await expect(sheet.getByTestId('reason')).not.toBeEmpty();
 
   // Feedback is persisted and learned
-  await cards.first().getByRole('button', { name: 'Save' }).click();
+  await sheet.getByRole('button', { name: 'Save for later' }).click();
   await expect(page.getByRole('status').getByText(/Saved to your library/)).toBeVisible();
+  await sheet.getByRole('button', { name: 'Close details' }).click();
+  await expect(sheet).toBeHidden();
 
   // Exploration slider changes the request
   await page.getByRole('button', { name: /Balanced|Familiar|Adventurous/ }).first().click();
@@ -75,9 +81,11 @@ test('full journey: signup → onboarding → discover → feedback → chat →
 test('library and taste sync across devices (separate browser context, same account)', async ({ page, browser }) => {
   await signUp(page);
   await page.getByRole('button', { name: 'Skip for now' }).click();
-  await expect(page.locator('article').first()).toBeVisible({ timeout: 60_000 });
-  const title = (await page.locator('article h3').first().textContent())!;
-  await page.locator('article').first().getByRole('button', { name: 'Like' }).click();
+  await expect(page.locator('button[aria-label$="Open details"]').first()).toBeVisible({ timeout: 60_000 });
+  await page.locator('button[aria-label$="Open details"]').first().click();
+  const sheet = page.getByRole('dialog');
+  const title = (await sheet.locator('h3').first().textContent())!;
+  await sheet.getByRole('button', { name: 'Like' }).click();
   await expect(page.getByRole('status').getByText(/Liked/)).toBeVisible();
 
   // "Second device": a fresh context restored only from the auth session

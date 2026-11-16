@@ -3,7 +3,7 @@ import { AnimatePresence, motion } from 'motion/react';
 import { ArrowUpRight, Bookmark, Check, Clock, Film, FolderPlus, Heart, MoreHorizontal, Pause, Play, Sparkles, Star, ThumbsDown } from 'lucide-react';
 import type { AnalyzedItem, Explanation, ScoreBreakdown } from '@shared/types.ts';
 import { conceptLabel } from '@shared/engine/concepts.ts';
-import { CATEGORY_META, formatDuration, KIND_LABEL, PROVIDER_LABEL, year } from '../lib/meta';
+import { CATEGORY_META, displayTitle, formatDuration, KIND_LABEL, PROVIDER_LABEL, year } from '../lib/meta';
 import { api } from '../lib/api';
 import { useFeedback, useLibraryMap } from '../hooks/data';
 import { EmbedPlayer, YouTubePlayer } from './Player';
@@ -19,6 +19,8 @@ interface Props {
   onDismiss?: (id: string) => void;
   /** Large hero presentation (Discover's top pick). */
   featured?: boolean;
+  /** Start the player immediately (one tap from a tile). */
+  autoPlay?: boolean;
 }
 
 /** Hero artwork width by shape: posters stay narrow, squares medium, videos wide. */
@@ -93,10 +95,10 @@ function MenuItem({ icon: Icon, children, onClick, href }: { icon: React.Compone
   );
 }
 
-export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard({ item, explanation, score, trajectoryStep, source = 'feed', onDismiss, featured }, ref) {
+export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard({ item, explanation, score, trajectoryStep, source = 'feed', onDismiss, featured, autoPlay }, ref) {
   const lib = useLibraryMap().get(item.id);
   const feedback = useFeedback();
-  const [playing, setPlaying] = useState(false);
+  const [playing, setPlaying] = useState(!!autoPlay && !!item.embed);
   const [trailer, setTrailer] = useState<string | null | undefined>(undefined);
   const [menu, setMenu] = useState(false);
   const [details, setDetails] = useState(false);
@@ -145,6 +147,8 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
   const facts = [year(item.releaseDate), formatDuration(item.durationSec)].filter(Boolean) as string[];
   const reason = explanation?.reasons[0]?.detail ?? explanation?.text;
   const stacked = featured || item.category === 'youtube';
+  // In the detail view a playing video takes the top of the sheet (where the artwork was).
+  const videoFirst = !!featured && playing && (item.embed?.type === 'youtube' || !!trailer);
 
   return (
     <motion.article
@@ -156,7 +160,9 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
       transition={{ duration: 0.42, ease: [0.22, 1, 0.36, 1] }}
       className={`group relative flex flex-col rounded-[var(--radius-card)] border border-line bg-ink-2/85 p-3 shadow-[0_24px_60px_-36px_rgba(0,0,0,0.9)] transition-colors duration-200 hover:border-white/[0.13] ${featured ? 'md:p-5' : ''}`}
     >
+      {videoFirst && <div className="mb-4 overflow-hidden rounded-2xl">{renderPlayer()}</div>}
       <div className={featured ? 'md:flex md:gap-7' : ''}>
+      {!videoFirst && (
       <div className={stacked ? (featured ? `${FEATURED_ART[item.category]} md:shrink-0` : '') : 'flex gap-3.5'}>
         <div className={stacked ? 'relative' : `relative shrink-0 ${item.category === 'music' || item.category === 'podcasts' ? 'w-[36%]' : 'w-[31%]'}`}>
           <Artwork item={item} />
@@ -173,6 +179,7 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
         </div>
         {!stacked && renderText()}
       </div>
+      )}
       {stacked && (
         <div className={featured ? 'mt-4 flex min-w-0 flex-1 flex-col md:mt-1 md:py-1' : 'mt-3'}>
           {renderText()}
@@ -182,9 +189,9 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
       </div>
 
       <AnimatePresence initial={false}>
-        {playing && (item.embed || trailer) && (
+        {playing && !videoFirst && (item.embed || trailer) && (
           <motion.div initial={{ height: 0, opacity: 0 }} animate={{ height: 'auto', opacity: 1 }} exit={{ height: 0, opacity: 0 }} transition={{ duration: 0.28 }} className="overflow-hidden">
-            <div className="pt-3">{trailer ? <YouTubePlayer videoId={trailer} title={`${item.title} trailer`} /> : item.embed && <EmbedPlayer embed={item.embed} title={item.title} onPlay={onPlayed} />}</div>
+            <div className="pt-3">{renderPlayer()}</div>
           </motion.div>
         )}
       </AnimatePresence>
@@ -230,17 +237,21 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
     </motion.article>
   );
 
+  function renderPlayer() {
+    return trailer ? <YouTubePlayer videoId={trailer} title={`${item.title} trailer`} /> : item.embed && <EmbedPlayer embed={item.embed} title={item.title} onPlay={onPlayed} />;
+  }
+
   function renderActions() {
     return (
-      <div className={`flex flex-wrap items-center ${featured ? 'mt-4 gap-y-2' : 'mt-2'}`}>
+      <div className={`flex items-center ${featured ? 'mt-4' : 'mt-2'}`}>
         {featured && (
           playable || canTrailer ? (
-            <button type="button" onClick={togglePlay} className="mr-2 inline-flex h-11 items-center gap-2 rounded-full bg-bone px-5 text-sm font-semibold text-ink shadow-[0_10px_30px_-12px_rgba(239,232,220,0.5)] transition-transform active:scale-95">
+            <button type="button" onClick={togglePlay} className="mr-1.5 inline-flex h-11 shrink-0 items-center gap-2 rounded-full bg-bone px-4 text-sm font-semibold text-ink shadow-[0_10px_30px_-12px_rgba(239,232,220,0.5)] transition-transform active:scale-95">
               {playing ? <Pause className="h-4 w-4 fill-current" aria-hidden /> : canTrailer && !playable ? <Film className="h-4 w-4" aria-hidden /> : <Play className="h-4 w-4 fill-current" aria-hidden />}
               {playing ? 'Close player' : canTrailer && !playable ? 'Watch trailer' : 'Play'}
             </button>
           ) : (
-            <a href={item.externalUrl} target="_blank" rel="noreferrer" onClick={() => send('open')} className="mr-2 inline-flex h-11 items-center gap-2 rounded-full bg-bone px-5 text-sm font-semibold text-ink transition-transform active:scale-95">
+            <a href={item.externalUrl} target="_blank" rel="noreferrer" onClick={() => send('open')} className="mr-1.5 inline-flex h-11 shrink-0 items-center gap-2 rounded-full bg-bone px-4 text-sm font-semibold text-ink transition-transform active:scale-95">
               Open in {PROVIDER_LABEL[item.provider]} <ArrowUpRight className="h-4 w-4" aria-hidden />
             </a>
           )
@@ -255,7 +266,7 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
           <ThumbsDown className="h-[19px] w-[19px]" />
         </ActionButton>
         {explanation && (
-          <button type="button" onClick={() => setDetails((d) => !d)} aria-expanded={details} className="ml-1 h-11 rounded-full px-3 text-xs text-dim transition-colors hover:text-bone">
+          <button type="button" onClick={() => setDetails((d) => !d)} aria-expanded={details} className="ml-0.5 h-11 shrink-0 rounded-full px-2 text-xs whitespace-nowrap text-dim transition-colors hover:text-bone">
             {details ? 'Hide why' : 'Why this?'}
           </button>
         )}
@@ -312,7 +323,7 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
             {PROVIDER_LABEL[item.provider]} <ArrowUpRight className="h-3 w-3" aria-hidden />
           </a>
         </div>
-        <h3 className={`mt-1.5 font-display leading-[1.18] font-semibold text-bone [overflow-wrap:anywhere] ${featured ? 'line-clamp-3 text-[26px] md:text-[34px]' : 'line-clamp-3 text-[18px]'}`}>{item.title}</h3>
+        <h3 className={`mt-1.5 font-display leading-[1.18] font-semibold text-bone [overflow-wrap:anywhere] ${featured ? 'line-clamp-3 text-[26px] md:text-[34px]' : 'line-clamp-3 text-[18px]'}`} title={item.title}>{displayTitle(item)}</h3>
         {item.creators.length > 0 && <p className={`mt-1 truncate text-mist ${featured ? 'text-base' : 'text-[13.5px]'}`}>{item.creators.slice(0, 2).join(', ')}</p>}
         {(facts.length > 0 || rating) && (
           <p className="mt-1 flex items-center gap-1.5 text-xs text-dim">

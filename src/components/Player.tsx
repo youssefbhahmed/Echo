@@ -42,7 +42,6 @@ export function YouTubePlayer({ videoId, title, onPlay }: { videoId: string; tit
       host.current.appendChild(el);
       player = new window.YT.Player(el, {
         videoId,
-        host: 'https://www.youtube-nocookie.com',
         width: '100%',
         height: '100%',
         playerVars: { autoplay: 1, rel: 0, modestbranding: 1, playsinline: 1 },

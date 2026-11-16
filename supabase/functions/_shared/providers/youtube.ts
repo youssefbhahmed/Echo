@@ -54,7 +54,7 @@ async function searchYouTube(p: SearchParams, { http, env }: ProviderContext, as
   const key = env('YOUTUBE_API_KEY')!;
   // Podcasts: full episodes ("<topic> podcast", 20+ min, English by default).
   const query = asPodcast && !/podcast/i.test(p.query) ? `${p.query} podcast` : p.query;
-  const params = new URLSearchParams({ part: 'snippet', type: 'video', q: query, maxResults: String(Math.min(Math.max(p.limit ?? 15, 20), 25)), videoEmbeddable: 'true', safeSearch: 'moderate' });
+  const params = new URLSearchParams({ part: 'snippet', type: 'video', q: query, maxResults: String(Math.min(Math.max(p.limit ?? 15, 20), 25)), videoEmbeddable: 'true', videoSyndicated: 'true', safeSearch: 'moderate' });
   const lang = p.language ?? (asPodcast ? (env('YOUTUBE_PODCAST_LANGUAGE') ?? 'en') : undefined);
   if (lang) params.set('relevanceLanguage', lang);
   if (env('YOUTUBE_REGION')) params.set('regionCode', env('YOUTUBE_REGION')!.toUpperCase());

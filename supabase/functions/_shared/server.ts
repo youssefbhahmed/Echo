@@ -172,6 +172,22 @@ export async function getItems(ids: string[]): Promise<AnalyzedItem[]> {
   return ids.map((id) => map.get(id)).filter((x): x is AnalyzedItem => !!x);
 }
 
+/** Stored items from one provider, minus what this user was shown in the last two days. */
+export function catalogFallbackFn(userId: string) {
+  return async (provider: string, categories: string[]): Promise<AnalyzedItem[]> => {
+    const db = serviceClient();
+    const since = new Date(Date.now() - 2 * 86400_000).toISOString();
+    const [items, recent, excluded] = await Promise.all([
+      db.from('content_items').select(ITEM_COLUMNS).eq('provider', provider).in('category', categories).not('embed', 'is', null).eq('stale', false).order('updated_at', { ascending: false }).limit(1500),
+      db.from('recommendation_events').select('item_id').eq('user_id', userId).gte('created_at', since).limit(3000),
+      excludedIds(db, userId),
+    ]);
+    // Not shown in the last two days, not already liked/saved/finished, not disliked.
+    const shown = new Set([...(recent.data ?? []).map((r) => r.item_id as string), ...excluded]);
+    return (items.data ?? []).map((r) => rowToItem(r as Record<string, unknown>)).filter((i) => !shown.has(i.id)).slice(0, 150);
+  };
+}
+
 /** Items the user disliked or finished — never recommend them again. */
 export async function excludedIds(db: SupabaseClient, userId: string): Promise<Set<string>> {
   const [inter, lib] = await Promise.all([
@@ -201,11 +217,13 @@ export async function blockedProviders(): Promise<Set<import('./types.ts').Provi
   return new Set((data ?? []).map((r) => r.provider as import('./types.ts').ProviderId));
 }
 
-export async function markQuota(providers: string[]) {
+export async function markQuota(providers: string[], retryAfter: Partial<Record<string, number>> = {}) {
   if (!providers.length) return;
-  // YouTube quotas reset at midnight Pacific time; block for a conservative window.
-  const until = new Date(Date.now() + 6 * 3600_000).toISOString();
-  await serviceClient().from('provider_status').upsert(providers.map((p) => ({ provider: p, blocked_until: until, last_error: 'quota', updated_at: new Date().toISOString() })));
+  const now = Date.now();
+  // YouTube daily quotas reset at midnight Pacific time (conservative 6h window). Others say how long
+  // to wait (Retry-After); without a hint, back off for 2 minutes rather than a whole day.
+  const untilFor = (p: string) => new Date(now + (retryAfter[p] ? Math.min(retryAfter[p]!, 86400) * 1000 : p === 'youtube' ? 6 * 3600_000 : 120_000)).toISOString();
+  await serviceClient().from('provider_status').upsert([...new Set(providers)].map((p) => ({ provider: p, blocked_until: untilFor(p), last_error: 'quota', updated_at: new Date(now).toISOString() })));
 }
 
 export function collaborativeFn(db: SupabaseClient) {

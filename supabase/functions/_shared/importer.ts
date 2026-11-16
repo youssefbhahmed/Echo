@@ -140,7 +140,6 @@ export function applyLibraryImport(input: TasteProfile, items: AnalyzedItem[], a
     const share = sum / wTotal; // average presence across the library (0..1)
     if (share < 0.03) continue;
     const add = round(Math.min(1.6, share * 4));
-    concepts[k] = round(clamp((concepts[k] ?? 0) + add));
     musicConcepts[k] = round(clamp((musicConcepts[k] ?? 0) + add));
   }
   const genres = { ...profile.genres };

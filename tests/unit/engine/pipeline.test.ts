@@ -19,6 +19,21 @@ function fakeFetch(log: string[]) {
 }
 
 describe('runPipeline (keyless providers, mocked network)', () => {
+  it('keeps the Videos shelf alive from the stored catalog when YouTube is out of quota', async () => {
+    const { make } = await import('./fixtures');
+    const stored = [
+      make({ title: 'Deep Ocean Life', category: 'youtube', creators: ['BBC Earth'], description: 'Nature documentary about the deep ocean' }),
+      make({ title: 'History of Rome', category: 'youtube', creators: ['Kings and Generals'], description: 'Documentary about the Roman empire' }),
+    ].map((i) => ({ ...i, embed: { type: 'youtube' as const, videoId: 'abcdefghijk' } }));
+    const env = (k: string) => (k === 'YOUTUBE_API_KEY' ? 'test' : undefined);
+    const res = await runPipeline({ categories: ['youtube'], limit: 4 }, {
+      env, http: createHttp(new MemoryCache(), fakeFetch([])), profile: emptyProfile(),
+      blockedProviders: new Set(['youtube']), catalogFallback: async () => stored,
+    });
+    expect(res.recommendations.map((r) => r.item.title).sort()).toEqual(['Deep Ocean Life', 'History of Rome']);
+    expect(res.pipeline.some((p) => p.step === 'fallback')).toBe(true);
+  });
+
   it('runs all steps for a conversational request and returns grounded, real-catalog items', async () => {
     const log: string[] = [];
     const http = createHttp(new MemoryCache(), fakeFetch(log));
@@ -96,6 +111,32 @@ describe('mergeHint guards against model guesses', () => {
 });
 
 describe('AI music picks', () => {
+  it('stops calling Spotify on a long rate-limit penalty, reports Retry-After and falls back to stored songs', async () => {
+    const searches: string[] = [];
+    const fake = (async (u: string, init?: RequestInit) => {
+      const url = String(u);
+      if (url.includes('accounts.spotify.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
+      if (url.includes('/chat/completions')) {
+        const body = JSON.parse(String(init?.body));
+        const items = Array.from({ length: 16 }, (_, i) => ({ artist: `Artist ${i}`, track: `Song ${i}` }));
+        return new Response(JSON.stringify({ choices: [{ message: { content: /curator/.test(body.messages[0].content) ? JSON.stringify({ items }) : '{}' } }] }));
+      }
+      if (url.includes('/v1/search')) {
+        searches.push(url);
+        return new Response('rate limited', { status: 429, headers: { 'retry-after': '68195' } });
+      }
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    const { make } = await import('./fixtures');
+    const stored = [make({ title: 'Stored Song', category: 'music', creators: ['Someone'], genres: ['Indie'] })].map((i) => ({ ...i, provider: 'spotify' as const, embed: { type: 'spotify' as const, uri: 'spotify:track:abc', kind: 'track' as const } }));
+    const env = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b', AI_BASE_URL: 'https://ai.test/v1', AI_MODEL: 'm' } as Record<string, string>)[n];
+    const res = await runPipeline({ categories: ['music'], limit: 5 }, { env, http: createHttp(new MemoryCache(), fake), profile: emptyProfile(), catalogFallback: async () => stored });
+    expect(searches.length).toBeLessThanOrEqual(3);
+    expect(res.quotaErrors).toContain('spotify');
+    expect(res.quotaRetryAfter.spotify).toBe(68195);
+    expect(res.recommendations.map((r) => r.item.title)).toContain('Stored Song');
+  });
+
   it('only shows LLM music picks that verify on Spotify, and filters stock music', async () => {
     const calls: string[] = [];
     const fake = (async (u: string, init?: RequestInit) => {
@@ -121,7 +162,9 @@ describe('AI music picks', () => {
     const titles = res.recommendations.map((r) => r.item.title);
     expect(titles).toContain('Holocene');
     expect(titles).not.toContain('Fake Song');
-    expect(titles[titles.length - 1]).toBe('Deep Sleep 432Hz Frequencies');
+    // With the curator on, Spotify mood-word searches (stock "sleep" filler) aren't even made.
+    expect(titles).not.toContain('Deep Sleep 432Hz Frequencies');
+    expect(calls.filter((u) => u.includes('/v1/search') && !/Holocene|Fake|Bon|Imaginary/.test(decodeURIComponent(u)))).toEqual([]);
     const holo = res.recommendations.find((r) => r.item.title === 'Holocene')!;
     expect(holo.explanation.text).toMatch(/AI curator.*verified on Spotify/);
     expect(res.pipeline.find((p) => p.step === 'music-ai')?.detail).toMatch(/1\/2/);

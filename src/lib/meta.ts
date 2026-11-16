@@ -27,6 +27,13 @@ export function formatDuration(sec?: number): string | null {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
+/** YouTube titles carry channel/SEO suffixes ("Title | British Short Film | Sci-Fi"): show the real title. */
+export function displayTitle(item: { title: string; provider: string }): string {
+  if (item.provider !== 'youtube') return item.title;
+  const first = item.title.split(/\s+[|•]\s+|\s+[-–—]\s+(?=[A-Z0-9])/)[0].trim();
+  return first.length >= 3 ? first : item.title;
+}
+
 export function year(d?: string): string | null {
   return d ? d.slice(0, 4) : null;
 }
