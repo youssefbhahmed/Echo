@@ -130,6 +130,8 @@ export interface MusicPick {
   artist: string;
   track?: string;
   album?: string;
+  /** Curator's short style label (e.g. "alternative rock", "afro house"). */
+  style?: string;
 }
 
 /**
@@ -150,11 +152,11 @@ export async function llmMusicPicks(description: string, cfg: AiConfig, http: Ht
         messages: [
           {
             role: 'system',
-            content: `You are a music curator with deep, eclectic knowledge. Return ONLY JSON: {"items":[{"artist":"...","track":"..."} or {"artist":"...","album":"..."}]}.
+            content: `You are a music curator with deep, eclectic knowledge. Return ONLY JSON: {"items":[{"artist":"...","track":"...","style":"..."} or {"artist":"...","album":"...","style":"..."}]} where "style" is a short genre label (e.g. "alternative rock", "east coast hip-hop", "afro house", "raï").
 Give ${n} real, existing recordings by acclaimed or cult artists that fit the description. Mix eras, countries and genres; include lesser-known gems alongside classics; at most one item per artist.
 Never suggest generic sleep/meditation/relaxation/study/frequency/stock music, compilations or "best of" collections.
 If the description mentions an arc (from one mood to another), list the items in listening order along that arc.
-When the description lists styles the listener loves, at least two-thirds of the picks must come from those styles (favouring the ones they are drifting toward lately), sung in the languages they listen in; the rest may be adjacent discoveries.`,
+When the description gives a target mix with percentages, follow those proportions across the picks (round sensibly) and never over-represent one region or language beyond its share; never pick from styles listed under "avoid".`,
           },
           { role: 'user', content: `Description: ${description.slice(0, 600)}${opts.avoid?.length ? `\nAvoid: ${opts.avoid.join(', ').slice(0, 200)}` : ''}` },
         ],
@@ -171,9 +173,9 @@ When the description lists styles the listener loves, at least two-thirds of the
   const seen = new Set<string>();
   return (json.items ?? [])
     .map((x) => (x && typeof x === 'object' ? (x as Record<string, unknown>) : {}))
-    .map((x) => ({ artist: str(x.artist), track: str(x.track), album: str(x.album) }))
+    .map((x) => ({ artist: str(x.artist), track: str(x.track), album: str(x.album), style: str(x.style)?.toLowerCase().slice(0, 40) }))
     .filter((x) => !!x.artist && !!(x.track || x.album))
-    .map((x) => ({ artist: x.artist!, ...(x.track ? { track: x.track } : { album: x.album }) }) as MusicPick)
+    .map((x) => ({ artist: x.artist!, ...(x.track ? { track: x.track } : { album: x.album }), ...(x.style ? { style: x.style } : {}) }) as MusicPick)
     .filter((x) => !seen.has(x.artist.toLowerCase()) && seen.add(x.artist.toLowerCase()))
     .slice(0, n);
 }

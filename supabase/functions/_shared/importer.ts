@@ -257,11 +257,11 @@ export function computeMusicDna(tracks: ImportedTrack[], now = new Date()): Musi
 }
 
 /** Brief for the AI music curator built only from generic taste words. */
-export function musicBrief(dna: MusicDna): string {
+export function musicBrief(dna: MusicDna, opts: { styles?: boolean } = {}): string {
   const eclectic = dna.distinctArtists / Math.max(1, dna.tracks) > 0.8 ? 'very eclectic (rarely repeats an artist; loves discovering new ones)' : 'has favourite artists they return to';
   return [
-    `loves ${dna.styles.slice(0, 10).join(', ')}`,
-    dna.recentStyles.length ? `lately drifting toward ${dna.recentStyles.slice(0, 6).join(', ')}` : '',
+    opts.styles === false ? '' : `loves ${dna.styles.slice(0, 10).join(', ')}`,
+    opts.styles === false ? '' : dna.recentStyles.length ? `lately also into ${dna.recentStyles.slice(0, 6).join(', ')}` : '',
     dna.decades.length ? `mostly ${dna.decades.join(' and ')} releases` : '',
     `listens in ${dna.languages.join(', ')}`,
     `mood: often ${dna.mood.topQuadrant}, danceability ${dna.mood.danceability}`,

@@ -9,6 +9,7 @@ import type { Env, Provider } from '../providers/types.ts';
 import { aiConfig, llmEnrichIntent, llmMusicPicks, mergeHint, sanitizeHint } from './ai.ts';
 import { verifySpotifyPicks } from '../providers/spotify.ts';
 import { musicBrief, topStyles } from '../importer.ts';
+import { familyMix, mixBrief } from './music.ts';
 import { hashKey } from '../providers/http.ts';
 import { analyzeItem } from './analyze.ts';
 import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
@@ -203,11 +204,14 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     const musicConcepts = effectiveHasQuery ? concepts : concepts.filter((c) => CONCEPT_BY_ID[c].group === 'mood' || SOUND_THEMES.has(c));
     const words = musicConcepts.map((c) => conceptLabel(c).toLowerCase()).join(', ');
     const desc = effectiveHasQuery
-      ? `${intent.rawText}${words ? ` (themes: ${words})` : ''}${deps.profile.music ? `. Listener background: ${musicBrief(deps.profile.music)}` : ''}${intent.trajectory ? `; arc from ${intent.trajectory.from} to ${intent.trajectory.to}` : ''}; ${exploration >= 0.6 ? 'favour lesser-known, distinctive artists over chart hits' : exploration <= 0.3 ? 'well-loved classics are welcome' : 'mix beloved classics with lesser-known gems; avoid obvious chart hits'}`
+      ? `${intent.rawText}${words ? ` (themes: ${words})` : ''}${deps.profile.music ? `. Listener background: ${musicBrief(deps.profile.music, { styles: false })}` : ''}${intent.trajectory ? `; arc from ${intent.trajectory.from} to ${intent.trajectory.to}` : ''}; ${exploration >= 0.6 ? 'favour lesser-known, distinctive artists over chart hits' : exploration <= 0.3 ? 'well-loved classics are welcome' : 'mix beloved classics with lesser-known gems; avoid obvious chart hits'}`
       : (() => {
           // Style words learned from the user's library (generic genre terms, never track/artist names).
           const styles = topStyles(deps.profile, 8);
-          const base = deps.profile.music ? `a listener who ${musicBrief(deps.profile.music)}` : styles.length ? `a listener whose favourite styles are ${styles.join(', ')}` : 'a listener';
+          // Live style mix (reflects every like, dislike and removal), plus stable background from the import.
+          const mix = mixBrief(familyMix(deps.profile));
+          const bg = deps.profile.music ? musicBrief(deps.profile.music, { styles: false }) : '';
+          const base = mix ? `a listener with this ${mix}${bg ? `; background: ${bg}` : ''}` : styles.length ? `a listener whose favourite styles are ${styles.join(', ')}` : 'a listener';
           const reach = exploration >= 0.6
             ? 'suggest artists from neighbouring styles and scenes they probably do not know yet'
             : exploration <= 0.3
@@ -218,7 +222,8 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     const avoid = [...deps.profile.explicit.dislikes, ...intent.excludes.filter((x) => !CONCEPT_BY_ID[x])];
     const picks = await llmMusicPicks(desc, ai, deps.http, { avoid, count: 16, cacheKey: `ai:music:${await hashKey(`${desc}|${avoid.join(',')}`)}:${(deps.seed ?? 0) % 4}` });
     const verified = await verifySpotifyPicks(picks, { http: deps.http, env: deps.env });
-    const items = verified.map((i, idx) => ({ ...i, popularity: 0.75, metadata: { ...(i.metadata ?? {}), aiPick: true, aiOrder: idx, aiFor: words, retrievedBy: `ai:${i.creators[0] ?? i.id}`, retrievedFor: concepts.slice(0, 3) } }));
+    const styleOf = new Map(picks.map((pk) => [pk.artist.toLowerCase(), pk.style]));
+    const items = verified.map((i, idx) => ({ ...i, genres: i.genres.length ? i.genres : [styleOf.get((i.creators[0] ?? '').toLowerCase()) ?? ''].filter(Boolean), popularity: 0.75, metadata: { ...(i.metadata ?? {}), aiPick: true, aiOrder: idx, aiFor: words, retrievedBy: `ai:${i.creators[0] ?? i.id}`, retrievedFor: concepts.slice(0, 3) } }));
     return { items, detail: `${verified.length}/${picks.length} AI music picks verified on Spotify` };
   })().catch((e) => ({ items: [] as ContentItem[], detail: `AI music picks skipped (${(e as Error).message.slice(0, 60)})` }));
   const settled = await Promise.allSettled(plan.map((q) => q.provider.search(q.params, { http: deps.http, env: deps.env })));
