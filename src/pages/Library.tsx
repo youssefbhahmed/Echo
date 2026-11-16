@@ -21,6 +21,8 @@ export default function LibraryPage() {
   const [q, setQ] = useState('');
   const [category, setCategory] = useState<Category | 'all'>('all');
   const [openCollection, setOpenCollection] = useState<string | null>(null);
+  const [shown, setShown] = useState(30);
+  useEffect(() => setShown(30), [tab, category, q, openCollection]);
   const refreshed = useRef(false);
 
   // YouTube policy: refresh stored video metadata older than ~30 days when it is displayed.
@@ -128,9 +130,18 @@ export default function LibraryPage() {
             {lib.isLoading ? <Listening label="Opening your library…" /> : rows.length === 0 ? (
               <p className="py-16 text-center text-mist">{q ? 'No matches.' : 'Nothing here yet. Save, like or finish things from Discover and Echo AI.'}</p>
             ) : (
+              <>
               <div className="mt-5 grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
-                {rows.map((r) => <MediaCard key={r.item_id} item={dbToItem(r.content_items!)} source="library" />)}
+                {rows.slice(0, shown).map((r) => <MediaCard key={r.item_id} item={dbToItem(r.content_items!)} source="library" />)}
               </div>
+              {rows.length > shown && (
+                <div className="mt-6 flex justify-center">
+                  <button type="button" onClick={() => setShown((n) => n + 30)} className="rounded-full border border-line px-5 py-2.5 text-sm text-mist hover:text-bone">
+                    Show more ({rows.length - shown} left)
+                  </button>
+                </div>
+              )}
+              </>
             )}
           </>
         )}

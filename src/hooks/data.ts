@@ -45,18 +45,31 @@ export function useLibrary() {
     queryKey: ['library'],
     enabled: !!session,
     queryFn: async () => {
-      const { data, error } = await supabase.from('library_items').select('*, content_items(*)').order('updated_at', { ascending: false }).limit(5000);
-      if (error) throw error;
-      return (data ?? []) as LibraryRow[];
+      // The API returns at most 1,000 rows per request, so page through the whole library.
+      const all: LibraryRow[] = [];
+      for (let from = 0; from < 20000; from += 1000) {
+        const { data, error } = await supabase.from('library_items').select('*, content_items(*)').order('updated_at', { ascending: false }).range(from, from + 999);
+        if (error) throw error;
+        all.push(...((data ?? []) as LibraryRow[]));
+        if (!data || data.length < 1000) break;
+      }
+      return all;
     },
     staleTime: 15_000,
   });
 }
 
+const mapCache = new WeakMap<LibraryRow[], Map<string, LibraryRow>>();
+const EMPTY: LibraryRow[] = [];
+
+/** Library rows by item id. Built once per library snapshot and shared by every card. */
 export function useLibraryMap() {
-  const lib = useLibrary();
-  const map = new Map<string, LibraryRow>();
-  for (const r of lib.data ?? []) map.set(r.item_id, r);
+  const rows = useLibrary().data ?? EMPTY;
+  let map = mapCache.get(rows);
+  if (!map) {
+    map = new Map(rows.map((r) => [r.item_id, r]));
+    mapCache.set(rows, map);
+  }
   return map;
 }
 

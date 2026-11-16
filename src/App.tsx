@@ -1,7 +1,7 @@
 import { lazy, Suspense } from 'react';
 import { Navigate, Route, Routes, useLocation } from 'react-router-dom';
 import { useAuth } from './lib/auth';
-import { supabaseConfigured } from './lib/supabase';
+import { supabase, supabaseConfigured } from './lib/supabase';
 import { useProfile } from './hooks/data';
 import { Shell } from './components/Shell';
 import { Listening } from './components/Echo';
@@ -26,7 +26,10 @@ function Gate({ children }: { children: React.ReactNode }) {
       <div className="mx-auto max-w-md px-6 py-24 text-center">
         <p className="font-display text-2xl">ECHO can’t reach its server right now.</p>
         <p className="mt-2 text-sm text-mist">{(profile.error as Error).message}</p>
-        <button type="button" onClick={() => profile.refetch()} className="mt-5 rounded-full bg-ember px-5 py-2.5 font-semibold text-ink">Try again</button>
+        <div className="mt-5 flex justify-center gap-3">
+          <button type="button" onClick={() => profile.refetch()} className="rounded-full bg-ember px-5 py-2.5 font-semibold text-ink">Try again</button>
+          <button type="button" onClick={() => supabase.auth.signOut({ scope: 'local' })} className="rounded-full border border-line px-5 py-2.5 text-bone">Sign in again</button>
+        </div>
       </div>
     );
   if (profile.data && !profile.data.account.onboarded_at && loc.pathname !== '/welcome') return <Navigate to="/welcome" replace />;

@@ -25,6 +25,11 @@ async function call<T>(name: string, body?: unknown, method: 'GET' | 'POST' = 'P
     throw new ApiError(0, navigator.onLine ? 'ECHO’s server could not be reached.' : 'You are offline. Saved items are still available.', 'network');
   }
   const json = await res.json().catch(() => ({}));
+  if (res.status === 401) {
+    // Session revoked or expired elsewhere: clear it locally so the app returns to sign-in.
+    await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined);
+    throw new ApiError(401, 'Your session expired. Please sign in again.', 'unauthenticated');
+  }
   if (!res.ok) throw new ApiError(res.status, json.error ?? `Request failed (${res.status})`, json.code);
   return json as T;
 }
