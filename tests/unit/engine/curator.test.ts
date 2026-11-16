@@ -152,6 +152,60 @@ describe('music curator brief', () => {
   });
 });
 
+describe('featured artists in curator picks', () => {
+  it('asks for the clean official title and a "feat" list in both the lane and the request prompts', () => {
+    const lanes = curatorPrompt({ lanes: [{ id: 'edm', label: 'EDM', descriptors: ['edm'], fromYear: 2010, regional: false, count: 9 }] });
+    const request = curatorPrompt({ request: { text: 'songs for a night drive', count: 10, vocals: true, familiar: true } });
+    for (const p of [lanes, request]) {
+      expect(p.system).toMatch(/"feat":\["<featured artist>"\]/);
+      expect(p.system).toMatch(/"track" is the official song title WITHOUT any "\(feat\. …\)", "\(with …\)" or version part/);
+      expect(p.system).toMatch(/"artist" is the main credited artist only/);
+      expect(p.system).toMatch(/\[\] when none/);
+    }
+  });
+
+  it('reads "feat" as an array or a string, at most 4 names, never the main artist; omitted when empty', () => {
+    const picks = parseMusicPicks(JSON.stringify({ items: [
+      { artist: 'A', track: 'One', feat: ['Guest X'], lane: 'edm' },
+      { artist: 'B', track: 'Two', feat: 'Guest Y, Guest Z & Guest W', lane: 'edm' },
+      { artist: 'C', track: 'Three', feat: [], lane: 'edm' },
+      { artist: 'D', track: 'Four', feat: ['D', 'g1', 'G1', 'g2', 'g3', 'g4', 'g5', 7, ''], lane: 'edm' },
+      { artist: 'E', track: 'Five', featuring: ['Guest V'] },
+    ] }));
+    expect(picks).toEqual([
+      { artist: 'A', track: 'One', feat: ['Guest X'], lane: 'edm' },
+      { artist: 'B', track: 'Two', feat: ['Guest Y', 'Guest Z', 'Guest W'], lane: 'edm' },
+      { artist: 'C', track: 'Three', lane: 'edm' },
+      { artist: 'D', track: 'Four', feat: ['g1', 'g2', 'g3', 'g4'], lane: 'edm' },
+      { artist: 'E', track: 'Five', feat: ['Guest V'] },
+    ]);
+    // A cut-off answer keeps complete songs, arrays included.
+    expect(parseMusicPicks('{"items":[{"artist":"F","track":"Six","feat":["Guest U"],"lane":"edm"},{"artist":"G","tra')).toEqual([{ artist: 'F', track: 'Six', feat: ['Guest U'], lane: 'edm' }]);
+  });
+
+  it('passes the featured artists on to the resolver (ListenBrainz needs the full credit)', async () => {
+    const lbRows: string[] = [];
+    const fetchImpl = (async (u: string, init?: RequestInit) => {
+      const url = String(u);
+      if (url.includes('/chat/completions')) return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ items: [{ artist: 'Main Act', track: 'Glass Coast', feat: ['Guest Star'], lane: 'edm', genre: 'edm' }] }) } }] }));
+      if (url.includes('listenbrainz')) {
+        for (const r of JSON.parse(String(init?.body)) as Array<{ artist_name: string; track_name: string }>) lbRows.push(`${r.artist_name}|${r.track_name}`);
+        return new Response('[]');
+      }
+      if (url.includes('accounts.spotify.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    const { curateMusic } = await import('@shared/engine/curator.ts');
+    const { profile } = importedProfile();
+    const plan = { ...planMusic(profile, { hasQuery: false, seed: 1, total: 3, now: NOW })! };
+    const edm = { ...plan.lanes[0], id: 'edm', label: 'EDM & tropical house' };
+    const one = { ...plan, lanes: [edm], order: ['edm'], targets: { edm: 3 } };
+    const env = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b' } as Record<string, string>)[n];
+    await curateMusic(one, { ai: { baseUrl: 'https://ai.test/v1', model: 'm' }, http: createHttp(new MemoryCache(), fetchImpl), env, profile, searchBlocked: true, now: NOW });
+    expect(lbRows).toContain('Main Act feat. Guest Star|Glass Coast');
+  });
+});
+
 describe('curator model handover', () => {
   it('uses the general model when the music model is over its per-minute limit', async () => {
     const models: string[] = [];

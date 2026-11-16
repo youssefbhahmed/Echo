@@ -131,6 +131,9 @@ export function laneTagOf(item: { metadata?: Record<string, unknown> }): LaneTag
   return l && typeof l.id === 'string' && typeof l.label === 'string' ? { id: l.id, label: l.label } : null;
 }
 
+/** Every lane id this engine writes: the taxonomy lanes plus the request/open pseudo-lanes. */
+export const ENGINE_LANE_IDS: string[] = [...LANES.map((l) => l.id), REQUEST_LANE.id, MIX_LANE.id];
+
 /** A lane id this engine writes (taxonomy lanes plus the request/open pseudo-lanes); older curator picks carry none. */
 export function isEngineLane(id: string | undefined | null): boolean {
   return !!id && (!!LANE_BY_ID[id] || id === REQUEST_LANE.id || id === MIX_LANE.id);
@@ -140,7 +143,7 @@ export function isEngineLane(id: string | undefined | null): boolean {
  * Per-user / per-response fields of a recommended item: rebuilt for every response, never stored in the
  * shared catalog (content_items is readable by every signed-in user) nor carried over from it.
  */
-export const PER_USER_METADATA = ['lastShownAt', 'laneEra', 'laneMood', 'aiOrder', 'fallback'] as const;
+export const PER_USER_METADATA = ['lastShownAt', 'laneEra', 'laneMood', 'aiOrder', 'fallback', 'fallbackTier'] as const;
 
 export function withoutPerUser(meta: Record<string, unknown> | undefined): Record<string, unknown> {
   const out = { ...(meta ?? {}) };

@@ -8,8 +8,8 @@ import { resolveSpotifyPicks, type SpotifyPick } from '../providers/spotify.ts';
 import { musicBrief } from '../importer.ts';
 import { llmMusicPicks, type AiConfig, type CuratorBrief, type CuratorLane } from './ai.ts';
 import {
-  chooseLanes, DEFAULT_MIN_YEAR, effectiveLanes, eraFloor, LANE_BY_ID, laneBlocked, laneKey, laneOfGenre, laneOfGenres, laneReject, laneTag, laneTagOf, laneTargets, MIX_LANE, mixLane, moodPhrase,
-  musicPolicy, popularityPhrase, REQUEST_LANE, withoutPerUser, type LaneRuleContext, type LibrarySongs,
+  chooseLanes, DEFAULT_MIN_YEAR, effectiveLanes, eraFloor, isEngineLane, LANE_BY_ID, laneBlocked, laneKey, laneOfGenre, laneOfGenres, laneReject, laneTag, laneTagOf, laneTargets, MIX_LANE, mixLane,
+  moodPhrase, musicPolicy, popularityPhrase, REQUEST_LANE, withoutPerUser, type LaneRuleContext, type LibrarySongs,
 } from './lanes.ts';
 import { CONCEPT_BY_ID } from './concepts.ts';
 import { categoryQuotas } from './rank.ts';
@@ -254,7 +254,7 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
         }
       }
     }
-    const sp = { artist: p.artist, track: p.track, laneId };
+    const sp: SpotifyPick = { artist: p.artist, track: p.track, laneId, ...(p.feat?.length ? { feat: p.feat } : {}) };
     style.set(sp, plan.mode === 'request' ? p.lane : undefined);
     spicks.push(sp);
   }
@@ -293,55 +293,183 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
   return { items, detail, rateLimitedSec: res.rateLimitedSec, lookupLimitedSec: res.lookupLimitedSec, perLane };
 }
 
+// ───────────── music fallback (stored songs for short lanes) ─────────────
+
+/** Songs shown to the user this recently never come back on a refresh (discover's exclusion window). */
+export const SHOWN_WINDOW_MS = 3 * 86400_000;
+/** A short music-only page may re-show songs last shown at least this long ago. */
+export const RESHOW_AFTER_MS = 86400_000;
+
 /**
- * Fill lanes the curator left short with stored Spotify songs that fit them: same lane (stored
- * lane tag or genres mapped through the taxonomy), passing the era/regional, exclusion and
- * disliked-artist rules, least recently shown first. Never other users' imported libraries.
+ * Where a stored song offered to the fallback comes from (metadata.fallbackTier, set by the server):
+ * 1 = songs ECHO recommended to this user in the last 90 days, not shown in the last 3 days;
+ * 2 = songs ECHO's curator verified for ANY user (the shared catalog);
+ * 3 = this user's songs last shown 24 h–3 days ago (only for a short music-only page).
  */
-export function laneFallback(stored: ContentItem[], plan: MusicPlan, ctx: { profile: TasteProfile; excludeIds?: Set<string>; library?: LibrarySongs; have?: Record<string, number>; now?: Date }): ContentItem[] {
+export type FallbackTier = 1 | 2 | 3;
+
+export function fallbackTierOf(s: { metadata?: Record<string, unknown> }): FallbackTier {
+  const t = s.metadata?.fallbackTier;
+  return t === 2 || t === 3 ? t : 1;
+}
+
+const isTrackId = (id: string) => id.startsWith('spotify:track:');
+
+/**
+ * This user's recently recommended songs the fallback may use, by last-shown time: `own` (tier 1) =
+ * shown before the 3-day window, the `max` shown longest ago first; `reshow` (tier 3, only when asked) =
+ * shown 24 h–3 days ago, least recently shown first. Held-back ids (library, dislikes) never appear.
+ */
+export function historyTiers(lastShown: Map<string, number>, asOf: number, hold: (id: string) => boolean, opts: { reshow?: boolean; max?: number } = {}): { own: string[]; reshow: string[] } {
+  const own: Array<[string, number]> = [];
+  const reshow: Array<[string, number]> = [];
+  for (const [id, at] of lastShown) {
+    if (!isTrackId(id) || hold(id) || !Number.isFinite(at)) continue;
+    const age = asOf - at;
+    if (age >= SHOWN_WINDOW_MS) own.push([id, at]);
+    else if (opts.reshow && age >= RESHOW_AFTER_MS) reshow.push([id, at]);
+  }
+  const oldestFirst = (a: [string, number], b: [string, number]) => a[1] - b[1] || (a[0] < b[0] ? -1 : 1);
+  return { own: own.sort(oldestFirst).slice(0, opts.max ?? 900).map(([id]) => id), reshow: reshow.sort(oldestFirst).map(([id]) => id) };
+}
+
+/**
+ * Tier 2: songs ECHO's lane engine verified for any user (engine lane tag, Spotify track with an embed,
+ * not stale or imported), minus this user's own history and anything held back (library, dislikes,
+ * shown in the last 3 days). Per-user fields of the shared row are dropped.
+ */
+export function sharedPool<T extends ContentItem>(rows: T[], own: Set<string>, hold: (id: string) => boolean): T[] {
+  const out: T[] = [];
+  const seen = new Set<string>();
+  for (const i of rows) {
+    if (seen.has(i.id) || own.has(i.id) || hold(i.id)) continue;
+    if (i.category !== 'music' || i.kind !== 'track' || i.provider !== 'spotify' || !i.embed || i.metadata?.imported || i.metadata?.stale === true) continue;
+    if (!isEngineLane(laneTagOf(i)?.id)) continue;
+    seen.add(i.id);
+    out.push({ ...i, metadata: { ...withoutPerUser(i.metadata), fallbackTier: 2 } });
+  }
+  return out;
+}
+
+/**
+ * Songs a short music-only page may show again: last shown 24 h–3 days before `asOf` (older ones aren't
+ * excluded at all) and not held back for another reason (library, dislikes, skips, the page being replaced).
+ */
+export function reshowableIds(lastShown: Map<string, number>, asOf: number, hold: Set<string>): Set<string> {
+  const out = new Set<string>();
+  for (const [id, at] of lastShown) {
+    const age = asOf - at;
+    if (isTrackId(id) && age >= RESHOW_AFTER_MS && age < SHOWN_WINDOW_MS && !hold.has(id)) out.add(id);
+  }
+  return out;
+}
+
+export interface LaneFallbackContext {
+  profile: TasteProfile;
+  excludeIds?: Set<string>;
+  library?: LibrarySongs;
+  /** Songs the curator already placed per lane. */
+  have?: Record<string, number>;
+  now?: Date;
+  /** The page shows music only: tier-3 songs (shown 24 h–3 days ago) may fill what is still short. */
+  musicOnly?: boolean;
+  /** Ids held back only because they were shown 24 h–3 days ago (see reshowableIds). */
+  reshowable?: Set<string>;
+}
+
+/**
+ * Fill lanes the curator left short with stored Spotify songs that fit them: same lane (stored lane tag
+ * or genres mapped through the taxonomy), passing the era/regional, exclusion, library, blocked-style and
+ * disliked-artist rules. Tier by tier until the lanes are full: (1) songs ECHO recommended to this user,
+ * least recently shown first; (2) songs ECHO's curator verified for anyone; (3) on a music-only page only,
+ * this user's songs shown more than 24 hours ago, least recently shown first. Never imported libraries.
+ */
+export function laneFallback(stored: ContentItem[], plan: MusicPlan, ctx: LaneFallbackContext): ContentItem[] {
   if (plan.mode !== 'lanes') return [];
   const now = ctx.now ?? new Date();
   const rules = laneRules(plan, ctx.profile, ctx.excludeIds, now, ctx.library);
-  const usable = stored.filter((s) => s.category === 'music' && s.kind === 'track' && s.provider === 'spotify' && !!s.embed && !s.metadata?.imported);
-  const fit = (s: ContentItem) => {
+  // Tier 3 follows the same rules except the recently-shown window, for the ids the caller marked re-showable.
+  const reshowable = ctx.musicOnly && ctx.reshowable?.size ? ctx.reshowable : null;
+  const relaxed: LaneRuleContext | null = reshowable ? { ...rules, excludeIds: ctx.excludeIds ? new Set([...ctx.excludeIds].filter((id) => !reshowable.has(id))) : undefined } : null;
+  const fitOf = (s: ContentItem) => {
     const tag = laneTagOf(s)?.id;
     return tag && LANE_BY_ID[tag] ? tag : laneOfGenres(s.genres);
   };
+  const shownAt = (s: ContentItem) => (typeof s.metadata?.lastShownAt === 'string' ? new Date(s.metadata.lastShownAt as string).getTime() : NaN);
   const shownBonus = (s: ContentItem) => {
-    const at = typeof s.metadata?.lastShownAt === 'string' ? new Date(s.metadata.lastShownAt as string).getTime() : NaN;
+    const at = shownAt(s);
     if (!Number.isFinite(at)) return 0.3;
     return 0.3 * Math.min(1, Math.max(0, (now.getTime() - at) / (30 * 86400_000)));
   };
-  const taken = new Set<string>();
-  const out: ContentItem[] = [];
+  // Fit and tier once per song; songs grouped by lane (the open lane takes from all of them).
+  type Entry = { s: ContentItem; f: string | null; tier: FallbackTier; regional: boolean };
+  const pool: Entry[] = [];
+  const byLane = new Map<string, Entry[]>();
+  for (const s of stored) {
+    if (s.category !== 'music' || s.kind !== 'track' || s.provider !== 'spotify' || !s.embed || s.metadata?.imported) continue;
+    const f = fitOf(s);
+    // A song whose own lane is switched off for this listener (e.g. French) never fills another lane.
+    if (f && laneBlocked({ id: f }, ctx.profile)) continue;
+    const e: Entry = { s, f, tier: fallbackTierOf(s), regional: !!LANE_BY_ID[f ?? '']?.regional };
+    pool.push(e);
+    if (!f) continue;
+    const group = byLane.get(f);
+    if (group) group.push(e);
+    else byLane.set(f, [e]);
+  }
+  const want = new Map<string, number>();
   for (const lane of plan.lanes) {
     const deficit = (plan.targets[lane.id] ?? 0) - (ctx.have?.[lane.id] ?? 0);
-    if (deficit <= 0) continue;
-    const ranked = usable
-      .map((s) => ({ s, f: fit(s) }))
-      .filter(({ s, f }) => !taken.has(s.id) && (lane.id === MIX_LANE.id ? !!f || !!s.metadata?.aiPick : f === lane.id))
-      .filter(({ s, f }) => !laneReject(s, lane.id === MIX_LANE.id ? { ...lane, regional: !!LANE_BY_ID[f ?? '']?.regional } : lane, rules))
-      .map(({ s }) => {
-        const affinity = Math.max(0, ...s.creators.map((c) => ctx.profile.creators[normKey(c)] ?? 0));
-        return { s, score: (laneTagOf(s)?.id === lane.id ? 1 : 0.7) + shownBonus(s) + 0.1 * Math.tanh(affinity) };
-      })
-      .sort((a, b) => b.score - a.score)
-      .slice(0, deficit + 2);
-    for (const { s } of ranked) {
-      taken.add(s.id);
-      // Per-user and per-lane fields are rebuilt here, never carried over from the shared catalog row.
-      out.push({
-        ...s,
-        metadata: {
-          ...withoutPerUser(s.metadata),
-          lane: laneTag(lane),
-          aiPick: false,
-          aiOrder: 1000 + out.length,
-          fallback: true,
-          ...(lane.source === 'library' ? { laneEra: lane.era } : {}),
-          ...(moodPhrase(lane) ? { laneMood: moodPhrase(lane) } : {}),
-        },
-      });
+    if (deficit > 0) want.set(lane.id, deficit + 2);
+  }
+  // The open lane keeps French / Arabic / Maghreb songs within the regional share.
+  const regionalCap = Math.floor((plan.targets[MIX_LANE.id] ?? 0) * plan.policy.regionalShare);
+  let regionalInMix = 0;
+  const taken = new Set<string>();
+  const out: ContentItem[] = [];
+  for (const tier of [1, 2, 3] as const) {
+    const tierRules = tier === 3 ? relaxed : rules;
+    if (!tierRules) continue;
+    for (const lane of plan.lanes) {
+      const left = want.get(lane.id) ?? 0;
+      if (left <= 0) continue;
+      const mix = lane.id === MIX_LANE.id;
+      const ranked = (mix ? pool : byLane.get(lane.id) ?? [])
+        .filter((e) => e.tier === tier && !taken.has(e.s.id) && (mix ? !!e.f || !!e.s.metadata?.aiPick : e.f === lane.id))
+        .filter((e) => !(tier === 3 && !reshowable!.has(e.s.id)))
+        .filter((e) => !laneReject(e.s, mix ? { ...lane, regional: e.regional } : lane, tierRules))
+        .map((e) => {
+          const affinity = Math.max(0, ...e.s.creators.map((c) => ctx.profile.creators[normKey(c)] ?? 0));
+          // Tier 3: least recently shown first. Otherwise lane fit, then songs not shown lately, then artist affinity.
+          const score = tier === 3 ? -shownAt(e.s) || 0 : (laneTagOf(e.s)?.id === lane.id ? 1 : 0.7) + shownBonus(e.s) + 0.1 * Math.tanh(affinity);
+          return { e, score };
+        })
+        .sort((a, b) => b.score - a.score || (a.e.s.id < b.e.s.id ? -1 : 1));
+      let n = 0;
+      for (const { e } of ranked) {
+        if (n >= left) break;
+        if (mix && e.regional) {
+          if (regionalInMix >= regionalCap) continue;
+          regionalInMix++;
+        }
+        taken.add(e.s.id);
+        n++;
+        // Per-user and per-lane fields are rebuilt here, never carried over from the shared catalog row.
+        out.push({
+          ...e.s,
+          metadata: {
+            ...withoutPerUser(e.s.metadata),
+            lane: laneTag(lane),
+            aiPick: false,
+            aiOrder: 1000 + out.length,
+            fallback: true,
+            fallbackTier: tier,
+            ...(lane.source === 'library' ? { laneEra: lane.era } : {}),
+            ...(moodPhrase(lane) ? { laneMood: moodPhrase(lane) } : {}),
+          },
+        });
+      }
+      want.set(lane.id, left - n);
     }
   }
   return out;

@@ -8,7 +8,7 @@
 import type { ContentItem } from '../types.ts';
 import { ProviderError, stripHtml } from './http.ts';
 import { lbSpotifyIds } from './listenbrainz.ts';
-import { fold, foldTitle } from '../engine/text.ts';
+import { cleanTitle, fold, foldTitle, splitArtist } from '../engine/text.ts';
 import { tagRetrieval, type Provider, type ProviderContext } from './types.ts';
 
 interface Img { url: string; width?: number }
@@ -108,15 +108,20 @@ export const spotify: Provider = {
   },
 };
 
-/** Comparable form of a title: decorations dropped, any script kept; '' only for symbol-only titles. */
-const titleKey = (x: string) => foldTitle(x) || fold(x);
+/** Comparable form of a title: featuring/version parts and decorations dropped, any script kept; '' only for symbol-only titles. */
+const titleKey = (x: string) => foldTitle(cleanTitle(x)) || foldTitle(x) || fold(x);
 
-/** True when one of the pick's credited artists is one of the track's artists (accents/punctuation ignored, any script). */
+/**
+ * True when the pick's MAIN artist is one of the track's artists (accents/punctuation ignored, any
+ * script). A featured artist never counts on its own: "Eminem feat. Dido" needs Eminem on the track.
+ * A duo credit ("Beyonce & Jay-Z") may match either of its artists.
+ */
 export function artistMatches(pickArtist: string, trackArtists: string[]): boolean {
   // "The", "&"/"and" and punctuation never decide a match ("Mumford & Sons" = "Mumford and Sons").
   const norm = (x: string) => fold(x.replace(/&/g, ' and ').replace(/^\s*the\s+/i, '').replace(/\band\b/gi, ' '));
-  // The full credit first, then each credited artist ("Beyonce & Jay-Z" → "Jay-Z").
-  const parts = [pickArtist, ...pickArtist.split(/\s*(?:,|&|\+|\/|\bx\b|\band\b|\bfeat\.?|\bft\.?|\bfeaturing\b|\bwith\b)\s*/i)].map((p) => p.trim()).filter(Boolean);
+  const main = splitArtist(pickArtist).main;
+  // The full credit first, then each credited artist of the main credit ("Beyonce & Jay-Z" → "Jay-Z").
+  const parts = [main, ...main.split(/\s*(?:,|&|\+|\/|\bx\b|\band\b|\bwith\b)\s*/i)].map((p) => p.trim()).filter(Boolean);
   return parts.some((p) => trackArtists.some((a) => {
     const sp = norm(p);
     const sa = norm(a);
@@ -129,7 +134,8 @@ export function artistMatches(pickArtist: string, trackArtists: string[]): boole
 }
 
 /**
- * Loose title check ("Song" ~ "Song (feat. X)" ~ "Song - 2019"), in any script. A title that can't be
+ * Loose title check ("Song" ~ "Song (feat. X)" ~ "Song (with X)" ~ "Song - 2019 Remaster"), in any
+ * script; featuring and version parts are ignored on both sides. A title that can't be
  * compared (different scripts, or nothing left after folding) is NOT a match: accepting it let another
  * song by the same artist through.
  */
@@ -161,8 +167,12 @@ export function mapSpotifyTrack(t: STrackFull): ContentItem {
 export const SPOTIFY_LOOKUP_BLOCK = 'spotify-lookup';
 
 export interface SpotifyPick {
+  /** Main artist (required on the resolved track). */
   artist: string;
+  /** Official title (featuring parts are ignored when matching). */
   track: string;
+  /** Officially credited featured artists: ListenBrainz matches full credits ("A feat. B"). */
+  feat?: string[];
   /** Lane the pick is meant for (quota bookkeeping). */
   laneId: string;
 }
@@ -296,20 +306,27 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
       const i = order[next++];
       if (!wants(picks[i])) continue;
       const cand = candidates.get(i)!;
+      let unplayable = false;
+      let resolved = false;
       for (const id of cand.ids.slice(0, 2)) {
         const t = await lookup(id);
         if (stopLookups) return;
         if (!t?.id || !artistMatches(picks[i].artist, (t.artists ?? []).map((a) => a.name)) || !titleMatches(picks[i].track, t.name)) continue;
+        // Another release of the same song may be playable in this market: try the next id.
         if (t.is_playable === false) {
-          done.add(i);
-          reject('unplayable');
-          break;
+          unplayable = true;
+          continue;
         }
         if (cache && cand.via !== 'cache') await cache.set(resolveKey(picks[i]), { id: t.id } satisfies ResolveCache, 30 * 86400).catch(() => undefined);
         if (cand.via === 'cache') stats.cached++;
         else stats.listenbrainz++;
         take(i, mapSpotifyTrack(t), cand.via);
+        resolved = true;
         break;
+      }
+      if (!resolved && unplayable) {
+        done.add(i);
+        reject('unplayable');
       }
     }
   }));
@@ -320,7 +337,7 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
     for (let i = 0; i < picks.length && stats.searched < budget; i++) {
       const pk = picks[i];
       if (done.has(i) || !wants(pk)) continue;
-      const q = `track:"${pk.track.replace(/"/g, '')}" artist:"${pk.artist.replace(/"/g, '')}"`;
+      const q = `track:"${cleanTitle(pk.track).replace(/"/g, '')}" artist:"${splitArtist(pk.artist).main.replace(/"/g, '')}"`;
       const params = new URLSearchParams({ q, type: 'track', limit: '5', market });
       let data: { tracks?: { items?: STrackFull[] } };
       stats.searched++;

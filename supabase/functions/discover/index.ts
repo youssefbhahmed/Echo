@@ -1,5 +1,6 @@
 // POST /functions/v1/discover — personalised feed (filters, moods, exploration) or a one-shot query.
 import { runPipeline } from '../_shared/engine/pipeline.ts';
+import { reshowableIds } from '../_shared/engine/curator.ts';
 import { feedFilterKey, freshFeedSeed, reusableSession } from '../_shared/engine/session.ts';
 import { createHttp } from '../_shared/providers/http.ts';
 import { DiscoverBody } from '../_shared/schemas.ts';
@@ -23,15 +24,19 @@ serve(async (req) => {
     loadProfile(db, userId), excludedIds(db, userId), evidenceItems(db, userId), providerBlocks(), recentMusic(userId, { asOf }), librarySongs(db, userId),
   ]);
   for (const id of body.exclude ?? []) exclude.add(id);
+  for (const id of recent.skipped) exclude.add(id);
+  // A music-only page that is still short after the curator and the stored songs may show songs from
+  // 24 h–3 days ago again (never the page being replaced, recent skips, the library or dislikes).
+  const musicOnly = body.categories?.length === 1 && body.categories[0] === 'music';
+  const reshowable = musicOnly ? reshowableIds(recent.lastShown, asOf, exclude) : undefined;
   // Music only: songs shown in the 3 days before this feed (and recent skips) don't come back on a refresh.
   for (const id of recent.shown) exclude.add(id);
-  for (const id of recent.skipped) exclude.add(id);
   const seed = session?.seed ?? freshFeedSeed(clientSeed, recent.shown.size);
   const http = createHttp(new DbCache());
   const result = await runPipeline(
     { query: body.query, categories: body.categories, moods: body.moods, exploration: body.exploration, limit: body.limit ?? 12, intentHint: body.intentHint, mix: body.mix },
     {
-      env, http, profile, excludeIds: exclude, library, evidence, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup, collaborative: collaborativeFn(db), embed: embedder(),
+      env, http, profile, excludeIds: exclude, reshowable, library, evidence, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup, collaborative: collaborativeFn(db), embed: embedder(),
       // The feed's own clock (when it was first served) keeps lane fill and explanations identical on a re-fetch.
       storedEmbeddings, catalogFallback: catalogFallbackFn(userId, { asOf }), seed, now: new Date(asOf),
     },

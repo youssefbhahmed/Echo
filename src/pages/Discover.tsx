@@ -31,6 +31,11 @@ function PlayAll({ onClick }: { onClick: () => void }) {
   );
 }
 
+/** A single-category page needs this many picks before the top one becomes the hero. */
+const HERO_MIN = 6;
+/** Fewer verified songs than this on the Music tab: a calm note with "Get more". */
+const SHORT_MUSIC = 8;
+
 function useDebounced<T>(v: T, ms: number) {
   const [d, setD] = useState(v);
   useEffect(() => {
@@ -75,7 +80,9 @@ export default function Discover() {
     placeholderData: keepPreviousData,
   });
 
-  const recs = useMemo(() => (feed.data?.recommendations ?? []).filter((r) => !dismissed.has(r.item.id)), [feed.data, dismissed]);
+  const single = category !== 'all';
+  // A single-category tab only ever shows its own category (the previous tab's feed stays on screen while this one loads).
+  const recs = useMemo(() => (feed.data?.recommendations ?? []).filter((r) => !dismissed.has(r.item.id) && (category === 'all' || r.item.category === category)), [feed.data, dismissed, category]);
   // Rate limits are handled server-side (stored, verified picks fill in), so they aren't worth a warning.
   const notices = (feed.data?.providers ?? []).filter((p) => p.status !== 'ok' && p.status !== 'cached' && p.status !== 'quota');
   const PROVIDER_NAME: Record<string, string> = { youtube: 'YouTube', spotify: 'Spotify', tmdb: 'TMDB', tvmaze: 'TVmaze', openlibrary: 'Open Library' };
@@ -87,8 +94,15 @@ export default function Discover() {
     setSeed((s) => s + 1);
   };
 
-  const [hero, ...rest] = recs;
-  const loading = feed.isLoading || (!feed.data && !feed.isError);
+  // A small single-category page shows every pick in its grid/lanes: the hero never swallows the page.
+  const heroless = single && recs.length < HERO_MIN;
+  const hero: Recommendation | undefined = heroless ? undefined : recs[0];
+  const rest = heroless ? recs : recs.slice(1);
+  const loading = feed.isLoading || (!feed.data && !feed.isError) || (feed.isPlaceholderData && feed.isFetching && recs.length === 0);
+  const empty = !loading && !feed.isError && recs.length === 0;
+  const errorMessage = feed.isError ? (feed.error as Error | null)?.message : undefined;
+  // A music page with only a few verified songs says so, with a way to ask for more.
+  const shortMusic = category === 'music' && !loading && recs.length > 0 && recs.length < SHORT_MUSIC;
   const toggleMood = (m: string) => setMoods((s) => (s.includes(m) ? s.filter((x) => x !== m) : [...s, m].slice(-3)));
   const [open, setOpenState] = useState<{ rec: Recommendation; play: boolean } | null>(null);
   const setOpen = (rec: Recommendation | null) => setOpenState(rec ? { rec, play: false } : null);
@@ -111,10 +125,21 @@ export default function Discover() {
     player.playQueue(recs.filter(sameShelf).map((r) => r.item), 0);
   };
 
+  const newPicksButton = (
+    <button type="button" onClick={refresh} disabled={feed.isFetching} className="inline-flex h-12 items-center gap-2 rounded-full border border-white/15 bg-white/[0.04] px-5 text-[15px] text-bone backdrop-blur-md transition-colors hover:bg-white/[0.08] disabled:opacity-50">
+      <RefreshCw className={`h-4 w-4 ${feed.isFetching ? 'animate-spin' : ''}`} aria-hidden /> New picks
+    </button>
+  );
+  const tuneButton = (
+    <button type="button" onClick={() => setTuneOpen((o) => !o)} aria-expanded={tuneOpen} className={`inline-flex h-12 items-center gap-2 rounded-full border px-5 text-[15px] backdrop-blur-md transition-colors ${tuneOpen ? 'border-ember/50 bg-ember/10 text-bone' : 'border-white/15 bg-white/[0.04] text-bone hover:bg-white/[0.08]'}`}>
+      <SlidersHorizontal className="h-4 w-4" aria-hidden /> {exp < 0.34 ? 'Familiar' : exp < 0.67 ? 'Balanced' : 'Adventurous'}
+    </button>
+  );
+
   return (
     <div>
-      {/* Hero: the top pick, full-bleed */}
-      <section className="relative isolate overflow-hidden" aria-label="Today’s echo">
+      {/* Hero: the top pick, full-bleed (a small single-category page has a plain header instead) */}
+      <section className="relative isolate overflow-hidden" aria-label={hero || loading ? 'Today’s echo' : single ? CATEGORY_META[category].label : 'Your picks'}>
         <div aria-hidden className="absolute inset-0 -z-10">
           {hero?.item.artworkUrl && <img src={hero.item.artworkUrl} alt="" className="h-full w-full scale-125 object-cover opacity-45 blur-3xl saturate-150" />}
           <div className="absolute inset-0 bg-gradient-to-b from-ink/30 via-ink/60 to-ink" />
@@ -123,10 +148,18 @@ export default function Discover() {
         <div className="pt-safe px-4 pb-8 md:px-10 md:pt-14 md:pb-12">
           <div className="mb-8 md:hidden"><Wordmark /></div>
           <p className="text-xs font-semibold tracking-[0.2em] text-ember uppercase">{greeting()}{name ? `, ${name}` : ''}</p>
-          {loading || !hero ? (
+          {loading ? (
             <div className="mt-5 flex flex-col gap-6 md:flex-row md:items-end" aria-hidden>
               <div className="skeleton aspect-square w-44 rounded-2xl md:order-2 md:ml-auto md:w-64" />
               <div className="flex-1 space-y-3"><div className="skeleton h-4 w-32 rounded-full" /><div className="skeleton h-10 w-4/5 rounded-xl" /><div className="skeleton h-4 w-1/2 rounded-full" /></div>
+            </div>
+          ) : !hero ? (
+            <div className="mt-5 max-w-2xl">
+              <h1 className="font-display text-[34px] leading-[1.05] font-medium tracking-[-0.015em] md:text-[52px]">{single ? CATEGORY_META[category].label : 'Your picks'}</h1>
+              <p className="mt-2 text-base text-mist">
+                {feed.isError ? 'Your picks could not be loaded.' : recs.length === 0 ? 'Nothing new right now.' : category === 'music' ? songsLabel(recs.length) : `${recs.length} ${recs.length === 1 ? 'pick' : 'picks'}`}
+              </p>
+              <div className="mt-6 flex flex-wrap items-center gap-2.5">{newPicksButton}{tuneButton}</div>
             </div>
           ) : (
             <div className="mt-5 flex flex-col gap-6 md:flex-row md:items-end md:gap-10">
@@ -142,12 +175,8 @@ export default function Discover() {
                   <button type="button" onClick={() => (isQueueable(hero.item) ? playHero() : hero.item.embed ? watch(hero) : setOpen(hero))} className="inline-flex h-12 items-center gap-2 rounded-full bg-bone px-6 text-[15px] font-semibold text-ink shadow-[0_14px_40px_-14px_rgba(239,232,220,0.55)] transition-transform active:scale-95">
                     {hero.item.embed ? <><Play className="h-4 w-4 fill-current" aria-hidden /> Play</> : <>Discover it <ArrowUpRight className="h-4 w-4" aria-hidden /></>}
                   </button>
-                  <button type="button" onClick={refresh} disabled={feed.isFetching} className="inline-flex h-12 items-center gap-2 rounded-full border border-white/15 bg-white/[0.04] px-5 text-[15px] text-bone backdrop-blur-md transition-colors hover:bg-white/[0.08] disabled:opacity-50">
-                    <RefreshCw className={`h-4 w-4 ${feed.isFetching ? 'animate-spin' : ''}`} aria-hidden /> New picks
-                  </button>
-                  <button type="button" onClick={() => setTuneOpen((o) => !o)} aria-expanded={tuneOpen} className={`inline-flex h-12 items-center gap-2 rounded-full border px-5 text-[15px] backdrop-blur-md transition-colors ${tuneOpen ? 'border-ember/50 bg-ember/10 text-bone' : 'border-white/15 bg-white/[0.04] text-bone hover:bg-white/[0.08]'}`}>
-                    <SlidersHorizontal className="h-4 w-4" aria-hidden /> {exp < 0.34 ? 'Familiar' : exp < 0.67 ? 'Balanced' : 'Adventurous'}
-                  </button>
+                  {newPicksButton}
+                  {tuneButton}
                 </div>
               </div>
             </div>
@@ -186,12 +215,6 @@ export default function Discover() {
             ))}
             {' · '}<button type="button" onClick={() => nav('/settings')} className="text-ember hover:underline">settings</button>
           </p>
-        )}
-        {feed.isError && (
-          <div className="mt-8 rounded-2xl border border-danger/30 bg-danger/5 p-5 text-sm">
-            <p className="text-bone">{(feed.error as Error).message}</p>
-            <button type="button" onClick={() => feed.refetch()} className="mt-3 text-ember underline">Try again</button>
-          </div>
         )}
       </div>
 
@@ -247,17 +270,34 @@ export default function Discover() {
               </section>
             );
           })
-        ) : (
+        ) : rest.length > 0 ? (
           <section className="mt-10 px-4 md:px-10" aria-label={CATEGORY_META[category].label}>
             <div className="grid grid-cols-2 gap-x-4 gap-y-7 sm:grid-cols-3 lg:grid-cols-5">
               {rest.map((r, i) => <Tile key={r.item.id} rec={r} onOpen={setOpen} onWatch={watch} onPlay={() => player.playQueue(rest.map((x) => x.item), i)} className="!w-auto" />)}
             </div>
           </section>
+        ) : null}
+        {shortMusic && (
+          <div className="mx-4 mt-10 flex flex-col items-start gap-3 rounded-2xl border border-line bg-ink-2/60 p-4 sm:flex-row sm:items-center sm:justify-between md:mx-10">
+            <p className="text-sm text-mist">That’s all ECHO could verify right now.</p>
+            <button type="button" onClick={refresh} disabled={feed.isFetching} className="inline-flex h-11 shrink-0 items-center gap-2 rounded-full border border-white/15 bg-white/[0.04] px-5 text-sm text-bone transition-colors hover:bg-white/[0.08] disabled:opacity-50">
+              <RefreshCw className={`h-4 w-4 ${feed.isFetching ? 'animate-spin' : ''}`} aria-hidden /> Get more
+            </button>
+          </div>
         )}
-        {feed.data && recs.length === 0 && !feed.isFetching && (
+        {empty && (
           <div className="px-4 py-16 text-center">
             <p className="font-display text-2xl">Nothing new here right now.</p>
             <p className="mt-2 text-sm text-mist">Try another mood, widen the categories, or get new picks.</p>
+          </div>
+        )}
+        {feed.isError && (
+          <div role="alert" className="mx-4 mt-10 rounded-2xl border border-danger/30 bg-danger/5 p-5 md:mx-10 md:max-w-2xl">
+            <p className="font-medium text-bone">{recs.length ? 'ECHO couldn’t refresh your picks.' : 'ECHO couldn’t load your picks.'}</p>
+            {errorMessage && <p className="mt-1 text-sm text-mist">{errorMessage}</p>}
+            <button type="button" onClick={() => feed.refetch()} className="mt-4 inline-flex h-11 items-center gap-2 rounded-full bg-bone px-5 text-sm font-semibold text-ink transition-transform active:scale-95">
+              <RefreshCw className="h-4 w-4" aria-hidden /> Retry
+            </button>
           </div>
         )}
       </div>

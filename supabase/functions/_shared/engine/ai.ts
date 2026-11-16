@@ -145,8 +145,12 @@ export async function llmEnrichIntent(intent: Intent, cfg: AiConfig, http: HttpC
 }
 
 export interface MusicPick {
+  /** Main credited artist. */
   artist: string;
+  /** Official title, ideally without "(feat. …)" parts. */
   track: string;
+  /** Officially credited featured artists (omitted when none). ListenBrainz matches full credits. */
+  feat?: string[];
   /** Feed: the lane id the curator filed the song under. Request: a short style label ("afro house"). */
   lane?: string;
   /** Feed: the song's own main style in a few words, as the curator sees it (checked against the lane). */
@@ -195,6 +199,8 @@ export interface CuratorBrief {
 }
 
 const NEVER_STOCK = 'never novelty, meme, comedy, parody, children\'s, sleep, meditation, relaxation, study, frequency or stock music, and no compilations or "best of" collections';
+/** How each song is named: main artist, clean official title, featured artists apart (catalog matching needs the full credit). */
+const CREDIT_RULE = '"artist" is the main credited artist only; "track" is the official song title WITHOUT any "(feat. …)", "(with …)" or version part; "feat" lists the officially credited featured artists ([] when none).';
 
 /** System + user messages for the music curator. Pure: tests check what is (and isn't) sent. */
 export function curatorPrompt(brief: CuratorBrief): { system: string; user: string } {
@@ -210,16 +216,18 @@ export function curatorPrompt(brief: CuratorBrief): { system: string; user: stri
       'One song per artist; never an artist or style listed under "avoid".',
       'If the request describes an arc (from one mood to another), list the songs in listening order along it; otherwise order them for a smooth listening flow.',
       `${NEVER_STOCK.charAt(0).toUpperCase()}${NEVER_STOCK.slice(1)}.`,
+      CREDIT_RULE,
     ].filter(Boolean);
     return {
-      system: `You are ECHO's music curator. Return ONLY JSON: {"items":[{"artist":"...","track":"...","lane":"<short style label, e.g. afro house>"}]}.\n${rules.map((x) => `- ${x}`).join('\n')}`,
+      system: `You are ECHO's music curator. Return ONLY JSON: {"items":[{"artist":"<main artist>","track":"<official title>","feat":["<featured artist>"],"lane":"<short style label, e.g. afro house>"}]}.\n${rules.map((x) => `- ${x}`).join('\n')}`,
       user: `Request: ${r.text.slice(0, 500)}${r.themes ? `\nThemes: ${r.themes}` : ''}${r.arc ? `\nArc: ${r.arc}` : ''}${r.background ? `\nListener background: ${r.background.slice(0, 400)}` : ''}${avoidLine}`,
     };
   }
   const lanes = brief.lanes ?? [];
   const instrumentalLane = lanes.some((l) => l.instrumental);
-  const system = `You are ECHO's music curator for one listener. Return ONLY JSON: {"items":[{"artist":"...","track":"...","lane":"<lane id>","genre":"<the song's own main style, 1-3 words>","lang":"<main language of the lyrics>"}]}.
+  const system = `You are ECHO's music curator for one listener. Return ONLY JSON: {"items":[{"artist":"<main artist>","track":"<official title>","feat":["<featured artist>"],"lane":"<lane id>","genre":"<the song's own main style, 1-3 words>","lang":"<main language of the lyrics>"}]}.
 Choose real, officially released songs that are on Spotify:
+- ${CREDIT_RULE}
 - Songs with vocals, in their original studio version: no live, remix, sped-up, slowed, cover, karaoke or instrumental versions${instrumentalLane ? ' (a lane marked "instrumental style" may include instrumentals)' : ''}.
 - Only songs first released in or after the year given for their lane.
 - Lanes not marked "modern only" never contain French-, Arabic- or Maghreb-language songs.
@@ -318,6 +326,20 @@ export function curatorItems(content: string): unknown[] {
   return out;
 }
 
+/** Featured artists from the curator: an array of short names (or one string "A, B & C"), at most 4, never the main artist. */
+export function parseFeat(v: unknown, artist: string): string[] {
+  const raw = Array.isArray(v) ? v.filter((x): x is string => typeof x === 'string') : typeof v === 'string' ? v.split(/\s*[,;]\s*|\s+&\s+/) : [];
+  const main = artist.trim().toLowerCase();
+  const out: string[] = [];
+  for (const r of raw) {
+    const n = r.trim();
+    if (!n || n.length >= 60 || n.toLowerCase() === main || out.some((o) => o.toLowerCase() === n.toLowerCase())) continue;
+    out.push(n);
+    if (out.length >= 4) break;
+  }
+  return out;
+}
+
 /** Validate the curator's JSON: real-looking artist + track, one song per artist. */
 export function parseMusicPicks(content: string, max = 60): MusicPick[] {
   const json = { items: curatorItems(content) };
@@ -335,7 +357,8 @@ export function parseMusicPicks(content: string, max = 60): MusicPick[] {
     const lane = str(x.lane, 60) ?? str(x.style, 60);
     const genre = str(x.genre, 60);
     const lang = str(x.lang, 40) ?? str(x.language, 40);
-    out.push({ artist, track, ...(lane ? { lane: lane.toLowerCase() } : {}), ...(genre ? { genre } : {}), ...(lang ? { lang } : {}) });
+    const feat = parseFeat(x.feat ?? x.featuring, artist);
+    out.push({ artist, track, ...(feat.length ? { feat } : {}), ...(lane ? { lane: lane.toLowerCase() } : {}), ...(genre ? { genre } : {}), ...(lang ? { lang } : {}) });
     if (out.length >= max) break;
   }
   return out;

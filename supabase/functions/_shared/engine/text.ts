@@ -196,6 +196,45 @@ export function foldTitle(title: string): string {
   return fold(title.replace(/\s[-–]\s.*$/, '').replace(/[([].*?[)\]]/g, '').replace(/\b(feat|ft|featuring)\b.*$/i, ''));
 }
 
+// Version decorations that never change which song it is ("- 2011 Remaster", "(Radio Edit)").
+const VERSION_WORDS = String.raw`(?:(?:\d{4}\s+)?(?:digital(?:ly)?\s+)?remaster(?:ed)?(?:\s+\d{4})?(?:\s+version)?|radio\s+edit|single\s+version|album\s+version|original\s+(?:mix|version)|extended\s+(?:mix|version)|edit|mono|stereo|explicit|clean|bonus\s+track)`;
+const VERSION_TAIL = new RegExp(String.raw`\s+[-–—]\s+(?:${VERSION_WORDS}|from\s+.+)\s*$`, 'i');
+const VERSION_PAREN = new RegExp(String.raw`\s*[([]\s*${VERSION_WORDS}\s*[)\]]`, 'gi');
+// Featuring parts: "(feat. X)", "[ft. X & Y]", "(with X)", or a trailing " feat. X".
+const FEAT_PAREN = /\s*[([]\s*(?:feat\.?|ft\.?|featuring|with)\s+([^)\]]+)[)\]]/gi;
+const FEAT_TAIL = /\s+(?:feat\.?|ft\.?|featuring)\s+(.+)$/i;
+const NAME_SPLIT = /\s*,\s*|\s+(?:&|and|x)\s+/i;
+
+/** Credited names in a featuring list ("A, B & C" → A, B, C), at most 4. */
+export function splitNames(list: string): string[] {
+  return list.split(NAME_SPLIT).map((n) => n.trim()).filter((n) => n.length > 0 && n.length < 60).slice(0, 4);
+}
+
+/**
+ * A title without its featuring parts and version decorations, plus the featured names it listed:
+ * "One Kiss (with Dua Lipa)" → { title: "One Kiss", feat: ["Dua Lipa"] };
+ * "Song (feat. A & B) - 2011 Remaster" → { title: "Song", feat: ["A", "B"] }. Never returns an empty title.
+ */
+export function splitTitle(title: string): { title: string; feat: string[] } {
+  const feat: string[] = [];
+  let t = title.replace(FEAT_PAREN, (_m, names: string) => (feat.push(...splitNames(names)), ''));
+  t = t.replace(FEAT_TAIL, (_m, names: string) => (feat.push(...splitNames(names)), ''));
+  for (let i = 0; i < 2; i++) t = t.replace(VERSION_TAIL, '').replace(VERSION_PAREN, '');
+  t = t.replace(/\s+/g, ' ').trim();
+  return { title: t || title.trim(), feat };
+}
+
+/** The title as it is compared and queried: no featuring parts, no version decorations. */
+export function cleanTitle(title: string): string {
+  return splitTitle(title).title;
+}
+
+/** Main artist of a credit and its featured names: "Eminem feat. Dido" → { main: "Eminem", feat: ["Dido"] }. */
+export function splitArtist(artist: string): { main: string; feat: string[] } {
+  const m = /^(.+?)\s+[([]?\s*(?:feat\.?|ft\.?|featuring)\s+(.+?)[)\]]?\s*$/i.exec(artist.trim());
+  return m ? { main: m[1].trim(), feat: splitNames(m[2]) } : { main: artist.trim(), feat: [] };
+}
+
 /** "artist|title" identity of a recording across its single/album/deluxe ids ('' when either part folds to nothing). */
 export function songKey(artist: string, title: string): string {
   const a = fold(artist);

@@ -8,7 +8,7 @@ import { ProviderError, type HttpClient } from '../providers/http.ts';
 import type { Env, Provider } from '../providers/types.ts';
 import { aiConfig, mergeHint, sanitizeHint } from './ai.ts';
 import { applyUnderstanding, llmUnderstand } from './understand.ts';
-import { curateMusic, laneFallback, laneLooseMusic, musicQuotaFor, planMusic, SEARCH_ORDER, STORED_ORDER, type MusicPlan } from './curator.ts';
+import { curateMusic, fallbackTierOf, laneFallback, laneLooseMusic, musicQuotaFor, planMusic, SEARCH_ORDER, STORED_ORDER, type MusicPlan } from './curator.ts';
 import { laneTagOf, MIX_LANE, type LibrarySongs } from './lanes.ts';
 import { analyzeItem } from './analyze.ts';
 import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
@@ -37,10 +37,26 @@ export interface PipelineDeps {
   /** Previously stored embeddings by item id. */
   storedEmbeddings?: (ids: string[]) => Promise<Map<string, number[]>>;
   useLlm?: boolean;
-  /** Stored catalog items for a provider that is down/out of quota (keeps e.g. the Videos shelf alive). */
-  catalogFallback?: (provider: ProviderId, categories: Category[]) => Promise<ContentItem[]>;
+  /**
+   * Stored catalog items for a provider that is down/out of quota (keeps e.g. the Videos shelf alive).
+   * Music: this user's recently recommended songs (fallback tier 1); with `shared`, also songs ECHO's
+   * curator verified for any user (tier 2); with `reshow`, this user's songs shown 24 h–3 days ago (tier 3).
+   */
+  catalogFallback?: (provider: ProviderId, categories: Category[], opts?: CatalogFallbackOptions) => Promise<ContentItem[]>;
+  /**
+   * Songs held back only because they were shown 24 h–3 days ago: a music-only page that is still short
+   * after the curator and the stored songs may show them again (least recently shown first).
+   */
+  reshowable?: Set<string>;
   seed?: number;
   now?: Date;
+}
+
+export interface CatalogFallbackOptions {
+  /** Music: also the shared pool of curator-verified songs (fallback tier 2). */
+  shared?: boolean;
+  /** Music: also this user's songs shown 24 h–3 days ago (fallback tier 3). */
+  reshow?: boolean;
 }
 
 export interface PipelineResult extends DiscoverResponse {
@@ -307,20 +323,27 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     pipeline.push({ step: 'fallback', ms: 0, detail: `Spotify rate-limited: ${fb.length} stored podcasts added` });
   }
   // Lanes the curator left short: stored songs that fit the lane and pass its rules (never tracks failing era/regional rules).
+  // Songs shown again on a short music-only page (tier 3) are let through the ranker's recently-shown exclusion.
+  const reshown = new Set<string>();
   if (musicPlan && deps.catalogFallback) {
     const have = mp?.perLane ?? {};
     const open = musicPlan.order.reduce((s, id) => s + Math.max(0, (musicPlan.targets[id] ?? 0) - (have[id] ?? 0)), 0);
     // Distinct songs: several searches often return the same track.
     const musicCount = new Set(raw.filter((i) => i.category === 'music').map((i) => i.id)).size;
     if (open > 0 && (musicPlan.mode === 'lanes' || spotifyDown || musicCount < 3)) {
-      const stored = await deps.catalogFallback('spotify', ['music']).catch(() => [] as ContentItem[]);
-      if (musicPlan.mode === 'lanes') {
-        const fill = laneFallback(stored, musicPlan, { profile: deps.profile, excludeIds: deps.excludeIds, library: deps.library, have, now: deps.now });
+      const lanes = musicPlan.mode === 'lanes';
+      const musicOnly = categories.length === 1 && categories[0] === 'music';
+      const reshow = lanes && musicOnly && !!deps.reshowable?.size;
+      const stored = await deps.catalogFallback('spotify', ['music'], { shared: lanes, reshow }).catch(() => [] as ContentItem[]);
+      if (lanes) {
+        const fill = laneFallback(stored, musicPlan, { profile: deps.profile, excludeIds: deps.excludeIds, library: deps.library, have, now: deps.now, musicOnly, reshowable: reshow ? deps.reshowable : undefined });
         raw.push(...fill);
-        pipeline.push({ step: 'fallback', ms: 0, detail: `${fill.length} stored songs fit ${open} open lane slots` });
+        const tiers = [1, 2, 3].map((t) => fill.filter((f) => fallbackTierOf(f) === t).length);
+        for (const f of fill) if (fallbackTierOf(f) === 3) reshown.add(f.id);
+        pipeline.push({ step: 'fallback', ms: 0, detail: `${fill.length} stored songs fit ${open} open lane slots (yours ${tiers[0]}, shared ${tiers[1]}, shown again ${tiers[2]})` });
       } else {
-        // A request: stored songs join the request lane after the fresh picks, still under the era/regional rules.
-        const ok = laneLooseMusic(stored.filter((s) => s.category === 'music' && !s.metadata?.imported), musicPlan, {
+        // A request: this user's own stored songs join the request lane after the fresh picks, still under the era/regional rules.
+        const ok = laneLooseMusic(stored.filter((s) => s.category === 'music' && !s.metadata?.imported && fallbackTierOf(s) === 1), musicPlan, {
           profile: deps.profile, excludeIds: deps.excludeIds, library: deps.library, now: deps.now, text: query, order: STORED_ORDER, fallback: true,
         }).slice(0, 40);
         raw.push(...ok);
@@ -379,7 +402,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   const recommendations = rankCandidates(candidates, intent, deps.profile, {
     exploration,
     hasQuery: effectiveHasQuery,
-    excludeIds: deps.excludeIds,
+    excludeIds: reshown.size && deps.excludeIds ? new Set([...deps.excludeIds].filter((id) => !reshown.has(id))) : deps.excludeIds,
     referenceIds: new Set(refItems.map((r) => r.id)),
     referenceSimilar: similarMap,
     references: refs,

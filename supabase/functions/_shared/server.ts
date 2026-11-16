@@ -5,7 +5,8 @@ import { hydrateProfile } from './engine/profile.ts';
 import { blockUntil, hashKey, type CacheStore } from './providers/http.ts';
 import { SPOTIFY_LOOKUP_BLOCK } from './providers/spotify.ts';
 import type { EvidenceItem } from './engine/rank.ts';
-import { isEngineLane, laneTagOf, librarySongIndex, withoutPerUser, type LibrarySongs } from './engine/lanes.ts';
+import { ENGINE_LANE_IDS, isEngineLane, laneTagOf, librarySongIndex, withoutPerUser, type LibrarySongs } from './engine/lanes.ts';
+import { historyTiers, sharedPool } from './engine/curator.ts';
 import { FEED_MAX_MS, parseFeedSession, type FeedSession } from './engine/session.ts';
 
 /** Read an env var; empty strings count as unset. */
@@ -191,22 +192,33 @@ async function pagedRows<T>(page: (from: number, to: number) => PromiseLike<{ da
   return out;
 }
 
+/** Rows of the shared pool of curator-verified songs read per fallback (newest first). */
+export const SHARED_POOL_MAX = 1500;
+
 /**
  * Stored items from one provider, minus what this user was shown lately (2 days; 3 for music, as of
  * `asOf`: when the feed being re-fetched was first served) and what they liked/saved/finished or
  * disliked.
- * Music: only songs ECHO's lane engine already recommended to THIS user in the last 90 days (rows
- * carrying an engine lane tag) — never other users' picks, the old curator's picks, imported libraries
- * or raw search filler. Each song carries metadata.lastShownAt so lanes prefer songs not shown lately.
+ * Music, in fallback tiers (engine/curator.ts laneFallback uses them in this order):
+ *   1. songs ECHO's lane engine recommended to THIS user in the last 90 days (rows carrying an engine
+ *      lane tag), not shown in the last 3 days, each with metadata.lastShownAt;
+ *   2. with `shared`: songs ECHO's curator verified for ANY user (engine lane tag, Spotify track with an
+ *      embed, not stale), minus this user's history, library, dislikes and last 3 days;
+ *   3. with `reshow`: this user's songs last shown 24 h–3 days ago (a short music-only page only).
+ * Never imported libraries or raw search filler. Per-user fields of shared rows are dropped.
  */
 export function catalogFallbackFn(userId: string, opts: { asOf?: number } = {}) {
-  return async (provider: string, categories: string[]): Promise<AnalyzedItem[]> => {
+  return async (provider: string, categories: string[], fo: { shared?: boolean; reshow?: boolean } = {}): Promise<AnalyzedItem[]> => {
     const db = serviceClient();
     const music = categories.includes('music');
     const asOf = opts.asOf ?? Date.now();
     const cutoff = asOf - (music ? 3 : 2) * 86400_000;
     const base = () => db.from('content_items').select(ITEM_COLUMNS).eq('provider', provider).in('category', categories).not('embed', 'is', null).eq('stale', false);
-    const [shownRows, excluded, history] = await Promise.all([
+    const logged = <T>(what: string) => (r: { data: T[] | null; error?: { message: string } | null }) => {
+      if (r.error) console.error(`[echo] ${what} failed`, r.error.message);
+      return r;
+    };
+    const [shownRows, excluded, history, sharedRows] = await Promise.all([
       // Exclusion window: everything shown since the cutoff (paged: one 48-item feed is 48 rows).
       pagedRows<{ item_id: string }>((f, t) =>
         db.from('recommendation_events').select('item_id').eq('user_id', userId).gte('created_at', iso(cutoff)).lt('created_at', iso(asOf)).order('created_at', { ascending: false }).order('id', { ascending: false }).range(f, t), 3000),
@@ -217,6 +229,11 @@ export function catalogFallbackFn(userId: string, opts: { asOf?: number } = {}) 
           db.from('recommendation_events').select('item_id, created_at').eq('user_id', userId).like('item_id', 'spotify:track:%').gte('created_at', iso(asOf - 90 * 86400_000)).lt('created_at', iso(asOf))
             .order('created_at', { ascending: false }).order('id', { ascending: false }).range(f, t), 3000)
         : Promise.resolve([] as Array<{ item_id: string; created_at: string }>),
+      // Tier 2: the shared pool of songs the lane engine verified for anyone (most recently verified first).
+      music && fo.shared
+        ? pagedRows<Record<string, unknown>>((f, t) =>
+          base().eq('kind', 'track').in('metadata->lane->>id', ENGINE_LANE_IDS).order('fetched_at', { ascending: false }).order('id', { ascending: true }).range(f, t).then(logged('shared song pool')), SHARED_POOL_MAX)
+        : Promise.resolve([] as Array<Record<string, unknown>>),
     ]);
     const shown = new Set(shownRows.map((r) => r.item_id));
     const skip = (id: string) => excluded.has(id) || shown.has(id);
@@ -224,17 +241,22 @@ export function catalogFallbackFn(userId: string, opts: { asOf?: number } = {}) 
       const { data } = await base().order('updated_at', { ascending: false }).limit(1000);
       return (data ?? []).map((r) => rowToItem(r as Record<string, unknown>)).filter((i) => !skip(i.id)).slice(0, 150);
     }
-    const lastShown = new Map<string, string>();
-    for (const r of history) if (!lastShown.has(r.item_id)) lastShown.set(r.item_id, r.created_at);
-    // Newest first: keep the 900 shown longest ago (the fallback prefers songs not shown lately).
-    const ids = [...lastShown.keys()].filter((id) => !skip(id)).slice(-900);
+    // Newest first: the first row per song is when it was last shown.
+    const lastShownAt = new Map<string, string>();
+    for (const r of history) if (!lastShownAt.has(r.item_id)) lastShownAt.set(r.item_id, r.created_at);
+    const lastShown = new Map([...lastShownAt].map(([id, at]) => [id, new Date(at).getTime()]));
+    const tiers = historyTiers(lastShown, asOf, (id) => excluded.has(id), { reshow: fo.reshow, max: 900 });
+    const tierOf = new Map<string, 1 | 3>([...tiers.own.map((id) => [id, 1] as const), ...tiers.reshow.map((id) => [id, 3] as const)]);
+    const ids = [...tierOf.keys()];
     const chunks: string[][] = [];
     for (let i = 0; i < ids.length; i += 150) chunks.push(ids.slice(i, i + 150));
     const rows = (await Promise.all(chunks.map((c) => base().in('id', c)))).flatMap((r) => (r.data ?? []) as Array<Record<string, unknown>>);
-    return rows
+    const own = rows
       .map((r) => rowToItem(r))
       .filter((i) => i.category === 'music' && !i.metadata?.imported && isEngineLane(laneTagOf(i)?.id))
-      .map((i) => ({ ...i, metadata: { ...(i.metadata ?? {}), lastShownAt: lastShown.get(i.id) } }));
+      .map((i) => ({ ...i, metadata: { ...withoutPerUser(i.metadata), lastShownAt: lastShownAt.get(i.id), fallbackTier: tierOf.get(i.id) ?? 1 } }));
+    const shared = sharedPool(sharedRows.map((r) => rowToItem(r)), new Set(lastShown.keys()), skip);
+    return [...own, ...shared];
   };
 }
 
@@ -242,21 +264,26 @@ export function catalogFallbackFn(userId: string, opts: { asOf?: number } = {}) 
  * Songs not to serve again yet: music shown to this user in the `days` days before `asOf` (so a
  * refresh doesn't repeat), and songs they skipped in the last two weeks. `asOf` is when the feed being
  * fetched was first served (engine/session.ts), so re-fetching it never excludes its own songs.
+ * `lastShown` holds when each of those songs was last shown (ms), for re-showing on a short music page.
  */
-export async function recentMusic(userId: string, opts: { asOf?: number; days?: number } = {}): Promise<{ shown: Set<string>; skipped: Set<string> }> {
+export async function recentMusic(userId: string, opts: { asOf?: number; days?: number } = {}): Promise<{ shown: Set<string>; skipped: Set<string>; lastShown: Map<string, number> }> {
   const db = serviceClient();
   const now = Date.now();
   const asOf = opts.asOf ?? now;
   const isMusic = (id: string) => id.startsWith('spotify:track:') || id.startsWith('spotify:album:');
   const [shown, skipped] = await Promise.all([
-    pagedRows<{ item_id: string }>((f, t) =>
-      db.from('recommendation_events').select('item_id').eq('user_id', userId).like('item_id', 'spotify:%').gte('created_at', iso(asOf - (opts.days ?? 3) * 86400_000)).lt('created_at', iso(asOf))
+    pagedRows<{ item_id: string; created_at: string }>((f, t) =>
+      db.from('recommendation_events').select('item_id, created_at').eq('user_id', userId).like('item_id', 'spotify:%').gte('created_at', iso(asOf - (opts.days ?? 3) * 86400_000)).lt('created_at', iso(asOf))
         .order('created_at', { ascending: false }).order('id', { ascending: false }).range(f, t), 3000),
     db.from('interactions').select('item_id').eq('user_id', userId).eq('type', 'skip').like('item_id', 'spotify:%').gte('created_at', iso(now - 14 * 86400_000)).limit(1000),
   ]);
+  const lastShown = new Map<string, number>();
+  // Newest first: the first row per song is its last showing.
+  for (const r of shown) if (isMusic(r.item_id) && !lastShown.has(r.item_id)) lastShown.set(r.item_id, new Date(r.created_at).getTime());
   return {
-    shown: new Set(shown.map((r) => r.item_id).filter(isMusic)),
+    shown: new Set(lastShown.keys()),
     skipped: new Set((skipped.data ?? []).map((r) => r.item_id as string).filter(isMusic)),
+    lastShown,
   };
 }
 
