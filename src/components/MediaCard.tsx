@@ -152,7 +152,7 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
       )}
 
       <div className="mt-3 flex items-center gap-2">
-        <IconButton label={lib?.liked ? 'Liked' : 'Like'} active={lib?.liked === true} onClick={() => send('like')}>
+        <IconButton label={lib?.liked ? 'Unlike' : 'Like'} active={lib?.liked === true} onClick={() => send(lib?.liked ? 'unlike' : 'like')}>
           <Heart className={`h-[18px] w-[18px] ${lib?.liked ? 'fill-current' : ''}`} />
         </IconButton>
         <IconButton label={lib?.saved ? 'Remove from library' : 'Save'} active={!!lib?.saved} onClick={() => send(lib?.saved ? 'unsave' : 'save')}>

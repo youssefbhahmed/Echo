@@ -1,15 +1,15 @@
 // Pipeline step 1 — interpret a natural-language request into structured signals.
 // Deterministic rules + the concept lexicon. An optional LLM can enrich the
 // result (see ai.ts) but this parser alone is enough to drive the pipeline.
-import { CATEGORIES, type Category, type ConceptVector, type Intent, type PreferenceStatement } from '../types.ts';
+import { CATEGORIES, type Category, type ConceptVector, type Intent, type PreferenceStatement, type ProviderId } from '../types.ts';
 import { CONCEPT_BY_ID, CONCEPTS, MOOD_IDS } from './concepts.ts';
 import { conceptHits, contentTokens, normalize, projectText, round, topKeys } from './text.ts';
 
 const CATEGORY_WORDS: Array<[RegExp, Category[]]> = [
-  [/\b(youtube|youtuber|video essays?|videos?|clips?|vlogs?|channels?|lectures?|talks?|ted)\b/, ['youtube']],
-  [/\b(music|songs?|tracks?|albums?|artists?|bands?|playlists?|spotify|tunes|beats|singers?|mix(tape)?)\b/, ['music']],
+  [/\b(youtubers?|video essays?|videos?|clips?|vlogs?|channels?|lectures?|talks?|ted)\b/, ['youtube']],
+  [/\b(music|songs?|tracks?|albums?|artists?|bands?|playlists?|tunes|beats|singers?|mix(tape)?)\b/, ['music']],
   [/\b(films?|movies?|cinema|series|tv|shows?|sitcoms?|miniseries|anime|netflix|directors?)\b/, ['screen']],
-  [/\b(books?|novels?|read(ing)?|authors?|literature|memoirs?|essays?|poetry|poems?|non-?fiction|biograph(y|ies)|graphic novels?)\b/, ['books']],
+  [/\b(books?|novels?|read(ing)?|authors?|literature|memoirs?|(?<!video )essays?|poetry|poems?|non-?fiction|biograph(y|ies)|graphic novels?)\b/, ['books']],
   [/\b(podcasts?|episodes?|audio shows?|interviews?)\b/, ['podcasts']],
   [/\b(documentar(y|ies)|docuseries|docs)\b/, ['screen', 'youtube']],
 ];
@@ -113,11 +113,24 @@ export function parseIntent(rawText: string, opts: ParseOptions = {}): Intent {
   const original = (rawText ?? '').slice(0, 1000);
   const text = normalize(original);
 
-  // Categories
+  // Platforms are SOURCE filters when another kind of media is named ("youtube podcasts" = podcasts
+  // from YouTube); on their own they mean their default category ("youtube" = videos, "spotify" = music).
+  const PLATFORMS: Array<[RegExp, ProviderId, Category]> = [
+    [/\b(on |from )?youtube\b/, 'youtube', 'youtube'],
+    [/\b(on |from )?spotify\b/, 'spotify', 'music'],
+  ];
+  const platformText = PLATFORMS.reduce((t, [re]) => t.replace(new RegExp(re.source, 'g'), ' '), text);
   let categories: Category[] = [];
-  for (const [re, cats] of CATEGORY_WORDS) if (re.test(text)) categories.push(...cats);
+  for (const [re, cats] of CATEGORY_WORDS) if (re.test(platformText)) categories.push(...cats);
+  const providers: ProviderId[] = [];
+  for (const [re, id, cat] of PLATFORMS) {
+    if (!re.test(text)) continue;
+    if (categories.length) providers.push(id);
+    else categories.push(cat);
+  }
   if (!categories.length && /\b(listen|listening|hear)\b/.test(text)) categories.push('music', 'podcasts');
   if (!categories.length && /\bwatch(ing)?\b/.test(text) && !/\blike watching\b/.test(text)) categories.push('screen', 'youtube');
+  const typedCategories = categories.length;
   if (opts.categories?.length) categories = [...categories, ...opts.categories];
   categories = [...new Set(categories)].filter((c) => (CATEGORIES as readonly string[]).includes(c));
 
@@ -232,7 +245,7 @@ export function parseIntent(rawText: string, opts: ParseOptions = {}): Intent {
   const excludedWords = new Set(excludes.flatMap((e) => e.split(' ')));
   const keywords = contentTokens(positiveText)
     // Contractions and bare sentiment words ("don't", "they're", "bad") are never search terms.
-    .filter((t) => !FILLER.has(t) && !negWords.has(t) && !excludedWords.has(t) && !t.includes("'") && !SENTIMENT.has(t) && !CATEGORY_TOKEN.test(t))
+    .filter((t) => !FILLER.has(t) && !negWords.has(t) && !excludedWords.has(t) && !t.includes("'") && !SENTIMENT.has(t) && !CATEGORY_TOKEN.test(t) && !/^(youtube|spotify|netflix|apple|deezer)$/.test(t))
     .slice(0, 8);
 
   const ordinalRefs = extractOrdinals(text);
@@ -246,6 +259,8 @@ export function parseIntent(rawText: string, opts: ParseOptions = {}): Intent {
 
   const vague =
     original.trim().length > 0 &&
+    typedCategories === 0 &&
+    providers.length === 0 &&
     Object.keys(target).length === 0 &&
     refs.length === 0 &&
     ordinalRefs.length === 0 &&
@@ -277,6 +292,7 @@ export function parseIntent(rawText: string, opts: ParseOptions = {}): Intent {
     target,
     vague,
     statements,
+    providers: providers.length ? providers : undefined,
     source: 'rules',
   };
 }
@@ -307,6 +323,7 @@ export function refineIntent(prev: Intent, next: Intent): Intent {
     ...prev,
     rawText: `${prev.rawText} → ${next.rawText}`,
     categories: onlyCats ?? (next.categories.length ? next.categories : prev.categories),
+    providers: next.providers ?? (next.categories.length ? undefined : prev.providers),
     moods: [...new Set([...next.moods, ...prev.moods])].filter((m) => (target[m] ?? 0) > 0),
     themes: [...new Set([...next.themes, ...prev.themes])].filter((m) => (target[m] ?? 0) > 0),
     genres: [...new Set([...next.genres, ...prev.genres])].filter((g) => !next.excludes.includes(g)),

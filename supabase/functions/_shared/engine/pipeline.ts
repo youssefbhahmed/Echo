@@ -9,7 +9,7 @@ import type { Env, Provider } from '../providers/types.ts';
 import { aiConfig, llmEnrichIntent, llmMusicPicks, mergeHint, sanitizeHint } from './ai.ts';
 import { verifySpotifyPicks } from '../providers/spotify.ts';
 import { musicBrief, topStyles } from '../importer.ts';
-import { familyMix, mixBrief } from './music.ts';
+import { familyMix, inBlockedFamily, mixBrief } from './music.ts';
 import { hashKey } from '../providers/http.ts';
 import { analyzeItem } from './analyze.ts';
 import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
@@ -223,7 +223,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     const picks = await llmMusicPicks(desc, ai, deps.http, { avoid, count: 16, cacheKey: `ai:music:${await hashKey(`${desc}|${avoid.join(',')}`)}:${(deps.seed ?? 0) % 4}` });
     const verified = await verifySpotifyPicks(picks, { http: deps.http, env: deps.env });
     const styleOf = new Map(picks.map((pk) => [pk.artist.toLowerCase(), pk.style]));
-    const items = verified.map((i, idx) => ({ ...i, genres: i.genres.length ? i.genres : [styleOf.get((i.creators[0] ?? '').toLowerCase()) ?? ''].filter(Boolean), popularity: 0.75, metadata: { ...(i.metadata ?? {}), aiPick: true, aiOrder: idx, aiFor: words, retrievedBy: `ai:${i.creators[0] ?? i.id}`, retrievedFor: concepts.slice(0, 3) } }));
+    const items = verified.filter((i) => !inBlockedFamily([styleOf.get((i.creators[0] ?? '').toLowerCase()) ?? '', ...i.genres], deps.profile)).map((i, idx) => ({ ...i, genres: i.genres.length ? i.genres : [styleOf.get((i.creators[0] ?? '').toLowerCase()) ?? ''].filter(Boolean), popularity: 0.75, metadata: { ...(i.metadata ?? {}), aiPick: true, aiOrder: idx, aiFor: words, retrievedBy: `ai:${i.creators[0] ?? i.id}`, retrievedFor: concepts.slice(0, 3) } }));
     return { items, detail: `${verified.length}/${picks.length} AI music picks verified on Spotify` };
   })().catch((e) => ({ items: [] as ContentItem[], detail: `AI music picks skipped (${(e as Error).message.slice(0, 60)})` }));
   const settled = await Promise.allSettled(plan.map((q) => q.provider.search(q.params, { http: deps.http, env: deps.env })));

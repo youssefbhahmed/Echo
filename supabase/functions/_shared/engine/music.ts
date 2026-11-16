@@ -40,15 +40,23 @@ export function familyMix(p: TasteProfile): FamilyMix {
     if (w > 0) pos[f] = (pos[f] ?? 0) + w;
     else neg[f] = (neg[f] ?? 0) + w;
   }
-  // A family is only "liked" net of its dislikes.
+  // A family is only "liked" net of its dislikes; blocked families are out entirely.
   for (const f of Object.keys(neg)) pos[f] = (pos[f] ?? 0) + neg[f] * 3;
+  const blocked = new Set(p.explicit.blockedFamilies ?? []);
+  for (const f of blocked) pos[f] = 0;
   const total = Object.values(pos).filter((w) => w > 0).reduce((a, b) => a + b, 0);
   const mix = FAMILIES.filter((f) => (pos[f.id] ?? 0) > 0)
     .map((f) => ({ id: f.id, label: f.label, share: total ? pos[f.id] / total : 0 }))
     .filter((x) => x.share >= 0.03)
     .sort((a, b) => b.share - a.share);
-  const avoid = FAMILIES.filter((f) => (pos[f.id] ?? 0) <= 0 && (neg[f.id] ?? 0) < -0.3).map((f) => f.label);
+  const avoid = FAMILIES.filter((f) => blocked.has(f.id) || ((pos[f.id] ?? 0) <= 0 && (neg[f.id] ?? 0) < -0.3)).map((f) => f.label);
   return { mix, avoid };
+}
+
+/** True when a music item belongs to a family the user blocked. */
+export function inBlockedFamily(genres: string[], p: TasteProfile): boolean {
+  const blocked = p.explicit.blockedFamilies ?? [];
+  return blocked.length > 0 && genres.some((g) => { const f = familyOf(g); return !!f && blocked.includes(f); });
 }
 
 export function mixBrief(m: FamilyMix): string {

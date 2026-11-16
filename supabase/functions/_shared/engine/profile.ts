@@ -4,6 +4,7 @@
 import type { AnalyzedItem, Category, ConceptVector, FeedbackType, TasteProfile } from '../types.ts';
 import { CONCEPT_BY_ID } from './concepts.ts';
 import { normKey, projectText, round } from './text.ts';
+import { FAMILIES, familyOf } from './music.ts';
 
 export const CAP = 3;
 const LONG_HALF_LIFE_DAYS = 120;
@@ -44,6 +45,8 @@ export function hydrateProfile(raw: Partial<TasteProfile> | null | undefined): T
 
 export const FEEDBACK_SIGNAL: Record<Exclude<FeedbackType, 'rate'>, number> = {
   like: 1,
+  // Undo a like: mostly reverses what the like taught.
+  unlike: -0.7,
   save: 0.7,
   unsave: -0.3,
   consumed: 0.5,
@@ -256,6 +259,8 @@ export interface ProfileEdit {
   removeLike?: string;
   removeDislike?: string;
   exploration?: number;
+  /** Music style family control from My Taste → Music mix. */
+  family?: { id: string; action: 'more' | 'less' | 'never' | 'allow' };
 }
 
 /** User-driven corrections from the My Taste screen. */
@@ -292,5 +297,20 @@ export function applyEdit(profile: TasteProfile, e: ProfileEdit): TasteProfile {
   if (e.removeLike) p.explicit.likes = p.explicit.likes.filter((s) => s !== e.removeLike);
   if (e.removeDislike) p.explicit.dislikes = p.explicit.dislikes.filter((s) => s !== e.removeDislike);
   if (typeof e.exploration === 'number') p.exploration = Math.max(0, Math.min(1, e.exploration));
+  if (e.family && FAMILIES.some((f) => f.id === e.family!.id)) {
+    const { id, action } = e.family;
+    const genres = { ...p.genres };
+    for (const [g, w] of Object.entries(genres)) {
+      if (familyOf(g) !== id) continue;
+      if (action === 'more') genres[g] = round(Math.min(CAP, Math.max(w, 0) * 1.6 + 0.3));
+      if (action === 'less') genres[g] = round(w > 0 ? w * 0.45 : w);
+      if (action === 'allow' && w < 0) delete genres[g];
+    }
+    p.genres = genres;
+    const blocked = new Set(p.explicit.blockedFamilies ?? []);
+    if (action === 'never') blocked.add(id);
+    if (action === 'allow' || action === 'more') blocked.delete(id);
+    p.explicit = { ...p.explicit, blockedFamilies: [...blocked] };
+  }
   return p;
 }

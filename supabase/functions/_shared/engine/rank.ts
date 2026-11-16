@@ -2,6 +2,7 @@
 import type { AnalyzedItem, ConceptVector, Explanation, Intent, Recommendation, ScoreBreakdown, TasteProfile } from '../types.ts';
 import { conceptPhrase, CONCEPT_BY_ID } from './concepts.ts';
 import { creatorKeys, genreKeys } from './profile.ts';
+import { inBlockedFamily } from './music.ts';
 import { contentTokens, cosine, denseCosine, negativePart, normalize, normKey, positivePart, round } from './text.ts';
 
 export interface EvidenceItem {
@@ -174,6 +175,8 @@ export function scoreItem(item: AnalyzedItem, intent: Intent, profile: TasteProf
     const tWords = normKey(item.title).split(' ');
     if (qWords.some((q) => tWords.some((t) => t.startsWith(q)))) penalty += 0.3;
   }
+  // Music styles the user said "never" to.
+  if (item.category === 'music' && inBlockedFamily(item.genres, profile)) penalty += 2;
   // Functional/stock music (sleep, frequencies, "study beats") unless explicitly requested.
   if (item.category === 'music' && FUNCTIONAL_MUSIC.test(`${item.title} ${item.creators.join(' ')} ${item.tags.join(' ')}`) && !/\b(sleep|relax|meditat|study|focus|spa|yoga)/i.test(intent.rawText)) penalty += 0.5;
   if (intent.language && item.language && !item.language.toLowerCase().startsWith(intent.language)) penalty += 0.25;
@@ -447,6 +450,7 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
     if (seen.has(item.id)) continue;
     seen.add(item.id);
     if (ctx.excludeIds?.has(item.id) || ctx.referenceIds?.has(item.id)) continue;
+    if (intent.providers?.length && !intent.providers.includes(item.provider) && intent.categories.includes(item.category)) continue;
     scored.push({ item, score: scoreItem(item, intent, profile, view, ctx) });
   }
   scored.sort((a, b) => b.score.total - a.score.total);

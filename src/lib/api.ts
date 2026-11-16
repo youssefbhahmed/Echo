@@ -45,6 +45,7 @@ export interface ProfileResponse {
   model: Omit<TasteProfile, 'embedding'>;
   insights: TasteInsights;
   stats: { library: number; interactions: number };
+  musicMix?: { mix: Array<{ id: string; label: string; share: number }>; avoid: string[]; blocked: Array<{ id: string; label: string }> };
   server: ServerInfo;
 }
 

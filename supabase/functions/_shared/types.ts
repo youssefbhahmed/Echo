@@ -98,6 +98,8 @@ export interface Intent {
   vague: boolean;
   /** Preference statements detected ("I love Tarkovsky"). */
   statements: PreferenceStatement[];
+  /** Source filter: only use these providers (e.g. "youtube podcasts"). */
+  providers?: ProviderId[];
   /** Which parser produced this intent. */
   source: 'rules' | 'rules+llm' | 'rules+client-llm';
 }
@@ -109,7 +111,7 @@ export interface PreferenceStatement {
   concepts: string[];
 }
 
-export type FeedbackType = 'like' | 'dislike' | 'save' | 'unsave' | 'skip' | 'rate' | 'consumed' | 'open' | 'play';
+export type FeedbackType = 'like' | 'unlike' | 'dislike' | 'save' | 'unsave' | 'skip' | 'rate' | 'consumed' | 'open' | 'play';
 
 export interface TasteProfile {
   /** Long-term concept affinities, roughly -3..3. */
@@ -128,6 +130,8 @@ export interface TasteProfile {
     statements: string[];
     pinnedConcepts: string[];
     blockedConcepts: string[];
+    /** Music style families the user never wants (see engine/music.ts). */
+    blockedFamilies?: string[];
   };
   exploration: number;
   interactionCount: number;

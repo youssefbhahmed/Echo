@@ -114,3 +114,26 @@ describe('exclusions in natural phrasing', () => {
     expect(next.excludes).toEqual(expect.arrayContaining(['motivational']));
   });
 });
+
+describe('platforms are source filters', () => {
+  it('"youtube podcasts" = podcasts from YouTube, not videos, not vague', () => {
+    const i = parseIntent('youtube podcasts');
+    expect(i.categories).toEqual(['podcasts']);
+    expect(i.providers).toEqual(['youtube']);
+    expect(i.vague).toBe(false);
+    expect(i.keywords).not.toContain('youtube');
+  });
+  it('"spotify podcasts about history" does not add music', () => {
+    const i = parseIntent('spotify podcasts about history');
+    expect(i.categories).toEqual(['podcasts']);
+    expect(i.providers).toEqual(['spotify']);
+    expect(i.keywords).toEqual(['history']);
+  });
+  it('bare platform names keep their default category', () => {
+    expect(parseIntent('something good on youtube about space').categories).toEqual(['youtube']);
+    expect(parseIntent('spotify songs for running').categories).toEqual(['music']);
+  });
+  it('"video essays" is videos, not books', () => {
+    expect(parseIntent('youtube video essays on cinema').categories).toEqual(expect.not.arrayContaining(['books']));
+  });
+});

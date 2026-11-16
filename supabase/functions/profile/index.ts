@@ -1,6 +1,7 @@
 // GET  /functions/v1/profile — taste model + insights + account status
 // POST /functions/v1/profile — { action: 'edit' | 'onboarding' | 'reset' }
 import { buildInsights } from '../_shared/engine/insights.ts';
+import { FAMILIES, familyMix } from '../_shared/engine/music.ts';
 import { applyEdit, applyFeedback, emptyProfile, seedProfile } from '../_shared/engine/profile.ts';
 import { aiConfig } from '../_shared/engine/ai.ts';
 import { providerStatus } from '../_shared/providers/index.ts';
@@ -23,6 +24,7 @@ serve(async (req) => {
       account: { email, ...(account.data ?? {}) },
       model,
       insights: buildInsights(profile, (snap.data?.concepts as Record<string, number>) ?? null),
+      musicMix: { ...familyMix(profile), blocked: (profile.explicit.blockedFamilies ?? []).map((id) => ({ id, label: FAMILIES.find((f) => f.id === id)?.label ?? id })) },
       stats: { library: libCount.count ?? 0, interactions: interCount.count ?? 0 },
       server: {
         providers: providerStatus(env).map(({ id, label, configured, categories, setup }) => ({ id, label, configured, categories, setup: configured ? undefined : setup })),

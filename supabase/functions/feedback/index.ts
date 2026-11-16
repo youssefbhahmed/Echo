@@ -23,6 +23,7 @@ serve(async (req) => {
   const patch: Record<string, unknown> | null = (() => {
     switch (body.type) {
       case 'like': return { liked: true };
+      case 'unlike': return { liked: null };
       case 'dislike': return { liked: false, saved: false };
       case 'save': return { saved: true, saved_at: now };
       case 'unsave': return { saved: false };

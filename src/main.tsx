@@ -14,6 +14,14 @@ const queryClient = new QueryClient({
 
 registerSW({ immediate: true });
 
+// Retry reactions that could not be sent (offline, expired session) as soon as possible.
+import('./hooks/data').then(({ flushFeedbackQueue }) => {
+  const flush = () => flushFeedbackQueue().then((n) => { if (n) queryClient.invalidateQueries(); });
+  setTimeout(flush, 3000);
+  window.addEventListener('online', flush);
+  window.addEventListener('focus', flush);
+});
+
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
     <QueryClientProvider client={queryClient}>

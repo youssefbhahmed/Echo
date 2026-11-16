@@ -168,6 +168,33 @@ export default function Taste() {
           </Section>
         </div>
 
+        {data.musicMix && (data.musicMix.mix.length > 0 || data.musicMix.blocked.length > 0) && (
+          <Section title="Music mix" hint="What ECHO's music curator aims for. Changes apply on your next refresh.">
+            <ul className="space-y-2">
+              {data.musicMix.mix.map((f) => (
+                <li key={f.id} className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                  <span className="w-full text-sm sm:w-52 sm:truncate" title={f.label}>{f.label.split(' (')[0]}</span>
+                  <div className="h-1.5 min-w-16 flex-1 overflow-hidden rounded-full bg-ink-4"><div className="h-full rounded-full bg-tide" style={{ width: `${Math.max(4, f.share * 100)}%` }} /></div>
+                  <span className="w-10 text-right text-xs text-dim">{Math.round(f.share * 100)}%</span>
+                  <div className="flex overflow-hidden rounded-full border border-line text-xs">
+                    <button type="button" onClick={() => edit({ family: { id: f.id, action: 'less' } })} className="px-2.5 py-1 text-mist hover:bg-ink-3 hover:text-bone">Less</button>
+                    <button type="button" onClick={() => edit({ family: { id: f.id, action: 'more' } })} className="border-x border-line px-2.5 py-1 text-mist hover:bg-ink-3 hover:text-bone">More</button>
+                    <button type="button" onClick={() => edit({ family: { id: f.id, action: 'never' } })} className="px-2.5 py-1 text-mist hover:bg-ink-3 hover:text-danger">Never</button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+            {data.musicMix.blocked.length > 0 && (
+              <div className="mt-3 flex flex-wrap items-center gap-1.5 text-xs">
+                <span className="text-dim">Never:</span>
+                {data.musicMix.blocked.map((b) => (
+                  <button key={b.id} type="button" title="Allow again" onClick={() => edit({ family: { id: b.id, action: 'allow' } })} className="rounded-full border border-danger/30 px-2.5 py-0.5 text-danger">{b.label.split(' (')[0]} ✕</button>
+                ))}
+              </div>
+            )}
+          </Section>
+        )}
+
         {model.music && (
           <Section title="Music DNA" hint={`From your ${model.music.tracks} imported Spotify liked songs`}>
             <div className="space-y-3 text-sm">

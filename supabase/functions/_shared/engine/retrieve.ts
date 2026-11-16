@@ -75,7 +75,7 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
   const budget = opts.budget ?? 12;
   // YouTube searches cost 100 quota units each: 2 per request at most, shared by Videos and Podcasts.
   const ytCats = categories.filter((c) => c === 'youtube' || c === 'podcasts').length;
-  let ytLeft = opts.youtubeBudget ?? (categories.length === 1 && categories[0] === 'youtube' ? 2 : Math.min(2, Math.max(1, ytCats)));
+  let ytLeft = opts.youtubeBudget ?? ((categories.length === 1 && categories[0] === 'youtube') || intent.providers?.includes('youtube') ? 2 : Math.min(2, Math.max(1, ytCats)));
   const targetTop = topKeys(positivePart(intent.target), 4, 0.15).filter((k) => CONCEPT_BY_ID[k] && !intent.relaxed.includes(k));
   const themeTop = targetTop.filter((k) => CONCEPT_BY_ID[k].group !== 'quality');
   const concepts = opts.hasQuery
@@ -85,7 +85,10 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
   const perCat = Math.max(1, Math.floor(budget / Math.max(1, categories.length)));
 
   for (const [ci, category] of categories.entries()) {
-    const providers = providersFor(category, opts.env);
+    const all = providersFor(category, opts.env);
+    // Source filter from the request ("youtube podcasts"), unless it would leave nothing.
+    const filtered = intent.providers?.length ? all.filter((p) => intent.providers!.includes(p.id)) : all;
+    const providers = filtered.length ? filtered : all;
     if (!providers.length) continue;
     const queries: Array<{ q: string; retrievedFor: string[] }> = [];
     // Metaphorical mood requests ("music like a sunrise") search by concept, not literal words.
@@ -122,7 +125,9 @@ export function planRetrieval(intent: Intent, profile: TasteProfile, categories:
       for (const provider of providers) {
         // In Podcasts, YouTube gets one search (its quota is precious); Spotify takes the rest.
         if (provider.id === 'youtube' && category !== 'youtube') {
-          if (ytLeft <= 0 || plan.some((x) => x.provider.id === 'youtube' && x.params.category === category)) continue;
+          // Normally one YouTube podcast search; when the user asked for YouTube specifically, up to two.
+          const maxHere = intent.providers?.includes('youtube') ? 2 : 1;
+          if (ytLeft <= 0 || plan.filter((x) => x.provider.id === 'youtube' && x.params.category === category).length >= maxHere) continue;
           ytLeft--;
         }
         plan.push({

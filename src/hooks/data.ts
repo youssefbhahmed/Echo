@@ -1,6 +1,6 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { AnalyzedItem, FeedbackType } from '@shared/types.ts';
-import { api } from '../lib/api';
+import { api, ApiError } from '../lib/api';
 import { supabase } from '../lib/supabase';
 import { useAuth } from '../lib/auth';
 import { toast } from '../components/Toast';
@@ -110,14 +110,20 @@ export function useFeedback() {
       await qc.cancelQueries({ queryKey: ['library'] });
       const prev = qc.getQueryData<LibraryRow[]>(['library']);
       const patch: Partial<LibraryRow> | null =
-        v.type === 'like' ? { liked: true } : v.type === 'dislike' ? { liked: false, saved: false } : v.type === 'save' ? { saved: true } : v.type === 'unsave' ? { saved: false } : v.type === 'rate' ? { rating: v.rating ?? null } : v.type === 'consumed' ? { status: 'consumed' } : null;
+        v.type === 'like' ? { liked: true } : v.type === 'unlike' ? { liked: null } : v.type === 'dislike' ? { liked: false, saved: false } : v.type === 'save' ? { saved: true } : v.type === 'unsave' ? { saved: false } : v.type === 'rate' ? { rating: v.rating ?? null } : v.type === 'consumed' ? { status: 'consumed' } : null;
       if (patch && prev) {
         const exists = prev.some((r) => r.item_id === v.item.id);
         qc.setQueryData<LibraryRow[]>(['library'], exists ? prev.map((r) => (r.item_id === v.item.id ? { ...r, ...patch } : r)) : prev);
       }
       return { prev };
     },
-    onError: (e, _v, ctx) => {
+    onError: (e, v, ctx) => {
+      // Network failure: keep the change and retry automatically instead of losing it.
+      if (e instanceof ApiError && e.status === 0) {
+        queueFeedback({ itemId: v.item.id, type: v.type, rating: v.rating, source: v.source });
+        toast('Saved on this device. It will sync when the connection is back.');
+        return;
+      }
       if (ctx?.prev) qc.setQueryData(['library'], ctx.prev);
       toast((e as Error).message, 'error');
     },
@@ -125,8 +131,57 @@ export function useFeedback() {
       qc.invalidateQueries({ queryKey: ['library'] });
       qc.invalidateQueries({ queryKey: ['profile'] });
       const learned = res.learned.filter((l) => Math.abs(l.to - l.from) > 0.02).slice(0, 2);
-      const verb: Record<string, string> = { like: 'Liked', dislike: 'Noted — fewer like this', save: 'Saved to your library', consumed: 'Marked as finished', rate: 'Rated', skip: 'Skipped' };
+      const verb: Record<string, string> = { unlike: 'Removed from loved', like: 'Liked', dislike: 'Noted — fewer like this', save: 'Saved to your library', consumed: 'Marked as finished', rate: 'Rated', skip: 'Skipped' };
       if (verb[v.type]) toast(`${verb[v.type]}${learned.length ? ` · learning: ${learned.map((l) => `${conceptLabel(l.concept).toLowerCase()} ${l.to > l.from ? '↑' : '↓'}`).join(', ')}` : ''}`);
     },
   });
+}
+
+// ── Offline feedback queue ──
+interface PendingFeedback { itemId: string; type: FeedbackType; rating?: number; source?: 'feed' | 'chat' | 'library' }
+const QUEUE_KEY = 'echo.pendingFeedback';
+
+function readQueue(): PendingFeedback[] {
+  try {
+    return JSON.parse(localStorage.getItem(QUEUE_KEY) ?? '[]');
+  } catch {
+    return [];
+  }
+}
+
+function queueFeedback(f: PendingFeedback) {
+  try {
+    localStorage.setItem(QUEUE_KEY, JSON.stringify([...readQueue(), f].slice(-200)));
+  } catch {
+    /* storage unavailable */
+  }
+}
+
+let flushing = false;
+/** Send queued reactions (called on start-up, when back online, and when the tab regains focus). */
+export async function flushFeedbackQueue(): Promise<number> {
+  if (flushing) return 0;
+  flushing = true;
+  let sent = 0;
+  try {
+    const q = readQueue();
+    const rest: PendingFeedback[] = [];
+    for (const f of q) {
+      try {
+        await api.feedback({ itemId: f.itemId, type: f.type, rating: f.rating, context: { source: f.source } });
+        sent++;
+      } catch (e) {
+        // Keep only network failures for later; drop permanently invalid ones.
+        if (e instanceof ApiError && (e.status === 0 || e.status === 401 || e.status >= 500)) rest.push(f);
+      }
+    }
+    try {
+      localStorage.setItem(QUEUE_KEY, JSON.stringify(rest));
+    } catch {
+      /* ignore */
+    }
+  } finally {
+    flushing = false;
+  }
+  return sent;
 }

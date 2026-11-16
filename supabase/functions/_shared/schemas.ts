@@ -26,7 +26,7 @@ export const ChatBody = z.object({
 
 export const FeedbackBody = z.object({
   itemId: itemId,
-  type: z.enum(['like', 'dislike', 'save', 'unsave', 'skip', 'rate', 'consumed', 'open', 'play']),
+  type: z.enum(['like', 'unlike', 'dislike', 'save', 'unsave', 'skip', 'rate', 'consumed', 'open', 'play']),
   rating: z.number().int().min(1).max(5).optional(),
   context: z.object({ source: z.enum(['feed', 'chat', 'library', 'onboarding']).optional(), query: z.string().max(300).optional(), exploration: z.number().optional() }).optional(),
 });
@@ -46,6 +46,7 @@ export const ProfileEditBody = z.object({
     removeLike: z.string().max(200).optional(),
     removeDislike: z.string().max(200).optional(),
     exploration: z.number().min(0).max(1).optional(),
+    family: z.object({ id: z.string().max(40), action: z.enum(['more', 'less', 'never', 'allow']) }).optional(),
   }),
 });
 
