@@ -84,7 +84,7 @@ describe('live-session pool', () => {
     expect(details.get('part')).toBe('snippet,contentDetails,status,player');
     expect(details.get('maxWidth')).toBe('640');
     expect(details.get('fields')).toMatch(/player\(embedWidth,embedHeight\)/);
-    // Known ids in one channels.list call; the three channels without a known id resolved by handle.
+    // Known ids in one channels.list call; the channels without a known id resolved by handle.
     expect(count(log, 'channels')).toBe(1 + SESSION_CHANNELS.filter((c) => !c.id).length);
     expect(log.filter((u) => u.includes('forHandle=')).map((u) => new URL(u).searchParams.get('forHandle'))).toEqual(SESSION_CHANNELS.filter((c) => !c.id).map((c) => c.handle));
     expect(count(log, 'playlistItems')).toBe(SESSION_CHANNELS.length);
@@ -92,7 +92,7 @@ describe('live-session pool', () => {
     expect(count(log, 'search')).toBe(0); // never search.list (100 units)
     expect(r.source).toBe('network');
     expect(r.units).toBe(log.length);
-    expect(r.units).toBe(4 + 8 + 8);
+    expect(r.units).toBe(1 + SESSION_CHANNELS.filter((c) => !c.id).length + 8 + 8);
     // Shorts (under a minute, or a portrait player), private, non-embeddable and upcoming streams are out: 2 of 7 per channel remain.
     expect(r.videos).toHaveLength(SESSION_CHANNELS.length * 2);
     expect(r.videos.every((v) => v.durationSec >= 60)).toBe(true);
@@ -121,7 +121,7 @@ describe('live-session pool', () => {
     const cache = new MemoryCache();
     const day1 = await liveSessionPool({ http: createHttp(cache, fakeYouTube({ uploads: 50 }, log)), env });
     // 4 channel lookups + 8 upload pages + 400 ids / 50 = 8 detail calls.
-    expect(day1.units).toBe(4 + 8 + 8);
+    expect(day1.units).toBe(1 + SESSION_CHANNELS.filter((c) => !c.id).length + 8 + 8);
     vi.setSystemTime(new Date('2026-11-17T08:30:00Z'));
     log.length = 0;
     const day2 = await liveSessionPool({ http: createHttp(cache, fakeYouTube({ uploads: 50 }, log)), env });
