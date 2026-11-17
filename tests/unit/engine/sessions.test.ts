@@ -273,7 +273,7 @@ describe('review fixes: band names, regional evidence, repeats, refresh', () => 
     expect(matchLaneSessions([s], { ...ctx, libraryArtistLanes: lib.artistLanes })).toEqual([]);
   });
 
-  it('channel-only needs language evidence outside language-neutral lanes: COLORS never while French is off; Tiny Desk with a declared language', () => {
+  it('channel-only needs language evidence outside language-neutral lanes: COLORS never while French is off; Tiny Desk never (it films every genre)', () => {
     const colorsNoLang = video('colors', 'Unknown Act - Meuda | A COLORS SHOW');
     const colorsEn = video('colors', 'Unknown Act - Flow | A COLORS SHOW', { lang: 'en' });
     const tinyNoLang = video('tinydesk', 'Quiet Act: Tiny Desk Concert');
@@ -286,7 +286,10 @@ describe('review fixes: band names, regional evidence, repeats, refresh', () => 
     // French on: COLORS with a declared non-regional language may fill the hip-hop slot; without one, never.
     expect(titles(matchLaneSessions([colorsNoLang], { lanes: [HIP], profile: profileWith() }))).toEqual([]);
     expect(titles(matchLaneSessions([colorsEn], { lanes: [HIP], profile: profileWith() }))).toEqual([colorsEn.title]);
-    expect(titles(matchLaneSessions([tinyNoLang, tinyEn], { lanes: [HIP], profile: profileWith({ frenchOff: true }) }))).toEqual([tinyEn.title]);
+    // Tiny Desk films every genre: its newest session says nothing about a lane, so it is never a channel-only
+    // pick, even with a declared language. It still joins a lane through an artist match.
+    expect(titles(matchLaneSessions([tinyNoLang, tinyEn], { lanes: [HIP], profile: profileWith({ frenchOff: true }) }))).toEqual([]);
+    expect(titles(matchLaneSessions([tinyNoLang, tinyEn], { lanes: [HIP], picks: { 'hiphop-rnb': [{ artist: 'Other Act' }] }, profile: profileWith({ frenchOff: true }) }))).toEqual([tinyEn.title]);
   });
 
   it('a session shown lately is not shown again through another of its videos (each song, then the full performance)', () => {

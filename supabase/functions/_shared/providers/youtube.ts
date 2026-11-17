@@ -162,7 +162,7 @@ export interface SessionChannel {
  * missing or does not match.
  */
 export const SESSION_CHANNELS: SessionChannel[] = [
-  { key: 'tinydesk', name: 'NPR Music (Tiny Desk)', handle: '@nprmusic', id: 'UC4eYXhJI4-7wSWc8UNRwD4A', venue: 'Tiny Desk', prep: 'at', session: 'Tiny Desk Concert', lanes: ['hiphop-rnb', 'blues-soul', 'afro-latin', 'jazz-classical'], open: ['hiphop-rnb', 'blues-soul'] },
+  { key: 'tinydesk', name: 'NPR Music (Tiny Desk)', handle: '@nprmusic', id: 'UC4eYXhJI4-7wSWc8UNRwD4A', venue: 'Tiny Desk', prep: 'at', session: 'Tiny Desk Concert', lanes: ['hiphop-rnb', 'blues-soul', 'afro-latin', 'jazz-classical'], open: [] },
   { key: 'colors', name: 'COLORS', handle: '@COLORSxSTUDIOS', id: 'UC2Qw1dzXDBAZPwS7zm37g8g', venue: 'COLORS', prep: 'on', session: 'A COLORS SHOW', lanes: ['hiphop-rnb', 'blues-soul', 'afro-latin'], open: ['hiphop-rnb'], multilingual: true },
   { key: 'kexp', name: 'KEXP', handle: '@kexp', id: 'UC3I2GFN_F8WudD_2jUZbojA', venue: 'KEXP', prep: 'on', session: 'Live on KEXP', lanes: ['rock-metal', 'blues-soul'], open: ['rock-metal'], english: true },
   { key: 'audiotree', name: 'Audiotree', handle: '@audiotree', id: 'UCWjmAUHmajb1-eo5WKk_22A', venue: 'Audiotree', prep: 'on', session: 'Audiotree Live session', lanes: ['rock-metal', 'blues-soul'], open: ['rock-metal'], english: true },
