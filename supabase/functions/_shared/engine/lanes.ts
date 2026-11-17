@@ -153,6 +153,8 @@ export function isEntityExtra(item: { category: string; metadata?: Record<string
 
 /** Every lane id this engine writes: the taxonomy lanes plus the request/open pseudo-lanes. */
 export const ENGINE_LANE_IDS: string[] = [...LANES.map((l) => l.id), REQUEST_LANE.id, MIX_LANE.id];
+/** The taxonomy lanes only (a song placed in one fits it by the lane's own rules, language included). */
+export const TAXONOMY_LANE_IDS: string[] = LANES.map((l) => l.id);
 
 /** A lane id this engine writes (taxonomy lanes plus the request/open pseudo-lanes); older curator picks carry none. */
 export function isEngineLane(id: string | undefined | null): boolean {
@@ -163,7 +165,7 @@ export function isEngineLane(id: string | undefined | null): boolean {
  * Per-user / per-response fields of a recommended item: rebuilt for every response, never stored in the
  * shared catalog (content_items is readable by every signed-in user) nor carried over from it.
  */
-export const PER_USER_METADATA = ['lastShownAt', 'laneEra', 'laneMood', 'aiOrder', 'fallback', 'fallbackTier', 'inLibrary', 'entity', 'entityOrder'] as const;
+export const PER_USER_METADATA = ['lastShownAt', 'laneEra', 'laneMood', 'aiOrder', 'fallback', 'fallbackTier', 'inLibrary', 'entity', 'entityOrder', 'wantedScene'] as const;
 
 /** Item metadata without per-user / per-request fields (an entity lane tag is per request too). */
 export function withoutPerUser(meta: Record<string, unknown> | undefined): Record<string, unknown> {
@@ -171,6 +173,46 @@ export function withoutPerUser(meta: Record<string, unknown> | undefined): Recor
   for (const k of PER_USER_METADATA) delete out[k];
   if (isEntityLane(laneTagOf({ metadata: out })?.id)) delete out.lane;
   return out;
+}
+
+/**
+ * Catalog metadata to store for an item over the row already there (content_items is shared, and an
+ * upsert replaces the whole column): this response's fields, minus per-user ones, but the lane the row
+ * already had is kept when this response has none (an entity lane is per request), and a taxonomy lane
+ * over a pseudo-lane (a request): the stored fallback tiers and lane feedback read it. The curator's
+ * lyrics language is kept too.
+ */
+export function mergeCatalogMetadata(existing: Record<string, unknown> | undefined | null, incoming: Record<string, unknown> | undefined): Record<string, unknown> {
+  const out = withoutPerUser(incoming);
+  const prev = withoutPerUser(existing ?? undefined);
+  const prevLane = laneTagOf({ metadata: prev });
+  const lane = laneTagOf({ metadata: out });
+  const keepPrev = !!prevLane && isEngineLane(prevLane.id) && (!lane || (!LANE_BY_ID[lane.id] && !!LANE_BY_ID[prevLane.id]));
+  if (keepPrev) out.lane = prevLane;
+  if (out.lyricsLang === undefined && typeof prev.lyricsLang === 'string') out.lyricsLang = prev.lyricsLang;
+  return out;
+}
+
+/** Style families of a regional scene ("french" → French rap and chanson; "arabic-pop" → maghreb). */
+export function sceneFamilies(scene: string): string[] {
+  return LANE_BY_ID[scene]?.families ?? [];
+}
+
+/**
+ * The profile with these regional scenes' style families allowed again: the request asks for the scene
+ * ("rap français"), or names an artist of it. Every other switched-off family stays off.
+ */
+export function allowScenes(profile: TasteProfile, scenes: Iterable<string>): TasteProfile {
+  const fam = new Set([...scenes].flatMap(sceneFamilies));
+  const blocked = profile.explicit.blockedFamilies ?? [];
+  if (!fam.size || !blocked.some((f) => fam.has(f))) return profile;
+  return { ...profile, explicit: { ...profile.explicit, blockedFamilies: blocked.filter((f) => !fam.has(f)) } };
+}
+
+/** The regional scene a request's own words asked for, or a named artist belongs to (metadata.wantedScene, per response). */
+export function wantedSceneOf(item: { metadata?: Record<string, unknown> }): string | null {
+  const s = item.metadata?.wantedScene;
+  return typeof s === 'string' && LANE_BY_ID[s]?.regional ? s : null;
 }
 
 // ───────────── owner policy ─────────────

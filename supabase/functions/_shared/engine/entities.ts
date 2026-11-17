@@ -4,7 +4,7 @@
 // here. Only the user's words and the AI interpreter's own output (names, related works) are looked up.
 import type { Category, ContentItem, Entity, EntityKind, EntityTag, EntityWork, Intent, ProviderId, Recommendation } from '../types.ts';
 import { PROVIDERS, providersFor } from '../providers/index.ts';
-import type { HttpClient } from '../providers/http.ts';
+import { ProviderError, type HttpClient } from '../providers/http.ts';
 import type { Env, Provider } from '../providers/types.ts';
 import { openLibrary, openLibraryAuthorWorks } from '../providers/openlibrary.ts';
 import { tmdbPersonWorks } from '../providers/tmdb.ts';
@@ -39,7 +39,9 @@ export function primaryEntity(intent: Pick<Intent, 'entities'>): Entity | null {
 /**
  * Where an entity is looked up, in order: an artist only in music (never as a book or a show), an author
  * in books, films/series/people in screen, a creator on YouTube, a podcast in podcasts. An unknown kind
- * tries music first when the request is about music or names no medium, then screen, then books.
+ * is looked up in the request's other media, then screen, then books — never by a Spotify song search
+ * (that would spend Spotify's rate-limited search on every unread name): in a music request, a name no
+ * catalog knows as a work is answered as an artist by the curator, which checks every song's credit.
  */
 export function entityRoute(e: Pick<Entity, 'kind'>, categories: Category[]): Category[] {
   switch (e.kind) {
@@ -57,24 +59,47 @@ export function entityRoute(e: Pick<Entity, 'kind'>, categories: Category[]): Ca
       return ['youtube'];
     case 'podcast':
       return ['podcasts'];
-    default: {
-      const musicFirst = !categories.length || categories.includes('music');
-      return [...new Set<Category>([...(musicFirst ? (['music'] as Category[]) : []), ...categories.filter((c) => c !== 'music'), 'screen', 'books'])];
-    }
+    default:
+      // A music-only request: the name is the curator's to answer (an artist), never a film or a book.
+      if (categories.length && categories.every((c) => c === 'music')) return [];
+      return [...new Set<Category>([...categories.filter((c) => c !== 'music'), 'screen', 'books'])];
   }
 }
 
-/** An artist the music curator should answer: named as one, or an unknown name in a music request. */
+/**
+ * An artist the music curator should answer: named as one, or a name of unknown kind in a music request
+ * that no catalog knows as a work (a name resolved to a film, series, book or podcast takes that kind;
+ * a song or album title is never an entity, see understand.ts).
+ */
 export function isArtistEntity(e: Pick<Entity, 'kind'>, categories: Category[]): boolean {
   return e.kind === 'artist' || (e.kind === 'other' && categories.includes('music'));
 }
 
 const has = (hay: string, needle: string) => needle.length >= 3 && hay.includes(needle);
 
-/** The item names the entity in its title, credits, tags or description. */
+/** Words of any script, lowercased, accents removed: "Jay-Z live" → ["jay", "z", "live"], "MØ" → ["mø"]. */
+function wordsOf(s: string): string[] {
+  return s.toLowerCase().normalize('NFKD').replace(/\p{M}/gu, '').replace(/[^\p{L}\p{N}]+/gu, ' ').trim().split(' ').filter(Boolean);
+}
+
+/** The name's words appear together, as whole words ("Nas" is not in "NASA" or "dynasty"). */
+function namedIn(text: string, nameWords: string[]): boolean {
+  if (!nameWords.length) return false;
+  const words = wordsOf(text);
+  for (let i = 0; i + nameWords.length <= words.length; i++) if (nameWords.every((w, j) => words[i + j] === w)) return true;
+  return false;
+}
+
+/**
+ * The item names the entity, as whole words: in its title, credits or tags, or (a name of two words or
+ * more) its description. A one-word name ("Future", "Common") is a common word in prose, so the
+ * description doesn't count for it; a two-letter name ("U2", "MØ") counts like any other.
+ */
 export function mentions(item: Pick<ContentItem, 'title' | 'creators' | 'tags' | 'description'>, name: string): boolean {
-  const n = fold(name);
-  return has(fold(`${item.title} ${item.creators.join(' ')} ${item.tags.slice(0, 30).join(' ')} ${(item.description ?? '').slice(0, 800)}`), n);
+  const n = wordsOf(name);
+  if (!n.length || n.join('').length < 2) return false;
+  if ([item.title, ...item.creators, ...item.tags.slice(0, 30)].some((t) => namedIn(t, n))) return true;
+  return n.length >= 2 && namedIn((item.description ?? '').slice(0, 800), n);
 }
 
 /** The item credits the entity (author, channel, artist). */
@@ -124,21 +149,35 @@ export interface EntityResolution {
 export interface EntityContext {
   env: Env;
   http: HttpClient;
+  /** Providers not to call (blocked, or out of quota earlier in this request: callers add to it). */
   blocked?: Set<ProviderId>;
 }
 
 const WORK_KINDS_RESOLVED: EntityKind[] = ['film', 'series', 'book', 'podcast', 'other'];
 
+/** The kind of entity a catalog work is ("movie" → film, "episode" → podcast). */
+const KIND_OF_WORK: Partial<Record<ContentItem['kind'], EntityKind>> = { movie: 'film', series: 'series', book: 'book', podcast: 'podcast', episode: 'podcast' };
+
+/** Same title, a leading article aside ("The Dune" = "Dune"): a name that IS this work, not one about it. */
+export function sameTitle(title: string, name: string): boolean {
+  const bare = (x: string) => fold(x.replace(/^\s*(the|a|an|le|la|les|el)\s+/i, ''));
+  return !!bare(name) && bare(title) === bare(name);
+}
+
 /**
  * Look the entity up by kind. People (artists, authors, directors, actors, creators) are not looked up as
- * titles: the music curator answers artists, and their works come from entityExtras. Works (films, series,
- * books, podcasts) and unknown names go to their own media, and a match must plausibly be the thing named.
+ * titles: the music curator answers artists, and their works come from entityExtras. Works (films,
+ * series, books, podcasts) go to their own media, and a match must plausibly be the thing named. A name
+ * of unknown kind is a work only when a catalog has a work of exactly that title ("dune" → the film
+ * Dune): it then takes that work's kind. Anything else ("The Nova Lyric Story" for "nova lyric") is about
+ * the name at most, so the name stays a name (a person: things about them come from entityExtras).
  */
 export async function resolveEntity(e: Entity, categories: Category[], ctx: EntityContext, onError?: (p: Provider, err: unknown) => void): Promise<EntityResolution> {
   if (!WORK_KINDS_RESOLVED.includes(e.kind)) {
     const who = e.kind === 'artist' ? 'artist: music curator' : `${e.kind}: their works`;
     return { entity: e, item: null, provider: null, detail: `${e.name} → ${who}` };
   }
+  const unknown = e.kind === 'other';
   for (const cat of entityRoute(e, categories)) {
     for (const p of providersFor(cat, ctx.env)) {
       if (!p.resolve || ctx.blocked?.has(p.id)) continue;
@@ -146,18 +185,19 @@ export async function resolveEntity(e: Entity, categories: Category[], ctx: Enti
       if (e.kind === 'film' && p.id === 'tvmaze') continue;
       try {
         const item = await p.resolve(e.name, { http: ctx.http, env: ctx.env }, cat);
-        // A song search crediting the name: it is an artist (answered by music lanes, not by that one song).
-        if (item && cat === 'music') {
-          if (credits(item, e.name)) return { entity: e, item: null, provider: p.id, detail: `${e.name} → artist (${p.id})`, kind: 'artist' };
+        if (!item) continue;
+        if (unknown) {
+          const kind = KIND_OF_WORK[item.kind];
+          if (kind && sameTitle(item.title, e.name)) return { entity: e, item, provider: p.id, detail: `${e.name} → ${item.title} (${p.id}, a ${kind})`, kind };
           continue;
         }
-        if (item && plausibleMatch(item, e.name)) return { entity: e, item, provider: p.id, detail: `${e.name} → ${item.title} (${p.id})` };
+        if (plausibleMatch(item, e.name)) return { entity: e, item, provider: p.id, detail: `${e.name} → ${item.title} (${p.id})` };
       } catch (err) {
         onError?.(p, err);
       }
     }
   }
-  return { entity: e, item: null, provider: null, detail: `${e.name}: not found in the connected catalogs` };
+  return { entity: e, item: null, provider: null, detail: unknown ? `${e.name}: no work of that title in the connected catalogs (a name)` : `${e.name}: not found in the connected catalogs` };
 }
 
 // ───────────── cross-media items around an entity ─────────────
@@ -169,9 +209,18 @@ export interface ExtrasContext extends EntityContext {
   resolved?: ContentItem | null;
   /** Stored catalog items (YouTube out of quota, Spotify rate-limited). */
   stored?: (provider: ProviderId, categories: Category[]) => Promise<ContentItem[]>;
+  /**
+   * Stored catalog items that name `name` (title or credits), looked up by name: preferred over `stored`,
+   * whose newest-first window can miss an older video about them.
+   */
+  storedNamed?: (provider: ProviderId, categories: Category[], name: string) => Promise<ContentItem[]>;
+  /** A provider answered "out of quota" (recorded as a block by the caller, and not called again in this request). */
+  onQuota?: (provider: ProviderId, retryAfterSec?: number) => void;
   /** Most items returned. */
   cap?: number;
-  /** Most provider calls (YouTube search = 1, a TMDB lookup = 1–2). */
+  /** Most of the entity's own works ('by'); default 4 next to other kinds of items (see extrasCap). */
+  byMax?: number;
+  /** Most provider calls (YouTube search = 1, a TMDB lookup = 1–2). Default 5. */
   maxCalls?: number;
 }
 
@@ -183,21 +232,33 @@ export interface ExtrasResult {
 
 const KIND_WORD: Record<string, string> = { movie: 'film', series: 'series', book: 'book', video: 'video', episode: 'episode', podcast: 'podcast' };
 
-/** Default cap of non-music items around an entity: ~6 next to music lanes, a little more on their own. */
-export function extrasCap(e: Entity, categories: Category[]): number {
+/** People whose own works answer "<their works>" (an author's books, a director's films, a creator's videos). */
+const MAKERS: EntityKind[] = ['author', 'director', 'actor', 'creator'];
+
+/**
+ * Cap of non-music items around an entity: ~6 next to music lanes, 8 on their own. A request for a
+ * maker's own works ("books by X") is answered by those works: up to the request limit, less a few.
+ */
+export function extrasCap(e: Entity, categories: Category[], limit = 20): number {
+  if (e.want === 'by' && MAKERS.includes(e.kind)) return Math.max(8, limit - 4);
   return isArtistEntity(e, categories) && e.want === 'all' && categories.includes('music') ? 6 : 8;
 }
+
+const isQuota = (err: unknown): err is ProviderError => err instanceof ProviderError && err.kind === 'quota';
 
 /**
  * Items around the entity in other media, bounded (≤ maxCalls provider calls, ≤ cap items), each tagged
  * metadata.entity = { name, role, note } and metadata.entityOrder (by → about → like):
- *   artist (all/about): the interpreter's related works (film/series → screen, book → books), one YouTube
- *     search "<name> interview|documentary|breakdown" (stored videos naming them when YouTube is
- *     out of quota), and an Open Library search for books by/about them;
- *   author: their works (by), books on their top work's subjects (like), works + interviews (about);
- *   film/series/book: the work itself (by), provider "similar" or same-subject books (like), related works
- *     + one YouTube search (about); director/actor: their known films/series (by), similar to the first (like);
+ *   artist (all/about): one YouTube search "<name> interview|documentary|breakdown" (stored videos naming
+ *     them when YouTube is out of quota), an Open Library search for books by/about them, and the
+ *     interpreter's related works (film/series → screen, book → books);
+ *   author: their works (by), books on their top work's subjects (like), interviews + related works (about);
+ *   film/series/book: the work itself (by), provider "similar" or same-subject books (like), one YouTube
+ *     search + related works (about); director/actor: their known films/series (by), similar to the first (like);
  *   creator: their videos; podcast: the show itself (stored or looked up).
+ * The budget goes to the entity's own works first, then things like it and the about-search, and only then
+ * to the interpreter's related works (a TMDB lookup costs 2): a famous author's film adaptations never
+ * crowd out their books. A YouTube search out of quota falls back to stored videos in the same request.
  */
 export async function entityExtras(e: Entity, ctx: ExtrasContext): Promise<ExtrasResult> {
   const cats = ctx.categories;
@@ -205,22 +266,43 @@ export async function entityExtras(e: Entity, ctx: ExtrasContext): Promise<Extra
   const by = e.want === 'by' || e.want === 'all';
   const like = e.want === 'like' || e.want === 'all';
   const about = e.want === 'about' || e.want === 'all';
-  const budget = ctx.maxCalls ?? 4;
+  const byMax = Math.max(1, ctx.byMax ?? 4);
+  const budget = ctx.maxCalls ?? 5;
   let calls = 0;
+  // Calls are reserved when a task is registered (in priority order), not when it runs.
   const spend = (n = 1) => (calls + n <= budget ? ((calls += n), true) : false);
   const pctx = { http: ctx.http, env: ctx.env };
   const blocked = (id: ProviderId) => !!ctx.blocked?.has(id);
   const ytOk = youtube.configured(ctx.env) && !blocked('youtube');
   const tmdb = PROVIDERS.tmdb;
   const tmdbOk = !!tmdb?.configured(ctx.env) && !blocked('tmdb');
+  const hasStored = !!(ctx.storedNamed || ctx.stored);
+  const storedFor = (provider: ProviderId, c: Category[]) =>
+    ctx.storedNamed ? ctx.storedNamed(provider, c, e.name) : ctx.stored ? ctx.stored(provider, c) : Promise.resolve([] as ContentItem[]);
   type Found = { item: ContentItem; role: EntityTag['role']; note?: string; rank: number };
   const found: Found[] = [];
   const notes: string[] = [];
   const tasks: Array<Promise<void>> = [];
+  const quota = (err: ProviderError) => {
+    ctx.blocked?.add(err.provider as ProviderId);
+    ctx.onQuota?.(err.provider as ProviderId, err.retryAfterSec);
+  };
   const run = (label: string, f: () => Promise<void>) =>
     tasks.push(f().catch((err) => {
+      if (isQuota(err)) quota(err);
       notes.push(`${label} failed (${String((err as Error)?.message ?? err).slice(0, 60)})`);
     }));
+  /** A live search, or (out of quota) the stored items instead, in the same request. */
+  const liveOrStored = async (search: () => Promise<ContentItem[]>, provider: ProviderId, c: Category[]) => {
+    try {
+      return await search();
+    } catch (err) {
+      if (!isQuota(err) || !hasStored) throw err;
+      quota(err);
+      notes.push(`${provider} out of quota: stored items used`);
+      return storedFor(provider, c);
+    }
+  };
   const add = (items: ContentItem[], role: EntityTag['role'], rank: number, note: (i: ContentItem) => string | undefined, max: number) => {
     let n = 0;
     for (const item of items) {
@@ -232,26 +314,16 @@ export async function entityExtras(e: Entity, ctx: ExtrasContext): Promise<Extra
   const kindWord = (i: ContentItem) => KIND_WORD[i.kind] ?? 'pick';
   const person = ['artist', 'author', 'director', 'actor', 'creator'].includes(e.kind) || (e.kind === 'other' && !ctx.resolved);
   const subject = ctx.resolved?.title ?? e.name;
+  const SUBJECT_NOISE = /fiction$|^nyt|accessible|protected|lending|large type/i;
 
-  // Related works the interpreter named (8 Mile, the memoir…), resolved in their own media.
-  const works = about ? (e.works ?? []).filter((w) => (w.kind === 'film' || w.kind === 'series' ? may('screen') : w.kind === 'book' ? may('books') : false)) : [];
-  for (const [wi, w] of works.slice(0, 2).entries()) {
-    const cat: Category = w.kind === 'book' ? 'books' : 'screen';
-    const p = cat === 'books' ? openLibrary : tmdbOk ? tmdb! : w.kind === 'series' ? PROVIDERS.tvmaze : undefined;
-    if (!p?.resolve || blocked(p.id) || !spend(p.id === 'tmdb' ? 2 : 1)) continue;
-    run(`work ${w.title}`, async () => {
-      const item = await p.resolve!(w.title, pctx, cat);
-      if (item && workMatches(item, w)) add([item], 'about', 20 + wi, () => w.note ?? `a ${w.kind} tied to ${e.name}`, 1);
-    });
-  }
-
-  // Their own works (an author's also seed "like": books on the subjects of their best-known work).
+  // 1. Their own works (an author's also seed "like": books on the subjects of their best-known work).
   if (e.kind === 'author' && (by || like) && may('books') && spend()) {
+    const likeOk = like && spend();
     run('author works', async () => {
-      const books = await openLibraryAuthorWorks(e.name, pctx, 12);
-      if (by) add(books, 'by', 10, () => `by ${e.name}`, 4);
-      const subj = (books[0]?.tags ?? []).filter((t) => t.length <= 30 && !/fiction$|^nyt|accessible|protected|lending|large type/i.test(t))[0];
-      if (like && subj && spend()) {
+      const books = await openLibraryAuthorWorks(e.name, pctx, Math.min(30, Math.max(12, byMax + 2)));
+      if (by) add(books, 'by', 10, () => `by ${e.name}`, byMax);
+      const subj = (books[0]?.tags ?? []).filter((t) => t.length <= 30 && !SUBJECT_NOISE.test(t))[0];
+      if (likeOk && subj) {
         const similar = (await openLibrary.search({ query: `subject:"${subj}"`, category: 'books', limit: 15 }, pctx)).filter((b) => !credits(b, e.name));
         add(similar, 'like', 40, () => `like ${e.name}: ${subj.toLowerCase()}`, 3);
       }
@@ -260,44 +332,45 @@ export async function entityExtras(e: Entity, ctx: ExtrasContext): Promise<Extra
   if (by && e.kind !== 'author') {
     if ((e.kind === 'director' || e.kind === 'actor') && may('screen')) {
       if (tmdbOk && spend()) {
+        const likeOk = like && !!tmdb?.similar && spend();
         run('person works', async () => {
           const r = await tmdbPersonWorks(e.name, pctx);
-          add(r.works, 'by', 10, () => (e.kind === 'director' ? `directed by ${e.name}` : `with ${e.name}`), 4);
+          add(r.works, 'by', 10, () => (e.kind === 'director' ? `directed by ${e.name}` : `with ${e.name}`), byMax);
           const first = r.works[0];
-          if (like && first && tmdb?.similar && spend()) add(await tmdb.similar(first, pctx), 'like', 40, () => `like ${first.title}`, 3);
+          if (likeOk && first) add(await tmdb!.similar!(first, pctx), 'like', 40, () => `like ${first.title}`, 3);
         });
       } else if (!blocked('tvmaze') && spend(2)) {
-        run('person shows', async () => add(await tvmazePersonShows(e.name, pctx, e.kind === 'director' ? 'crew' : 'cast'), 'by', 10, () => (e.kind === 'director' ? `made by ${e.name}` : `with ${e.name}`), 4));
+        run('person shows', async () => add(await tvmazePersonShows(e.name, pctx, e.kind === 'director' ? 'crew' : 'cast'), 'by', 10, () => (e.kind === 'director' ? `made by ${e.name}` : `with ${e.name}`), byMax));
       }
     } else if (e.kind === 'creator' && may('youtube')) {
       if (ytOk && spend()) {
         run('creator videos', async () => {
-          const vids = await youtube.search({ query: e.name, category: 'youtube', limit: 15 }, pctx);
-          add(vids.filter((v) => credits(v, e.name)), 'by', 10, () => `from ${e.name}`, 4);
+          const vids = await liveOrStored(() => youtube.search({ query: e.name, category: 'youtube', limit: 15 }, pctx), 'youtube', ['youtube']);
+          add(vids.filter((v) => credits(v, e.name)), 'by', 10, () => `from ${e.name}`, byMax);
         });
-      } else if (ctx.stored) {
-        run('stored creator videos', async () => add((await ctx.stored!('youtube', ['youtube'])).filter((v) => credits(v, e.name)), 'by', 10, () => `from ${e.name}`, 4));
+      } else if (hasStored) {
+        run('stored creator videos', async () => add((await storedFor('youtube', ['youtube'])).filter((v) => credits(v, e.name)), 'by', 10, () => `from ${e.name}`, byMax));
       }
     } else if (ctx.resolved && may(ctx.resolved.category)) {
       // A film, series, book or show: the work itself.
       const r = ctx.resolved;
       add([r], 'by', 10, () => (r.creators[0] ? `the ${kindWord(r)} itself, by ${r.creators[0]}` : `the ${kindWord(r)} itself`), 1);
-    } else if (e.kind === 'podcast' && may('podcasts') && ctx.stored) {
+    } else if (e.kind === 'podcast' && may('podcasts') && hasStored) {
       run('stored podcast', async () => {
-        const shows = [...(await ctx.stored!('spotify', ['podcasts'])), ...(await ctx.stored!('youtube', ['podcasts']))];
-        add(shows.filter((s) => plausibleMatch(s, e.name)), 'by', 10, () => 'the show itself', 2);
+        const [spotifyShows, youtubeShows] = await Promise.all([storedFor('spotify', ['podcasts']), storedFor('youtube', ['podcasts'])]);
+        add([...spotifyShows, ...youtubeShows].filter((x) => plausibleMatch(x, e.name)), 'by', 10, () => 'the show itself', 2);
       });
     }
   }
 
-  // Things like it (works only: an artist's "like" is the curator's lane, an author's comes with their works).
+  // 2. Things like it (works only: an artist's "like" is the curator's lane, an author's comes with their works).
   if (like && ctx.resolved && !person) {
     const r = ctx.resolved;
     const p = PROVIDERS[r.provider];
     if (p?.similar && !blocked(p.id) && may(r.category) && spend()) {
       run('similar', async () => add(await p.similar!(r, pctx), 'like', 40, () => `like ${r.title}`, 5));
     } else if (r.category === 'books' && may('books')) {
-      const subj = r.tags.filter((t) => t.length <= 30 && !/fiction$|^nyt|accessible|protected|lending|large type/i.test(t))[0];
+      const subj = r.tags.filter((t) => t.length <= 30 && !SUBJECT_NOISE.test(t))[0];
       if (subj && spend()) {
         run('same-subject books', async () => {
           const books = (await openLibrary.search({ query: `subject:"${subj}"`, category: 'books', limit: 15 }, pctx)).filter((b) => b.id !== r.id && !r.creators.some((c) => credits(b, c)));
@@ -307,21 +380,19 @@ export async function entityExtras(e: Entity, ctx: ExtrasContext): Promise<Extra
     }
   }
 
-  // Things about it: one YouTube search (stored videos naming it when YouTube is out of quota), and books.
+  // 3. Things about it: one YouTube search (stored videos naming it when YouTube is out of quota), and books.
   if (about) {
     if (may('youtube') && e.kind !== 'creator') {
       // YouTube search's OR operator is "|".
       const q = person ? `${e.name} interview|documentary|breakdown` : `${subject} explained|analysis|review`;
+      const note = (v: ContentItem) => `a video about ${e.name}${v.creators[0] ? ` from ${v.creators[0]}` : ''}`;
       if (ytOk && spend()) {
         run('videos about', async () => {
-          const vids = await youtube.search({ query: q, category: 'youtube', limit: 15 }, pctx);
-          add(vids.filter((v) => mentions(v, e.name)), 'about', 50, (v) => `a video about ${e.name}${v.creators[0] ? ` from ${v.creators[0]}` : ''}`, 2);
+          const vids = await liveOrStored(() => youtube.search({ query: q, category: 'youtube', limit: 15 }, pctx), 'youtube', ['youtube']);
+          add(vids.filter((v) => mentions(v, e.name)), 'about', 50, note, 2);
         });
-      } else if (ctx.stored) {
-        run('stored videos about', async () => {
-          const vids = await ctx.stored!('youtube', ['youtube']);
-          add(vids.filter((v) => mentions(v, e.name)), 'about', 50, (v) => `a video about ${e.name}${v.creators[0] ? ` from ${v.creators[0]}` : ''}`, 2);
-        });
+      } else if (hasStored) {
+        run('stored videos about', async () => add((await storedFor('youtube', ['youtube'])).filter((v) => mentions(v, e.name)), 'about', 50, note, 2));
       }
     }
     if (may('books') && person && e.kind !== 'author' && spend()) {
@@ -330,6 +401,18 @@ export async function entityExtras(e: Entity, ctx: ExtrasContext): Promise<Extra
         add(books, 'about', 30, (b) => (credits(b, e.name) ? `written by ${e.name}` : `a book about ${e.name}`), 2);
       });
     }
+  }
+
+  // 4. Related works the interpreter named (8 Mile, the memoir…), resolved in their own media with what is left.
+  const works = about ? (e.works ?? []).filter((w) => (w.kind === 'film' || w.kind === 'series' ? may('screen') : w.kind === 'book' ? may('books') : false)) : [];
+  for (const [wi, w] of works.slice(0, 2).entries()) {
+    const cat: Category = w.kind === 'book' ? 'books' : 'screen';
+    const p = cat === 'books' ? openLibrary : tmdbOk ? tmdb! : w.kind === 'series' ? PROVIDERS.tvmaze : undefined;
+    if (!p?.resolve || blocked(p.id) || !spend(p.id === 'tmdb' ? 2 : 1)) continue;
+    run(`work ${w.title}`, async () => {
+      const item = await p.resolve!(w.title, pctx, cat);
+      if (item && workMatches(item, w)) add([item], 'about', 20 + wi, () => w.note ?? `a ${w.kind} tied to ${e.name}`, 1);
+    });
   }
 
   await Promise.all(tasks);
@@ -365,9 +448,10 @@ function titlesList(titles: string[]): string {
 /**
  * Chat reply for an entity request, grounded in what is actually shown, e.g. "Here's Eminem: 7 of their
  * songs (3 you haven't saved), 8 artists in the same lane, and 4 things about Eminem: 8 Mile, The Way I
- * Am and 2 more."
+ * Am and 2 more." The other picks shown with them are counted ("…, plus 4 other picks"). Null when
+ * nothing shown answers the entity itself: the caller describes the other picks instead.
  */
-export function entityReply(e: Entity, recs: Array<Pick<Recommendation, 'item'>>): string {
+export function entityReply(e: Entity, recs: Array<Pick<Recommendation, 'item'>>): string | null {
   const lane = (id: string) => recs.filter((r) => r.item.category === 'music' && laneTagOf(r.item)?.id === id);
   const bySongs = lane(ENTITY_BY_LANE);
   const likeSongs = lane(ENTITY_LIKE_LANE);
@@ -386,7 +470,8 @@ export function entityReply(e: Entity, recs: Array<Pick<Recommendation, 'item'>>
   if (likeItems.length) parts.push(`${plural(likeItems.length, 'pick')} like it`);
   const aboutItems = role('about');
   if (aboutItems.length) parts.push(`${plural(aboutItems.length, 'thing')} about ${e.name}: ${titlesList(aboutItems.map((r) => r.item.title))}`);
-  if (!parts.length) return `I couldn't find ${e.name} in the connected catalogs right now.`;
+  if (!parts.length) return null;
   const last = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0];
-  return `Here's ${e.name}: ${last}.`;
+  const others = recs.length - bySongs.length - likeSongs.length - extras.length;
+  return `Here's ${e.name}: ${last}${others > 0 ? `, plus ${plural(others, 'other pick')}` : ''}.`;
 }

@@ -5,7 +5,7 @@ import { hydrateProfile } from './engine/profile.ts';
 import { blockUntil, hashKey, type CacheStore } from './providers/http.ts';
 import { SPOTIFY_LOOKUP_BLOCK } from './providers/spotify.ts';
 import type { EvidenceItem } from './engine/rank.ts';
-import { ENGINE_LANE_IDS, isEngineLane, laneTagOf, librarySongIndex, withoutPerUser, type LibrarySongs } from './engine/lanes.ts';
+import { isEngineLane, laneTagOf, librarySongIndex, mergeCatalogMetadata, TAXONOMY_LANE_IDS, withoutPerUser, type LibrarySongs } from './engine/lanes.ts';
 import { historyTiers, sharedPool } from './engine/curator.ts';
 import { FEED_MAX_MS, parseFeedSession, type FeedSession } from './engine/session.ts';
 
@@ -161,11 +161,21 @@ export function rowToItem(r: Record<string, unknown>): AnalyzedItem {
 
 export const ITEM_COLUMNS = 'id,category,kind,provider,external_id,title,creators,description,genres,tags,artwork_url,duration_sec,language,release_date,external_url,embed,playback_note,rating,popularity,metadata,concepts,stale';
 
+/**
+ * Store items in the shared catalog. An upsert replaces the whole metadata column, so each row's stored
+ * metadata is merged first (engine/lanes.ts mergeCatalogMetadata): a lane another answer gave the song
+ * survives an answer that has none for it (an entity lane is per request).
+ */
 export async function upsertItems(items: AnalyzedItem[]) {
   if (!items.length) return;
-  const rows = items.map(itemToRow);
-  for (let i = 0; i < rows.length; i += 100) {
-    const { error } = await serviceClient().from('content_items').upsert(rows.slice(i, i + 100));
+  const db = serviceClient();
+  for (let i = 0; i < items.length; i += 100) {
+    const chunk = items.slice(i, i + 100);
+    const { data: existing, error: readError } = await db.from('content_items').select('id, metadata').in('id', chunk.map((x) => x.id));
+    if (readError) console.error('[echo] catalog read before upsert failed', readError.message);
+    const stored = new Map((existing ?? []).map((r) => [r.id as string, r.metadata as Record<string, unknown> | null]));
+    const rows = chunk.map((x) => ({ ...itemToRow(x), metadata: mergeCatalogMetadata(stored.get(x.id), x.metadata) }));
+    const { error } = await db.from('content_items').upsert(rows);
     if (error) console.error('[echo] catalog upsert failed', error.message);
   }
 }
@@ -195,47 +205,69 @@ async function pagedRows<T>(page: (from: number, to: number) => PromiseLike<{ da
 /** Rows of the shared pool of curator-verified songs read per fallback (newest first). */
 export const SHARED_POOL_MAX = 1500;
 
+/** A name as most catalogs credit it ("kendrick lamar" → "Kendrick Lamar"). */
+const titleCase = (x: string) => x.replace(/(^|[\s\-])(\p{L})/gu, (_m, sep: string, c: string) => `${sep}${c.toUpperCase()}`);
+/** One element of a Postgres array literal, quoted (a name may hold commas, braces or quotes). */
+const arrayElement = (x: string) => `"${x.replace(/["\\]/g, '\\$&')}"`;
+
 /**
- * Stored items from one provider, minus what this user was shown lately (2 days; 3 for music, as of
- * `asOf`: when the feed being re-fetched was first served) and what they liked/saved/finished or
+ * Stored catalog lookups for one request (the shown/held-back scans run once per request and are shared).
+ *
+ * `fallback`: stored items from one provider, minus what this user was shown lately (2 days; 3 for music,
+ * as of `asOf`: when the feed being re-fetched was first served) and what they liked/saved/finished or
  * disliked.
  * Music, in fallback tiers (engine/curator.ts laneFallback uses them in this order):
  *   1. songs ECHO's lane engine recommended to THIS user in the last 90 days (rows carrying an engine
  *      lane tag), not shown in the last 3 days, each with metadata.lastShownAt;
- *   2. with `shared`: songs ECHO's curator verified for ANY user (engine lane tag, Spotify track with an
- *      embed, not stale), minus this user's history, library, dislikes and last 3 days;
+ *   2. with `shared`: songs ECHO's curator verified for ANY user in a taste lane (taxonomy lane tag,
+ *      Spotify track with an embed, not stale), minus this user's history, library, dislikes and last 3 days;
  *   3. with `reshow`: this user's songs last shown 24 h–3 days ago (a short music-only page only).
  * Never imported libraries or raw search filler. Per-user fields of shared rows are dropped.
+ *
+ * `byName`: stored items naming `name` (their title's words, or a credit), the same exclusions applied:
+ * the items around a named entity when its provider is out of quota (an older video about them is found
+ * by name, not only within the newest stored rows), and a named artist's own stored songs.
  */
-export function catalogFallbackFn(userId: string, opts: { asOf?: number } = {}) {
-  return async (provider: string, categories: string[], fo: { shared?: boolean; reshow?: boolean } = {}): Promise<AnalyzedItem[]> => {
+export function catalogFns(userId: string, opts: { asOf?: number } = {}) {
+  const memo = new Map<string, Promise<unknown>>();
+  const once = <T>(key: string, f: () => Promise<T>): Promise<T> => {
+    if (!memo.has(key)) memo.set(key, f());
+    return memo.get(key) as Promise<T>;
+  };
+  const asOfOf = () => opts.asOf ?? Date.now();
+  // Exclusion window: everything shown since the cutoff (paged: one 48-item feed is 48 rows).
+  const shownSince = (music: boolean) => {
+    const asOf = asOfOf();
+    const cutoff = asOf - (music ? 3 : 2) * 86400_000;
+    return once(`shown:${music}`, async () => new Set((await pagedRows<{ item_id: string }>((f, t) =>
+      serviceClient().from('recommendation_events').select('item_id').eq('user_id', userId).gte('created_at', iso(cutoff)).lt('created_at', iso(asOf)).order('created_at', { ascending: false }).order('id', { ascending: false }).range(f, t), 3000)).map((r) => r.item_id)));
+  };
+  const held = () => once('excluded', () => excludedIds(serviceClient(), userId));
+  const logged = <T>(what: string) => (r: { data: T[] | null; error?: { message: string } | null }) => {
+    if (r.error) console.error(`[echo] ${what} failed`, r.error.message);
+    return r;
+  };
+
+  const fallback = async (provider: string, categories: string[], fo: { shared?: boolean; reshow?: boolean } = {}): Promise<AnalyzedItem[]> => {
     const db = serviceClient();
     const music = categories.includes('music');
-    const asOf = opts.asOf ?? Date.now();
-    const cutoff = asOf - (music ? 3 : 2) * 86400_000;
+    const asOf = asOfOf();
     const base = () => db.from('content_items').select(ITEM_COLUMNS).eq('provider', provider).in('category', categories).not('embed', 'is', null).eq('stale', false);
-    const logged = <T>(what: string) => (r: { data: T[] | null; error?: { message: string } | null }) => {
-      if (r.error) console.error(`[echo] ${what} failed`, r.error.message);
-      return r;
-    };
-    const [shownRows, excluded, history, sharedRows] = await Promise.all([
-      // Exclusion window: everything shown since the cutoff (paged: one 48-item feed is 48 rows).
-      pagedRows<{ item_id: string }>((f, t) =>
-        db.from('recommendation_events').select('item_id').eq('user_id', userId).gte('created_at', iso(cutoff)).lt('created_at', iso(asOf)).order('created_at', { ascending: false }).order('id', { ascending: false }).range(f, t), 3000),
-      excludedIds(db, userId),
+    const [shown, excluded, history, sharedRows] = await Promise.all([
+      shownSince(music),
+      held(),
       // Music candidates + last-shown ranking: songs recommended to this user over 90 days.
       music
         ? pagedRows<{ item_id: string; created_at: string }>((f, t) =>
           db.from('recommendation_events').select('item_id, created_at').eq('user_id', userId).like('item_id', 'spotify:track:%').gte('created_at', iso(asOf - 90 * 86400_000)).lt('created_at', iso(asOf))
             .order('created_at', { ascending: false }).order('id', { ascending: false }).range(f, t), 3000)
         : Promise.resolve([] as Array<{ item_id: string; created_at: string }>),
-      // Tier 2: the shared pool of songs the lane engine verified for anyone (most recently verified first).
+      // Tier 2: the shared pool of songs the lane engine verified for anyone in a taste lane (most recently verified first).
       music && fo.shared
         ? pagedRows<Record<string, unknown>>((f, t) =>
-          base().eq('kind', 'track').in('metadata->lane->>id', ENGINE_LANE_IDS).order('fetched_at', { ascending: false }).order('id', { ascending: true }).range(f, t).then(logged('shared song pool')), SHARED_POOL_MAX)
+          base().eq('kind', 'track').in('metadata->lane->>id', TAXONOMY_LANE_IDS).order('fetched_at', { ascending: false }).order('id', { ascending: true }).range(f, t).then(logged('shared song pool')), SHARED_POOL_MAX)
         : Promise.resolve([] as Array<Record<string, unknown>>),
     ]);
-    const shown = new Set(shownRows.map((r) => r.item_id));
     const skip = (id: string) => excluded.has(id) || shown.has(id);
     if (!music) {
       const { data } = await base().order('updated_at', { ascending: false }).limit(1000);
@@ -258,6 +290,34 @@ export function catalogFallbackFn(userId: string, opts: { asOf?: number } = {}) 
     const shared = sharedPool(sharedRows.map((r) => rowToItem(r)), new Set(lastShown.keys()), skip);
     return [...own, ...shared];
   };
+
+  const byName = async (provider: string, categories: string[], name: string): Promise<AnalyzedItem[]> => {
+    const q = name.replace(/[\u0000-\u001f]/g, ' ').trim().slice(0, 80);
+    if (!q) return [];
+    const db = serviceClient();
+    const music = categories.includes('music');
+    const base = () => db.from('content_items').select(ITEM_COLUMNS).eq('provider', provider).in('category', categories).not('embed', 'is', null).eq('stale', false);
+    const credited = [...new Set([q, titleCase(q)])].map(arrayElement);
+    const [shown, excluded, byTitle, byCredit] = await Promise.all([
+      shownSince(music),
+      held(),
+      // Title words (the title's full-text index); a song's title never names its artist.
+      music ? Promise.resolve({ data: [] as Array<Record<string, unknown>> }) : base().textSearch('title', q, { config: 'simple', type: 'plain' }).limit(60).then(logged('stored lookup by title')),
+      base().overlaps('creators', credited).limit(60).then(logged('stored lookup by credit')),
+    ]);
+    const seen = new Set<string>();
+    return [...(byCredit.data ?? []), ...(byTitle.data ?? [])]
+      .map((r) => rowToItem(r as Record<string, unknown>))
+      .filter((i) => !excluded.has(i.id) && !shown.has(i.id) && !i.metadata?.imported && !seen.has(i.id) && !!seen.add(i.id))
+      .map((i) => ({ ...i, metadata: withoutPerUser(i.metadata) }));
+  };
+
+  return { fallback, byName };
+}
+
+/** Stored items from one provider for a short shelf or lane (see catalogFns). */
+export function catalogFallbackFn(userId: string, opts: { asOf?: number } = {}) {
+  return catalogFns(userId, opts).fallback;
 }
 
 /**
@@ -299,8 +359,12 @@ export async function librarySongs(db: SupabaseClient, userId: string): Promise<
   return librarySongIndex(rows.map((r) => ({ id: r.item_id, title: r.content_items?.title, creators: r.content_items?.creators, isrc: r.content_items?.metadata?.isrc })));
 }
 
-/** Items the user disliked or finished — never recommend them again. */
-export async function excludedIds(db: SupabaseClient, userId: string): Promise<Set<string>> {
+/**
+ * Items never to recommend again: `all` = disliked, or in the library (liked/saved/finished);
+ * `disliked` alone (a disliked song stays held back even where library songs may come back, e.g. a
+ * named artist's own lane).
+ */
+export async function exclusions(db: SupabaseClient, userId: string): Promise<{ all: Set<string>; disliked: Set<string> }> {
   // Paged: an imported library alone is over the API's 1,000-row page size.
   const lib: Array<{ item_id: unknown }> = [];
   const libraryPage = (from: number) =>
@@ -311,7 +375,13 @@ export async function excludedIds(db: SupabaseClient, userId: string): Promise<S
     const { data } = await libraryPage(from);
     lib.push(...(data ?? []));
   }
-  return new Set([...(inter.data ?? []), ...lib].map((r) => r.item_id as string));
+  const disliked = new Set((inter.data ?? []).map((r) => r.item_id as string));
+  return { all: new Set([...disliked, ...lib.map((r) => r.item_id as string)]), disliked };
+}
+
+/** Items the user disliked or finished — never recommend them again. */
+export async function excludedIds(db: SupabaseClient, userId: string): Promise<Set<string>> {
+  return (await exclusions(db, userId)).all;
 }
 
 /** Recently liked/saved items, used for grounded "because you liked X" explanations. */

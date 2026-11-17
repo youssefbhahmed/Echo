@@ -54,6 +54,14 @@ export function ownedInEntityLane(item: { metadata?: Record<string, unknown> | n
 }
 
 /**
+ * A song shown again on a short Music page (the stored fallback's tier 3: last shown 24 h–3 days ago):
+ * tiles say so, so a repeat never passes for a new pick.
+ */
+export function shownAgain(item: { metadata?: Record<string, unknown> | null }): boolean {
+  return item.metadata?.fallbackTier === 3;
+}
+
+/**
  * An Echo AI answer: music grouped by lane (listening order kept, lanes in order of appearance), then
  * everything else in its ranked order.
  */

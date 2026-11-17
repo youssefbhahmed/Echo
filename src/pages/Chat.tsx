@@ -6,10 +6,10 @@ import { ArrowUp, Compass, History, Landmark, Mic2, Music2, Orbit, Plus, Sunrise
 import type { Recommendation } from '@shared/types.ts';
 import type { ChatPayloadRec } from '@shared/engine/chat.ts';
 import { api } from '../lib/api';
-import { restoreRecs } from '../lib/chat';
+import { idChunks, restoreRecs } from '../lib/chat';
 import { supabase } from '../lib/supabase';
 import { localIntentHint } from '../lib/ollama';
-import { dbToItem, type DbItem } from '../hooks/data';
+import { DB_ITEM_COLUMNS, dbToItem, type DbItem } from '../hooks/data';
 import { ChatAnswer } from '../components/ChatAnswer';
 import { DetailSheet } from '../components/DetailSheet';
 import { EchoMark, Listening } from '../components/Echo';
@@ -94,8 +94,11 @@ export default function Chat() {
     const { data, error } = await supabase.from('chat_messages').select('role, content, payload').eq('session_id', id).order('created_at');
     if (error) return toast(error.message, 'error');
     const ids = [...new Set((data ?? []).flatMap((m) => ((m.payload as { recommendations?: ChatPayloadRec[] })?.recommendations ?? []).map((r) => r.itemId)))];
-    const { data: items } = ids.length ? await supabase.from('content_items').select('*').in('id', ids) : { data: [] as DbItem[] };
-    const byId = new Map((items ?? []).map((i) => [i.id as string, dbToItem(i as DbItem)]));
+    // The picks of every answer, in groups (a long conversation's ids don't fit one URL), without embeddings.
+    const parts = await Promise.all(idChunks(ids).map((c) => supabase.from('content_items').select(DB_ITEM_COLUMNS).in('id', c)));
+    if (parts.some((p) => p.error)) toast('Some picks of this conversation could not be loaded.', 'error');
+    const items = parts.flatMap((p) => (p.data ?? []) as unknown as DbItem[]);
+    const byId = new Map(items.map((i) => [i.id, dbToItem(i)]));
     setSessionId(id);
     setMessages(
       (data ?? []).map((m) => {

@@ -26,6 +26,9 @@ export interface DbItem {
   external_url: string; embed: AnalyzedItem['embed']; playback_note: string | null; rating: number | null; popularity: number | null; metadata: Record<string, unknown>; concepts: Record<string, number>; stale: boolean;
 }
 
+/** The content_items columns dbToItem reads (never the 384-d embedding). */
+export const DB_ITEM_COLUMNS = 'id,category,kind,provider,external_id,title,creators,description,genres,tags,artwork_url,duration_sec,language,release_date,external_url,embed,playback_note,rating,popularity,metadata,concepts,stale';
+
 export function dbToItem(r: DbItem): AnalyzedItem {
   return {
     id: r.id, category: r.category, kind: r.kind, provider: r.provider, externalId: r.external_id, title: r.title, creators: r.creators ?? [], description: r.description ?? undefined,

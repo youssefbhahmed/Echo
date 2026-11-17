@@ -136,6 +136,8 @@ export interface Entity {
   want: EntityWant;
   /** Up to 4 related works in other media. */
   works?: EntityWork[];
+  /** An artist's main lyrics language, from the interpreter ("French"): the scene "artists like them" may come from. */
+  lang?: string;
   /** 'rules' = a short query the rules parser could not read otherwise (kind 'other'). */
   source?: 'llm' | 'rules';
 }

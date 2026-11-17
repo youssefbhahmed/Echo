@@ -3,12 +3,13 @@ import { applyContext, applyStatement } from '../_shared/engine/profile.ts';
 import { runPipeline } from '../_shared/engine/pipeline.ts';
 import { CONCEPT_BY_ID } from '../_shared/engine/concepts.ts';
 import { chatPayloadRecs, chatRequest } from '../_shared/engine/chat.ts';
+import { sanitizeStoredIntent } from '../_shared/engine/understand.ts';
 import { GENRE_WORDS } from '../_shared/engine/intent.ts';
 import { createHttp } from '../_shared/providers/http.ts';
-import { ChatBody } from '../_shared/schemas.ts';
 import type { Intent } from '../_shared/types.ts';
+import { ChatBody } from '../_shared/schemas.ts';
 import {
-  catalogFallbackFn, collaborativeFn, DbCache, embedder, env, evidenceItems, excludedIds, getItems, HttpError, json, librarySongs, loadProfile, markPipelineQuota, providerBlocks, rateLimit, readJson, requireUser, saveProfile,
+  catalogFns, collaborativeFn, DbCache, embedder, env, evidenceItems, exclusions, getItems, HttpError, json, librarySongs, loadProfile, markPipelineQuota, providerBlocks, rateLimit, readJson, requireUser, saveProfile,
   serve, serviceClient, storedEmbeddings, upsertItems,
 } from '../_shared/server.ts';
 
@@ -24,7 +25,8 @@ serve(async (req) => {
   if (sessionId) {
     const { data, error } = await db.from('chat_sessions').select('id, last_intent, last_result_ids').eq('id', sessionId).maybeSingle();
     if (error || !data) throw new HttpError(404, 'Conversation not found', 'not_found');
-    previousIntent = (data.last_intent as Intent) ?? null;
+    // The stored intent is re-checked: the row is user-writable (bounded entities, references, enums).
+    previousIntent = sanitizeStoredIntent(data.last_intent);
     previousIds = (data.last_result_ids as string[]) ?? [];
   } else {
     const { data, error } = await db.from('chat_sessions').insert({ user_id: userId, title: body.message.slice(0, 80) }).select('id').single();
@@ -33,20 +35,24 @@ serve(async (req) => {
   }
   await db.from('chat_messages').insert({ session_id: sessionId, user_id: userId, role: 'user', content: body.message });
 
-  let [profile, exclude, evidence, blocks, previousResults, library] = await Promise.all([
-    loadProfile(db, userId), excludedIds(db, userId), evidenceItems(db, userId), providerBlocks(), getItems(previousIds), librarySongs(db, userId),
+  const [loadedProfile, held, evidence, blocks, previousResults, library] = await Promise.all([
+    loadProfile(db, userId), exclusions(db, userId), evidenceItems(db, userId), providerBlocks(), getItems(previousIds), librarySongs(db, userId),
   ]);
+  let profile = loadedProfile;
+  const exclude = held.all;
   // Do not repeat what was just shown in this conversation.
   for (const id of previousIds) exclude.add(id);
+  const catalog = catalogFns(userId);
 
   const http = createHttp(new DbCache());
   // 12 picks; 20 when the message names an entity (an artist's lanes + the things around them).
   const result = await runPipeline(
     chatRequest(body),
     {
-      env, http, profile, excludeIds: exclude, shownIds: new Set(previousIds), library, evidence, previousIntent, previousResults, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup,
+      // Held back even from a named artist's own lane: what this conversation just showed, and dislikes.
+      env, http, profile, excludeIds: exclude, shownIds: new Set([...previousIds, ...held.disliked]), library, evidence, previousIntent, previousResults, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup,
       collaborative: collaborativeFn(db),
-      embed: embedder(), storedEmbeddings, catalogFallback: catalogFallbackFn(userId), seed: previousIds.length + Math.floor(Math.random() * 97),
+      embed: embedder(), storedEmbeddings, catalogFallback: catalog.fallback, catalogByName: catalog.byName, seed: previousIds.length + Math.floor(Math.random() * 97),
     },
   );
   await markPipelineQuota(result);

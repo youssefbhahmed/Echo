@@ -57,7 +57,7 @@ describe('which of the user\'s own songs each tier may use', () => {
 });
 
 describe('the shared pool (songs ECHO verified for any user)', () => {
-  it('keeps engine-laned, playable Spotify tracks not in this user\'s history or held back, without per-user fields', () => {
+  it('keeps taste-lane, playable Spotify tracks not in this user\'s history or held back, without per-user fields', () => {
     const rows = [
       song(10, { meta: { lastShownAt: ago(D), aiOrder: 3, laneEra: { from: 2000, to: 2020 }, fallback: true } }),
       song(11, { lane: { id: 'old-curator-lane', label: 'Old' } }), // not an engine lane
@@ -67,10 +67,13 @@ describe('the shared pool (songs ECHO verified for any user)', () => {
       song(15), // held back (library / shown in the last 3 days)
       song(10), // duplicate row
       { ...song(16), kind: 'album' as const },
+      // Another user's open lane or typed request: only a free-text style label vouches for them (a French
+      // song labelled "drill" would pass as hip-hop), so they never join the shared pool.
       song(17, { lane: { id: 'mix', label: 'Fresh picks' } }),
+      song(18, { lane: { id: 'request', label: 'For your request' } }),
     ];
     const pool = sharedPool(rows, new Set([tid(14)]), (id) => id === tid(15));
-    expect(ids(pool)).toEqual([tid(10), tid(17)]);
+    expect(ids(pool)).toEqual([tid(10)]);
     expect(pool[0].metadata).toEqual(expect.objectContaining({ fallbackTier: 2, lane: { id: HIP.id, label: HIP.label } }));
     for (const k of ['lastShownAt', 'aiOrder', 'laneEra', 'fallback']) expect(pool[0].metadata).not.toHaveProperty(k);
     // fallbackTier is per-user: it never reaches the shared catalog row.

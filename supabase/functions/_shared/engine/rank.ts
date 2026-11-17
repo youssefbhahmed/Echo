@@ -3,7 +3,7 @@ import type { AnalyzedItem, Category, ConceptVector, Explanation, Intent, Recomm
 import { conceptPhrase, CONCEPT_BY_ID } from './concepts.ts';
 import { creatorKeys, genreKeys } from './profile.ts';
 import { familyOf, inBlockedFamily } from './music.ts';
-import { ENTITY_BY_LANE, ENTITY_LIKE_LANE, entityTagOf, isEntityExtra, laneTagOf, laneTargets, MIX_LANE, REQUEST_LANE, yearOf } from './lanes.ts';
+import { allowScenes, ENTITY_BY_LANE, ENTITY_LIKE_LANE, entityTagOf, isEntityExtra, laneTagOf, laneTargets, MIX_LANE, REQUEST_LANE, wantedSceneOf, yearOf } from './lanes.ts';
 import { itemWorld } from './worlds.ts';
 import { contentTokens, cosine, denseCosine, negativePart, normalize, normKey, positivePart, round, songKey } from './text.ts';
 
@@ -198,8 +198,11 @@ export function scoreItem(item: AnalyzedItem, intent: Intent, profile: TasteProf
     const tWords = normKey(item.title).split(' ');
     if (qWords.some((q) => tWords.some((t) => t.startsWith(q)))) penalty += 0.3;
   }
-  // Music styles the user said "never" to.
-  if (item.category === 'music' && inBlockedFamily(item.genres, profile)) penalty += 2;
+  // Music styles the user said "never" to (a scene this request asked for, or the named artist's own, is allowed for its songs).
+  if (item.category === 'music') {
+    const scene = wantedSceneOf(item);
+    if (inBlockedFamily(item.genres, scene ? allowScenes(profile, [scene]) : profile)) penalty += 2;
+  }
   // Functional/stock music (sleep, frequencies, "study beats") unless explicitly requested.
   if (item.category === 'music' && FUNCTIONAL_MUSIC.test(`${item.title} ${item.creators.join(' ')} ${item.tags.join(' ')}`) && !/\b(sleep|relax|meditat|study|focus|spa|yoga)/i.test(intent.rawText)) penalty += 0.5;
   if (intent.language && item.language && !item.language.toLowerCase().startsWith(intent.language)) penalty += 0.25;
@@ -375,12 +378,16 @@ function kindNoun(kind: AnalyzedItem['kind'], plural = false): string {
 /**
  * "From your <lane> lane" + one concrete reason that can be checked: the release year against the
  * lane's era in the user's own saves, or (for curator picks without a date) the mood it was briefed for.
- * Request/open lanes return nothing (the generic curator reason applies).
+ * A song shown again (stored fallback tier 3: last shown 24 h–3 days ago) says so first: a repeat never
+ * passes for a new pick. Request/open lanes return nothing (the generic curator reason applies).
  */
 export function laneExplanation(item: AnalyzedItem, now = new Date()): Explanation['reasons'] {
   const lane = item.category === 'music' ? laneTagOf(item) : null;
   if (!lane || lane.id === REQUEST_LANE.id || lane.id === MIX_LANE.id) return [];
-  const out: Explanation['reasons'] = [{ kind: 'profile', detail: `From your ${lane.label} lane` }];
+  const out: Explanation['reasons'] = [
+    ...(item.metadata?.fallbackTier === 3 ? [{ kind: 'profile' as const, detail: 'Shown again: ECHO showed you this song in the last few days' }] : []),
+    { kind: 'profile', detail: `From your ${lane.label} lane` },
+  ];
   const y = yearOf(item.releaseDate);
   const era = item.metadata?.laneEra as { from?: number; to?: number } | undefined;
   const mood = typeof item.metadata?.laneMood === 'string' ? (item.metadata.laneMood as string) : '';

@@ -5,7 +5,7 @@ import { feedFilterKey, freshFeedSeed, reusableSession } from '../_shared/engine
 import { createHttp } from '../_shared/providers/http.ts';
 import { DiscoverBody } from '../_shared/schemas.ts';
 import {
-  catalogFallbackFn, collaborativeFn, DbCache, embedder, env, evidenceItems, excludedIds, json, librarySongs, loadFeedSession, loadProfile, markPipelineQuota, providerBlocks, rateLimit, readJson,
+  catalogFns, collaborativeFn, DbCache, embedder, env, evidenceItems, exclusions, json, librarySongs, loadFeedSession, loadProfile, markPipelineQuota, providerBlocks, rateLimit, readJson,
   recentMusic, requireUser, saveFeedSession, serve, serviceClient, storedEmbeddings, upsertItems,
 } from '../_shared/server.ts';
 
@@ -20,9 +20,10 @@ serve(async (req) => {
   const filterKey = feedFilterKey(body);
   const session = reusableSession(await loadFeedSession(userId, filterKey), clientSeed, now);
   const asOf = session?.createdAt ?? now;
-  const [profile, exclude, evidence, blocks, recent, library] = await Promise.all([
-    loadProfile(db, userId), excludedIds(db, userId), evidenceItems(db, userId), providerBlocks(), recentMusic(userId, { asOf }), librarySongs(db, userId),
+  const [profile, held, evidence, blocks, recent, library] = await Promise.all([
+    loadProfile(db, userId), exclusions(db, userId), evidenceItems(db, userId), providerBlocks(), recentMusic(userId, { asOf }), librarySongs(db, userId),
   ]);
+  const exclude = held.all;
   for (const id of body.exclude ?? []) exclude.add(id);
   for (const id of recent.skipped) exclude.add(id);
   // A music-only page that is still short after the curator and the stored songs may show songs from
@@ -32,13 +33,17 @@ serve(async (req) => {
   // Music only: songs shown in the 3 days before this feed (and recent skips) don't come back on a refresh.
   for (const id of recent.shown) exclude.add(id);
   const seed = session?.seed ?? freshFeedSeed(clientSeed, recent.shown.size);
+  // Held back for a reason other than the library (shown, skipped, disliked): never served, even the
+  // library songs a named artist's own lane may otherwise show.
+  const shownIds = new Set([...(body.exclude ?? []), ...recent.shown, ...recent.skipped, ...held.disliked]);
+  const catalog = catalogFns(userId, { asOf });
   const http = createHttp(new DbCache());
   const result = await runPipeline(
     { query: body.query, categories: body.categories, moods: body.moods, exploration: body.exploration, limit: body.limit ?? 12, intentHint: body.intentHint, mix: body.mix },
     {
-      env, http, profile, excludeIds: exclude, shownIds: new Set([...(body.exclude ?? []), ...recent.shown]), reshowable, library, evidence, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup, collaborative: collaborativeFn(db), embed: embedder(),
+      env, http, profile, excludeIds: exclude, shownIds, reshowable, library, evidence, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup, collaborative: collaborativeFn(db), embed: embedder(),
       // The feed's own clock (when it was first served) keeps lane fill and explanations identical on a re-fetch.
-      storedEmbeddings, catalogFallback: catalogFallbackFn(userId, { asOf }), seed, now: new Date(asOf),
+      storedEmbeddings, catalogFallback: catalog.fallback, catalogByName: catalog.byName, seed, now: new Date(asOf),
     },
   );
   await markPipelineQuota(result);

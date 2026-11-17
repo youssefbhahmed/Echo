@@ -107,7 +107,10 @@ describe('resolution by kind', () => {
     expect(entityRoute({ kind: 'director' }, [])).toEqual(['screen']);
     expect(entityRoute({ kind: 'creator' }, [])).toEqual(['youtube']);
     expect(entityRoute({ kind: 'podcast' }, [])).toEqual(['podcasts']);
-    expect(entityRoute({ kind: 'other' }, [])).toEqual(['music', 'screen', 'books']);
+    // An unknown name is never looked up by a Spotify song search; a music-only request doesn't look it up as a work at all.
+    expect(entityRoute({ kind: 'other' }, [])).toEqual(['screen', 'books']);
+    expect(entityRoute({ kind: 'other' }, ['music'])).toEqual([]);
+    expect(entityRoute({ kind: 'other' }, ['music', 'books'])).toEqual(['books', 'screen']);
     expect(entityRoute({ kind: 'other' }, ['podcasts'])).toEqual(['podcasts', 'screen', 'books']);
     expect(isArtistEntity({ kind: 'other' }, ['music', 'books'])).toBe(true);
     expect(isArtistEntity({ kind: 'other' }, ['books'])).toBe(false);
@@ -125,7 +128,7 @@ describe('resolution by kind', () => {
     expect(log).toEqual([]);
   });
 
-  it('an unknown name tries music first, and a catalog answer must plausibly be the thing named', async () => {
+  it('an unknown name is never classified by a Spotify song search; something merely about it leaves it a name', async () => {
     const log: string[] = [];
     const fetchImpl = (async (u: string) => {
       const url = String(u);
@@ -135,25 +138,31 @@ describe('resolution by kind', () => {
       return new Response('{}', { status: 404 });
     }) as unknown as typeof fetch;
     const env = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b' } as Record<string, string>)[n];
-    const r = await resolveEntity({ name: 'nova lyric', kind: 'other', want: 'all' }, [], { env, http: createHttp(new MemoryCache(), fetchImpl), blocked: new Set(['spotify']) });
-    // Spotify search is blocked (never called); the show search answers something unrelated (rejected); the book names it.
+    // Spotify search is NOT blocked here: an unread name still never spends a /v1/search call.
+    const r = await resolveEntity({ name: 'nova lyric', kind: 'other', want: 'all' }, [], { env, http: createHttp(new MemoryCache(), fetchImpl) });
     expect(log.some((u) => u.includes('spotify.com'))).toBe(false);
     expect(log.findIndex((u) => u.includes('tvmaze'))).toBeLessThan(log.findIndex((u) => u.includes('openlibrary')));
-    expect(r.item?.title).toBe('The Nova Lyric Story');
+    // A book ABOUT the name doesn't make the name a book: it stays a name (things about it come from the extras).
+    expect(r).toMatchObject({ item: null, provider: null });
+    expect(r.kind).toBeUndefined();
     expect(plausibleMatch({ title: 'Unrelated Show', creators: [] }, 'nova lyric')).toBe(false);
   });
 
-  it('an unknown name a song search credits is an artist (answered by music lanes, never by that one song)', async () => {
+  it('an unknown name a catalog knows as a work of exactly that title takes the work\'s kind (never an artist)', async () => {
     const fetchImpl = (async (u: string) => {
       const url = String(u);
-      if (url.includes('accounts.spotify.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
-      // Mocked: no real Spotify call is ever made in tests.
-      if (url.includes('api.spotify.com/v1/search')) return new Response(JSON.stringify({ tracks: { items: [{ id: 'T'.repeat(22), name: 'Some Hit', artists: [{ id: 'a', name: 'Nova Lyric' }], album: { id: 'al', name: 'A', images: [] }, duration_ms: 1, external_urls: { spotify: 'https://open.spotify.com/track/x' } }] } }));
+      if (url.includes('/search/multi')) return new Response(JSON.stringify({ results: [{ id: 5, media_type: 'movie', title: 'Velvet Harbour', release_date: '2019-02-01' }] }));
+      if (url.includes('/movie/5/keywords')) return new Response(JSON.stringify({ keywords: [] }));
       return new Response('{}', { status: 404 });
     }) as unknown as typeof fetch;
-    const env = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b' } as Record<string, string>)[n];
-    const r = await resolveEntity({ name: 'nova lyric', kind: 'other', want: 'all' }, [], { env, http: createHttp(new MemoryCache(), fetchImpl) });
-    expect(r).toMatchObject({ item: null, kind: 'artist', provider: 'spotify' });
+    const env = (n: string) => ({ TMDB_READ_TOKEN: 'x' } as Record<string, string>)[n];
+    const r = await resolveEntity({ name: 'velvet harbour', kind: 'other', want: 'all' }, [], { env, http: createHttp(new MemoryCache(), fetchImpl) });
+    expect(r).toMatchObject({ kind: 'film', provider: 'tmdb' });
+    expect(r.item?.title).toBe('Velvet Harbour');
+    expect(isArtistEntity({ kind: r.kind! }, ['music', 'screen'])).toBe(false);
+    // In a music-only request the name is never looked up as a work.
+    const none = await resolveEntity({ name: 'velvet harbour', kind: 'other', want: 'all' }, ['music'], { env, http: createHttp(new MemoryCache(), fetchImpl) });
+    expect(none).toMatchObject({ item: null });
   });
 
   it('a related work matches on title, and on year/author when both sides know them', () => {
@@ -472,7 +481,11 @@ describe('entity reply', () => {
   it('describes a work: itself, picks like it, things about it', () => {
     expect(entityReply(e, [item('Some Film', 'screen', 'by'), item('Like A', 'screen', 'like'), item('Like B', 'screen', 'like'), item('The Novel', 'books', 'about', 'book')]))
       .toBe("Here's Some Film: the film itself, 2 picks like it and 1 thing about Some Film: The Novel.");
-    expect(entityReply(e, [])).toBe("I couldn't find Some Film in the connected catalogs right now.");
+    // Nothing shown answers the entity itself: no entity reply (the pipeline describes the other picks).
+    expect(entityReply(e, [])).toBeNull();
+    // Other picks shown alongside are counted.
+    const other = { item: { ...item('Unrelated', 'books', 'by', 'book').item, metadata: {} } } as unknown as Parameters<typeof entityReply>[1][number];
+    expect(entityReply(e, [item('Some Film', 'screen', 'by'), other, other])).toBe("Here's Some Film: the film itself, plus 2 other picks.");
   });
 });
 

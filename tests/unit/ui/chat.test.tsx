@@ -17,14 +17,15 @@ const h = vi.hoisted(() => {
     }
   }
   const tables: Record<string, unknown[]> = { chat_sessions: [], chat_messages: [], content_items: [] };
+  const calls: Array<[string, string, unknown[]]> = [];
   // A chainable stand-in for supabase-js queries: every filter returns the chain, awaiting it gives the table's rows.
   const chain = (table: string) => {
     const c: Record<string, unknown> = {};
-    for (const m of ['select', 'order', 'limit', 'eq', 'in']) c[m] = () => c;
+    for (const m of ['select', 'order', 'limit', 'eq', 'in']) c[m] = (...args: unknown[]) => (calls.push([table, m, args]), c);
     c.then = (ok: (v: unknown) => unknown, fail?: (e: unknown) => unknown) => Promise.resolve({ data: tables[table] ?? [], error: null }).then(ok, fail);
     return c;
   };
-  return { ApiError, tables, supabase: { from: (t: string) => chain(t) }, api: { chat: vi.fn(), feedback: vi.fn() }, playQueue: vi.fn() };
+  return { ApiError, tables, calls, supabase: { from: (t: string) => chain(t) }, api: { chat: vi.fn(), feedback: vi.fn() }, playQueue: vi.fn() };
 });
 
 vi.mock('../../../src/lib/api', () => ({ api: h.api, ApiError: h.ApiError }));
@@ -83,6 +84,7 @@ afterEach(() => {
   h.tables.chat_sessions = [];
   h.tables.chat_messages = [];
   h.tables.content_items = [];
+  h.calls.length = 0;
 });
 
 function mount() {
@@ -157,5 +159,26 @@ describe('Echo AI answer lanes', () => {
     await screen.findByText("Here's Nova Lyric.");
     expectLanes();
     expect(screen.queryByText('Hip-hop & R&B')).toBeNull();
+  });
+
+  it('a long conversation loads its picks in groups (each URL stays short), without the embedding column', async () => {
+    const sid = '33333333-3333-4333-8333-333333333333';
+    const many = Array.from({ length: 230 }, (_, i) => rec(song(`Song ${i}`, `Artist ${i}`, BY), 'x'));
+    h.tables.chat_sessions = [{ id: sid, title: 'long talk', updated_at: '2026-11-16T10:00:00Z' }];
+    h.tables.chat_messages = [{ role: 'assistant', content: 'Many picks.', payload: { recommendations: chatPayloadRecs(many) } }];
+    mount();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: /History/ }));
+    });
+    const session = await screen.findByRole('button', { name: /long talk/ });
+    await act(async () => {
+      fireEvent.click(session);
+    });
+    await screen.findByText('Many picks.');
+    const items = h.calls.filter(([t]) => t === 'content_items');
+    const ins = items.filter(([, m]) => m === 'in').map(([, , a]) => a[1] as string[]);
+    expect(ins.map((x) => x.length)).toEqual([100, 100, 30]);
+    const selects = items.filter(([, m]) => m === 'select').map(([, , a]) => String(a[0]));
+    expect(selects.every((cols) => cols !== '*' && !cols.includes('embedding') && cols.includes('metadata'))).toBe(true);
   });
 });

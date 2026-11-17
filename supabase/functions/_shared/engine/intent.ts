@@ -25,6 +25,8 @@ export const GENRE_WORDS = [
   'house', 'indie', 'country', 'reggae', 'lo-fi', 'lofi', 'post-rock', 'shoegaze', 'synthwave', 'soundtrack', 'opera', 'gospel', 'funk', 'disco',
   'drama', 'comedy', 'thriller', 'horror', 'western', 'animation', 'anime', 'romance', 'fantasy', 'science fiction', 'sci-fi', 'documentary', 'mystery', 'crime',
   'biography', 'memoir', 'poetry', 'history', 'philosophy', 'science', 'economics', 'psychology', 'true crime', 'noir', 'musical', 'war',
+  'reggaeton', 'k-pop', 'kpop', 'j-pop', 'afrobeats', 'afrobeat', 'amapiano', 'dancehall', 'trap', 'drill', 'grime', 'edm', 'dubstep', 'drum and bass',
+  'bachata', 'salsa', 'cumbia', 'ska', 'grunge', 'emo', 'bossa nova', 'trip hop', 'neo soul', 'afro house', 'chanson',
 ];
 
 const FILLER = new Set(
@@ -40,10 +42,40 @@ const CHATTER = new Set(
   ('hmm hm hmmm hi hello hey yo sup thanks thank ok okay yes yeah yep no nope lol help test testing what why how who where when idk nothing anything something everything more less again please sure cool nice wow great good bad shorter longer only just another other others next back stop same different random surprise whatever play listen watch read show give tell find recommend suggest new old best top music songs videos films movies books podcasts series stuff things').split(' '),
 );
 
+// Words that describe or refine a request (sound, style, era, version, use, language, and French small
+// talk and refinements the concept lexicon doesn't read): a short message made only of them ("acoustic",
+// "deeper cuts", "English only", "plus calme") refines the request; it is never a name.
+const DESCRIPTIVE = new Set((
+  'acoustic instrumental instrumentals vocal vocals lyrics underground mainstream obscure popular famous known unknown classic classics oldies vintage modern recent latest fresh ' +
+  'live version versions cut cuts remix remixes cover covers original acapella female male slow fast loud soft heavy hard dark bright happy sad calm upbeat mellow raw smooth ' +
+  'weird catchy groovy danceable bouncy chill chilled moody cheerful angry gritty funky jazzy poppy sweet warm quiet short long deep light big hot rough gentle safe wide ' +
+  'focus focusing study studying work working workout gym running driving cooking dinner morning night evening sleeping reading relaxing commute coding background ' +
+  'perfect better worse similar instead too also either easy quick serious ' +
+  'anglais francais arabe espagnol allemand italien portugais ' +
+  'plus moins encore autre autres chose choses quelque quelques truc trucs un une des de du le la les en et ou pas rien tout tres trop peu calme triste joyeux joyeuse heureux ' +
+  'heureuse doux douce sombre lent lente rapide fort forte nouveau nouvelle nouveaux nouvelles ancien ancienne anciens anciennes recente recentes merci bonjour bonsoir salut ' +
+  'coucou ca va oui non stp svp plait'
+).split(/\s+/));
+
+/** Base words a comparative refines ("darker", "sadder", "happier", "nicer"): known descriptive words only. */
+function isComparative(t: string): boolean {
+  if (t.length < 5 || !t.endsWith('er')) return false;
+  const known = (w: string) => DESCRIPTIVE.has(w) || CHATTER.has(w);
+  const base = t.slice(0, -2);
+  const stems = t.endsWith('ier') ? [`${t.slice(0, -3)}y`] : [base, ...(/(.)\1$/.test(base) ? [base.slice(0, -1)] : []), t.slice(0, -1)];
+  return stems.some(known);
+}
+
+/** A word that only describes or refines what is asked for (never part of a name on its own). */
+function describes(t: string): boolean {
+  return CHATTER.has(t) || FILLER.has(t) || SENTIMENT.has(t) || DESCRIPTIVE.has(t) || Object.hasOwn(LANGS, t) || isComparative(t) || !contentTokens(t).length;
+}
+
 /**
  * Rules fallback (AI unavailable): a short message (1–4 words) the rules can't read as a concept, genre,
- * mood, medium or anything else is probably a name ("eminem", "kendrick lamar"): a candidate entity of
- * unknown kind, everything about it.
+ * mood, medium, refinement or anything else is probably a name ("eminem", "kendrick lamar"): a candidate
+ * entity of unknown kind, everything about it. Comparatives and words that only describe a request
+ * ("darker", "acoustic", "deeper cuts", "English only", "plus calme") never are.
  */
 export function candidateEntity(original: string): Entity | null {
   const name = original.trim().replace(/^[\s"'“”«»]+|[\s"'“”«».!?,;:]+$/g, '').replace(/\s+/g, ' ');
@@ -51,7 +83,7 @@ export function candidateEntity(original: string): Entity | null {
   if (!words.length || words.length > 4 || name.length < 3 || name.length > 60) return null;
   if (/[?]/.test(original) || !/\p{L}/u.test(name)) return null;
   const tokens = tokenize(name);
-  if (!tokens.length || tokens.every((t) => CHATTER.has(t) || FILLER.has(t) || SENTIMENT.has(t))) return null;
+  if (!tokens.length || tokens.every(describes)) return null;
   if (CHATTER.has(tokens[0])) return null;
   return { name, kind: 'other', want: 'all', source: 'rules' };
 }
@@ -325,12 +357,22 @@ export function parseIntent(rawText: string, opts: ParseOptions = {}): Intent {
   };
 }
 
+/**
+ * A name in a follow-up starts a new request. A name the rules only guessed (AI unavailable) does when
+ * it has two words or more ("kendrick lamar"), or when the previous request was about a name too
+ * ("eminem" → "drake"); a single unknown word after a described request ("sad songs" → "grittier") is
+ * more likely a refinement of it, and merges like one (its word becomes a keyword).
+ */
+function namesNewThing(prev: Intent, next: Intent): boolean {
+  return (next.entities ?? []).some((e) => e.source !== 'rules' || contentTokens(e.name).length >= 2 || !!prev.entities?.length);
+}
+
 /** Merge a follow-up message into the previous intent (conversational refinement). */
 export function refineIntent(prev: Intent, next: Intent): Intent {
   const text = normalize(next.rawText);
   const isFreshRequest =
     next.references.length > 0 ||
-    !!next.entities?.length ||
+    namesNewThing(prev, next) ||
     (next.keywords.length >= 3 && !/^(more|less|only|just|shorter|longer|but|and|now|what about|how about|instead)\b/.test(text));
   if (isFreshRequest) return next;
 
@@ -350,7 +392,10 @@ export function refineIntent(prev: Intent, next: Intent): Intent {
 
   return {
     ...prev,
-    rawText: `${prev.rawText} → ${next.rawText}`,
+    // (A stored previous intent is bounded when loaded: at most 3 entities and references, see sanitizeStoredIntent.)
+    entities: prev.entities?.slice(0, 3),
+    references: prev.references.slice(0, 3),
+    rawText: `${prev.rawText} → ${next.rawText}`.slice(-1000),
     categories: onlyCats ?? (next.categories.length ? next.categories : prev.categories),
     providers: next.providers ?? (next.categories.length ? undefined : prev.providers),
     moods: [...new Set([...next.moods, ...prev.moods])].filter((m) => (target[m] ?? 0) > 0),
@@ -364,7 +409,6 @@ export function refineIntent(prev: Intent, next: Intent): Intent {
     trajectory: next.trajectory ?? prev.trajectory,
     duration,
     language: next.language ?? prev.language,
-    references: prev.references,
     ordinalRefs: next.ordinalRefs,
     keywords: (() => {
       const banned = new Set([...prev.excludes, ...next.excludes].flatMap((e) => e.split(' ')));

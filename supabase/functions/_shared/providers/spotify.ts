@@ -186,6 +186,13 @@ export interface ResolveOptions {
   maxSearches?: number;
   /** Accepted songs wanted per lane; a lane stops resolving once it has them. */
   need?: Record<string, number>;
+  /** Whether an accepted song counts toward its lane's `need` (default: all do; e.g. songs the user already has don't). */
+  counts?: (item: ContentItem, pick: SpotifyPick) => boolean;
+  /**
+   * Shared by resolutions running in parallel for one request: set when one of them gets a 429 on search
+   * (`search`) or on single-track lookups (`lookups`), and every one of them stops making those calls.
+   */
+  stop?: { search: boolean; lookups: boolean };
   /** Taste/era rules: a rejection reason, or null to accept. */
   accept?: (item: ContentItem, pick: SpotifyPick) => string | null;
   /**
@@ -255,7 +262,7 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
     const why = opts.accept?.(item, pick) ?? null;
     if (why) return reject(why);
     if (!wants(pick)) return;
-    accepted.set(pick.laneId, (accepted.get(pick.laneId) ?? 0) + 1);
+    if (opts.counts?.(item, pick) !== false) accepted.set(pick.laneId, (accepted.get(pick.laneId) ?? 0) + 1);
     result.push({ index, pick, item, via });
   };
 
@@ -288,6 +295,7 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
     }
   }
   let stopLookups = false;
+  const lookupsStopped = () => stopLookups || !!opts.stop?.lookups;
   const lookup = async (id: string): Promise<STrackFull | null> => {
     if (!token) return ((await cache?.get(trackKey(id, market)).catch(() => undefined)) as STrackFull | undefined) ?? null;
     try {
@@ -295,22 +303,27 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
         init: { headers: { Authorization: `Bearer ${token}` } }, cacheKey: trackKey(id, market), ttl: 30 * 86400, provider: 'spotify',
       });
     } catch (e) {
-      if (lookupLimited(e)) stopLookups = true;
+      if (lookupLimited(e)) {
+        stopLookups = true;
+        if (opts.stop) opts.stop.lookups = true;
+      }
       return null;
     }
   };
   const order = picks.map((_, i) => i).filter((i) => candidates.has(i));
   let next = 0;
   await Promise.all(Array.from({ length: Math.min(opts.concurrency ?? 3, order.length) }, async () => {
-    while (next < order.length && !stopLookups) {
+    while (next < order.length && !lookupsStopped()) {
       const i = order[next++];
       if (!wants(picks[i])) continue;
       const cand = candidates.get(i)!;
       let unplayable = false;
       let resolved = false;
       for (const id of cand.ids.slice(0, 2)) {
+        // A cached lookup costs nothing; a live one waits for no 429 elsewhere in this request.
+        if (token && lookupsStopped()) return;
         const t = await lookup(id);
-        if (stopLookups) return;
+        if (lookupsStopped()) return;
         if (!t?.id || !artistMatches(picks[i].artist, (t.artists ?? []).map((a) => a.name)) || !titleMatches(picks[i].track, t.name)) continue;
         // Another release of the same song may be playable in this market: try the next id.
         if (t.is_playable === false) {
@@ -333,8 +346,10 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
 
   // (d) exact search, only when allowed, lookups aren't limited, and budget remains
   const budget = opts.maxSearches ?? 8;
-  if (opts.allowSearch && token && lookupLimitedSec === undefined) {
+  if (opts.allowSearch && token && lookupLimitedSec === undefined && !opts.stop?.lookups) {
     for (let i = 0; i < picks.length && stats.searched < budget; i++) {
+      // Another resolution of this request got a 429 on search: no further search call at all.
+      if (opts.stop?.search) break;
       const pk = picks[i];
       if (done.has(i) || !wants(pk)) continue;
       const q = `track:"${cleanTitle(pk.track).replace(/"/g, '')}" artist:"${splitArtist(pk.artist).main.replace(/"/g, '')}"`;
@@ -349,6 +364,7 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
         const wait = quotaWait(e);
         if (wait !== undefined) {
           rateLimitedSec = Math.max(rateLimitedSec ?? 0, wait);
+          if (opts.stop) opts.stop.search = true;
           break; // stop immediately: Spotify's penalties grow with every extra call
         }
         continue;

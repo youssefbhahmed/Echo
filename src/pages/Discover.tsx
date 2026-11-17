@@ -1,6 +1,6 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { keepPreviousData, useQuery } from '@tanstack/react-query';
+import { useQuery } from '@tanstack/react-query';
 import { AnimatePresence, motion } from 'motion/react';
 import { ArrowUpRight, Play, RefreshCw, SlidersHorizontal, Sparkles } from 'lucide-react';
 import { CATEGORIES, type Category, type Recommendation } from '@shared/types.ts';
@@ -47,6 +47,8 @@ export default function Discover() {
   const [seed, setSeed] = useState(0);
   const [exclude, setExclude] = useState<string[]>([]);
   const [dismissed, setDismissed] = useState<Set<string>>(new Set());
+  // Songs kept on screen by "Get more" (it adds a page to them instead of replacing them), per filter.
+  const [kept, setKept] = useState<{ key: string; recs: Recommendation[] }>({ key: '', recs: [] });
   const [tuneOpen, setTuneOpen] = useState(false);
   const [ask, setAsk] = useState('');
   const savedExploration = useRef<number | null>(null);
@@ -64,33 +66,54 @@ export default function Discover() {
 
   const categories = category === 'all' ? (profile.data?.account.settings?.categories as Category[] | undefined)?.length ? (profile.data!.account.settings!.categories as Category[]) : undefined : [category];
   const mix = (profile.data?.account.settings?.mix as Partial<Record<Category, number>> | undefined) ?? undefined;
+  const filterKey = `${category}|${moods.join(',')}|${debouncedExp}|${JSON.stringify(mix ?? {})}`;
   const feed = useQuery({
     queryKey: ['feed', category, moods.join(','), debouncedExp, seed, JSON.stringify(mix ?? {})],
     queryFn: () => api.discover({ categories, moods, exploration: debouncedExp, limit: category === 'all' ? 48 : 24, seed, exclude, mix }),
     enabled: !!profile.data,
     staleTime: 5 * 60_000,
-    placeholderData: keepPreviousData,
+    // While a new page of the SAME tab loads (new picks, get more, another mood), the current page stays
+    // on screen, dimmed. Another tab's feed never stands in for this one: it would read as this tab's
+    // finished page (its songs, its count, "that's all") until the real one replaces it.
+    placeholderData: (prev, prevQuery) => (prevQuery?.queryKey[1] === category ? prev : undefined),
   });
 
   const single = category !== 'all';
-  // A single-category tab only ever shows its own category (the previous tab's feed stays on screen while this one loads).
-  const recs = useMemo(() => (feed.data?.recommendations ?? []).filter((r) => !dismissed.has(r.item.id) && (category === 'all' || r.item.category === category)), [feed.data, dismissed, category]);
+  const keptRecs = useMemo(() => (kept.key === filterKey ? kept.recs : []), [kept, filterKey]);
+  // A single-category tab only ever shows its own category; songs kept by "Get more" come first.
+  const recs = useMemo(() => {
+    const page = (feed.data?.recommendations ?? []).filter((r) => category === 'all' || r.item.category === category);
+    const seen = new Set<string>();
+    return [...keptRecs, ...page].filter((r) => !dismissed.has(r.item.id) && !seen.has(r.item.id) && !!seen.add(r.item.id));
+  }, [feed.data, keptRecs, dismissed, category]);
   // Rate limits are handled server-side (stored, verified picks fill in), so they aren't worth a warning.
   const notices = (feed.data?.providers ?? []).filter((p) => p.status !== 'ok' && p.status !== 'cached' && p.status !== 'quota');
   const PROVIDER_NAME: Record<string, string> = { youtube: 'YouTube', spotify: 'Spotify', tmdb: 'TMDB', tvmaze: 'TVmaze', openlibrary: 'Open Library' };
   const name = profile.data?.account.display_name;
 
+  const onScreenIds = () => [...new Set([...keptRecs, ...(feed.data?.recommendations ?? [])].map((r) => r.item.id))].slice(0, 100);
+  // "New picks": a fresh page instead of this one.
   const refresh = () => {
-    setExclude((feed.data?.recommendations ?? []).map((r) => r.item.id).slice(0, 100));
+    setExclude(onScreenIds());
+    setKept({ key: '', recs: [] });
     setDismissed(new Set());
     setSeed((s) => s + 1);
   };
+  // "Get more" (a short music page): the songs on screen stay, a new page without them is added below.
+  const getMore = () => {
+    setExclude(onScreenIds());
+    setKept({ key: filterKey, recs });
+    setSeed((s) => s + 1);
+  };
 
-  // A small single-category page shows every pick in its grid/lanes: the hero never swallows the page.
-  const heroless = single && recs.length < HERO_MIN;
+  // A small single-category page shows every pick in its grid/lanes: the hero never swallows the page
+  // (nor does a page grown by "Get more" turn its first song into a hero).
+  const heroless = single && (recs.length < HERO_MIN || keptRecs.length > 0);
   const hero: Recommendation | undefined = heroless ? undefined : recs[0];
   const rest = heroless ? recs : recs.slice(1);
   const loading = feed.isLoading || (!feed.data && !feed.isError) || (feed.isPlaceholderData && feed.isFetching && recs.length === 0);
+  // The page on screen is the previous one of this tab while the next one loads.
+  const refreshing = feed.isPlaceholderData && feed.isFetching;
   const empty = !loading && !feed.isError && recs.length === 0;
   const errorMessage = feed.isError ? (feed.error as Error | null)?.message : undefined;
   // A music page with only a few verified songs says so, with a way to ask for more.
@@ -271,8 +294,8 @@ export default function Discover() {
         ) : null}
         {shortMusic && (
           <div className="mx-4 mt-10 flex flex-col items-start gap-3 rounded-2xl border border-line bg-ink-2/60 p-4 sm:flex-row sm:items-center sm:justify-between md:mx-10">
-            <p className="text-sm text-mist">That’s all ECHO could verify right now.</p>
-            <button type="button" onClick={refresh} disabled={feed.isFetching} className="inline-flex h-11 shrink-0 items-center gap-2 rounded-full border border-white/15 bg-white/[0.04] px-5 text-sm text-bone transition-colors hover:bg-white/[0.08] disabled:opacity-50">
+            <p className="text-sm text-mist">{refreshing ? 'Looking for more songs…' : 'That’s all ECHO could verify right now.'}</p>
+            <button type="button" onClick={getMore} disabled={feed.isFetching} className="inline-flex h-11 shrink-0 items-center gap-2 rounded-full border border-white/15 bg-white/[0.04] px-5 text-sm text-bone transition-colors hover:bg-white/[0.08] disabled:opacity-50">
               <RefreshCw className={`h-4 w-4 ${feed.isFetching ? 'animate-spin' : ''}`} aria-hidden /> Get more
             </button>
           </div>
