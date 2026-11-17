@@ -277,7 +277,7 @@ describe('"books by ann writer" in chat', () => {
     const hers = res.recommendations.filter((r) => r.item.creators.includes('Ann Writer'));
     expect(hers.length).toBeGreaterThanOrEqual(12);
     expect(hers.every((r) => (r.item.metadata?.entity as { role?: string } | undefined)?.role === 'by')).toBe(true);
-    expect(hers[0].explanation.text).toMatch(/by Ann Writer/);
+    expect(hers[0].explanation.text).toMatch(/^By Ann Writer/);
     expect(res.reply).toMatch(/^Here's Ann Writer: \d+ works by Ann Writer/);
     expect(res.reply).not.toMatch(/couldn't find/);
   });

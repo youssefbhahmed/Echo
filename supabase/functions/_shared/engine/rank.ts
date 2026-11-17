@@ -425,7 +425,8 @@ export function entityExplanation(item: AnalyzedItem): Explanation['reasons'] | 
     ];
   }
   const note = tag.note ?? (tag.role === 'about' ? `about ${tag.name}` : tag.role === 'by' ? `by ${tag.name}` : `like ${tag.name}`);
-  const reasons: Explanation['reasons'] = [{ kind: 'reference', detail: tag.role === 'like' ? capFirst(note) : `${item.title} — ${note}` }];
+  // The card already shows the title: the reason is the note alone ("A video about Eminem from …").
+  const reasons: Explanation['reasons'] = [{ kind: 'reference', detail: capFirst(note) }];
   if (item.rating !== undefined && item.rating >= 0.72) {
     const src = item.provider === 'tmdb' ? 'TMDB' : item.provider === 'tvmaze' ? 'TVmaze' : item.provider === 'openlibrary' ? 'Open Library readers' : item.provider;
     const scale = item.provider === 'openlibrary' ? `${round(item.rating * 5, 1)}/5` : `${round(item.rating * 10, 1)}/10`;

@@ -39,7 +39,7 @@ export function ChatAnswer({ recs, answerKey, onOpen, onWatch }: { recs: Recomme
         );
       })}
       {others.length > 0 && (
-        <div className="grid gap-4 sm:grid-cols-2 xl:grid-cols-3">
+        <div className="grid items-start gap-4 sm:grid-cols-2 xl:grid-cols-3">
           {others.map((r) => (
             <MediaCard key={r.item.id} item={r.item} explanation={r.explanation} score={r.score} trajectoryStep={r.trajectoryStep} source="chat" />
           ))}

@@ -391,9 +391,9 @@ describe('"nova lyric" in chat, end to end (search blocked, YouTube out of quota
 
     const extras = recs.filter((r) => r.item.category !== 'music');
     expect(extras.map((r) => r.item.title)).toEqual(['Lyric Road', 'My Lyric Life', 'Nova Lyric: The Biography', 'Nova Lyric breaks down his first album']);
-    expect(extras[0].explanation.text).toMatch(/^Lyric Road — the film based on his early life\./);
-    expect(extras[2].explanation.text).toBe('Nova Lyric: The Biography — a book about Nova Lyric.');
-    expect(extras[3].explanation.text).toBe('Nova Lyric breaks down his first album — a video about Nova Lyric from Music Channel.');
+    expect(extras[0].explanation.text).toMatch(/^The film based on his early life\./);
+    expect(extras[2].explanation.text).toBe('A book about Nova Lyric.');
+    expect(extras[3].explanation.text).toBe('A video about Nova Lyric from Music Channel.');
     // No explanation cites an unrelated library song.
     for (const r of recs) expect(r.explanation.text).not.toMatch(/Some Liked Song|which you liked/);
 
