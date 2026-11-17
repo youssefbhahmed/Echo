@@ -117,20 +117,38 @@ const titleKey = (x: string) => foldTitle(cleanTitle(x)) || foldTitle(x) || fold
  * A duo credit ("Beyonce & Jay-Z") may match either of its artists.
  */
 export function artistMatches(pickArtist: string, trackArtists: string[]): boolean {
-  // "The", "&"/"and" and punctuation never decide a match ("Mumford & Sons" = "Mumford and Sons").
-  const norm = (x: string) => fold(x.replace(/&/g, ' and ').replace(/^\s*the\s+/i, '').replace(/\band\b/gi, ' '));
+  const ps = pickArtistForms(pickArtist);
+  const as = trackArtists.map(artistForm);
+  return ps.some((p) => as.some((a) => artistFormsMatch(p, a)));
+}
+
+/** An artist name as artistMatches compares it (folded once; lets a caller compare many names without re-folding). */
+export interface ArtistForm {
+  norm: string;
+  raw: string;
+}
+
+// "The", "&"/"and" and punctuation never decide a match ("Mumford & Sons" = "Mumford and Sons").
+const artistNorm = (x: string) => fold(x.replace(/&/g, ' and ').replace(/^\s*the\s+/i, '').replace(/\band\b/gi, ' '));
+
+/** A credited (track) artist's comparable form. */
+export function artistForm(name: string): ArtistForm {
+  return { norm: artistNorm(name), raw: name.toLowerCase().trim() };
+}
+
+/** The forms of a pick's credit: its main credit in full, then each artist of it ("Beyonce & Jay-Z" → "Jay-Z"); a featured artist never. */
+export function pickArtistForms(pickArtist: string): ArtistForm[] {
   const main = splitArtist(pickArtist).main;
-  // The full credit first, then each credited artist of the main credit ("Beyonce & Jay-Z" → "Jay-Z").
   const parts = [main, ...main.split(/\s*(?:,|&|\+|\/|\bx\b|\band\b|\bwith\b)\s*/i)].map((p) => p.trim()).filter(Boolean);
-  return parts.some((p) => trackArtists.some((a) => {
-    const sp = norm(p);
-    const sa = norm(a);
-    if (!sp || !sa) return !sp && !sa && p.toLowerCase().trim() === a.toLowerCase().trim();
-    if (sp === sa) return true;
-    // Near-identical spellings only: "Drake" is not "Drake Bell".
-    const [short, long] = sp.length <= sa.length ? [sp, sa] : [sa, sp];
-    return short.length >= 4 && long.includes(short) && short.length / long.length >= 0.8;
-  }));
+  return parts.map(artistForm);
+}
+
+/** Same artist: identical once folded, or a near-identical spelling ("Drake" is not "Drake Bell"). */
+export function artistFormsMatch(p: ArtistForm, a: ArtistForm): boolean {
+  if (!p.norm || !a.norm) return !p.norm && !a.norm && p.raw === a.raw;
+  if (p.norm === a.norm) return true;
+  const [short, long] = p.norm.length <= a.norm.length ? [p.norm, a.norm] : [a.norm, p.norm];
+  return short.length >= 4 && long.includes(short) && short.length / long.length >= 0.8;
 }
 
 /**
@@ -218,6 +236,8 @@ export interface ResolveResult {
   /** Set when a single-track lookup (or the app token) answered 429 → the SPOTIFY_LOOKUP_BLOCK block. */
   lookupLimitedSec?: number;
   stats: { cached: number; listenbrainz: number; searched: number; unresolved: number; rejected: Record<string, number> };
+  /** Picks whose real track the taste rules turned down (`accept`), with why and the track's ISRC. */
+  rejections?: Array<{ index: number; pick: SpotifyPick; reason: string; isrc?: string }>;
 }
 
 type ResolveCache = { id: string } | { none: true };
@@ -238,7 +258,8 @@ const trackKey = (id: string, market: string) => `spotify:track:${id}:${market}`
 export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderContext, opts: ResolveOptions): Promise<ResolveResult> {
   const stats: ResolveResult['stats'] = { cached: 0, listenbrainz: 0, searched: 0, unresolved: 0, rejected: {} };
   const result: ResolvedPick[] = [];
-  if (!picks.length) return { items: result, stats };
+  const rejections: NonNullable<ResolveResult['rejections']> = [];
+  if (!picks.length) return { items: result, stats, rejections };
   const allowLookups = opts.allowLookups !== false;
   let rateLimitedSec: number | undefined;
   let lookupLimitedSec: number | undefined;
@@ -260,7 +281,11 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
     done.add(index);
     const pick = picks[index];
     const why = opts.accept?.(item, pick) ?? null;
-    if (why) return reject(why);
+    if (why) {
+      const isrc = typeof item.metadata?.isrc === 'string' ? item.metadata.isrc : undefined;
+      rejections.push({ index, pick, reason: why, ...(isrc ? { isrc } : {}) });
+      return reject(why);
+    }
     if (!wants(pick)) return;
     if (opts.counts?.(item, pick) !== false) accepted.set(pick.laneId, (accepted.get(pick.laneId) ?? 0) + 1);
     result.push({ index, pick, item, via });
@@ -380,5 +405,5 @@ export async function resolveSpotifyPicks(picks: SpotifyPick[], ctx: ProviderCon
   }
   stats.unresolved = picks.length - done.size;
   result.sort((a, b) => a.index - b.index);
-  return { items: result, rateLimitedSec, lookupLimitedSec, stats };
+  return { items: result, rateLimitedSec, lookupLimitedSec, stats, rejections };
 }

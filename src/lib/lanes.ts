@@ -44,7 +44,8 @@ type LaneItemLike = { category?: string; kind?: string; embed?: { type: string }
 
 /**
  * A YouTube live session / music video inside a music lane (category 'music', kind 'video', YouTube embed:
- * see the contract in supabase/functions/_shared/engine/lanes.ts). It plays in the lane's queue.
+ * see the contract in supabase/functions/_shared/engine/lanes.ts). It sits in its lane's shelf but plays in its
+ * own YouTube player, never in the lane's song queue.
  */
 export function isLaneVideo(item: LaneItemLike): boolean {
   return item.category === 'music' && item.kind === 'video' && item.embed?.type === 'youtube';

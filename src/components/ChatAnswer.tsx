@@ -8,7 +8,7 @@ import { Tile } from './Tile';
 /**
  * The picks of one Echo AI answer: songs in their listening lanes ("Eminem", "Artists like Eminem", "For
  * your request"), each with "Play all" and tiles that play inline, then everything else as cards. A lane's
- * live sessions / music videos are part of it (they play in its queue).
+ * live sessions / music videos sit in it, but play in their own player ("Play all" plays its songs).
  */
 export function ChatAnswer({ recs, answerKey, onOpen, onWatch }: { recs: Recommendation[]; answerKey: string; onOpen: (r: Recommendation) => void; onWatch: (r: Recommendation) => void }) {
   const player = usePlayQueue();

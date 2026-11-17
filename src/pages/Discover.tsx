@@ -16,7 +16,7 @@ import { isQueueable, usePlayQueue } from '../lib/player';
 import { conceptLabel } from '@shared/engine/concepts.ts';
 import { CategoryTabs, ExplorationSlider, MoodChips } from '../components/Controls';
 import { CATEGORY_META, displayTitle, KIND_LABEL } from '../lib/meta';
-import { groupByLane, laneCountLabel, laneDomId, laneOf, type LaneGroup } from '../lib/lanes';
+import { groupByLane, isLaneVideo, laneCountLabel, laneDomId, laneOf, type LaneGroup } from '../lib/lanes';
 
 function greeting() {
   const h = new Date().getHours();
@@ -106,18 +106,21 @@ export default function Discover() {
     setSeed((s) => s + 1);
   };
 
+  // Lane videos (live sessions) sit in the music lanes on top of the songs — the ranker adds them where
+  // songs are missing — so they never count as picks for the hero or the short-page note.
+  const picks = recs.filter((r) => !isLaneVideo(r.item));
   // A small single-category page shows every pick in its grid/lanes: the hero never swallows the page
-  // (nor does a page grown by "Get more" turn its first song into a hero).
-  const heroless = single && (recs.length < HERO_MIN || keptRecs.length > 0);
-  const hero: Recommendation | undefined = heroless ? undefined : recs[0];
-  const rest = heroless ? recs : recs.slice(1);
+  // (nor does a page grown by "Get more" turn its first song into a hero). The hero is never a lane video.
+  const heroless = single && (picks.length < HERO_MIN || keptRecs.length > 0);
+  const hero: Recommendation | undefined = heroless ? undefined : picks[0];
+  const rest = hero ? recs.filter((r) => r !== hero) : recs;
   const loading = feed.isLoading || (!feed.data && !feed.isError) || (feed.isPlaceholderData && feed.isFetching && recs.length === 0);
   // The page on screen is the previous one of this tab while the next one loads.
   const refreshing = feed.isPlaceholderData && feed.isFetching;
   const empty = !loading && !feed.isError && recs.length === 0;
   const errorMessage = feed.isError ? (feed.error as Error | null)?.message : undefined;
   // A music page with only a few verified songs says so, with a way to ask for more.
-  const shortMusic = category === 'music' && !loading && recs.length > 0 && recs.length < SHORT_MUSIC;
+  const shortMusic = category === 'music' && !loading && recs.length > 0 && picks.length < SHORT_MUSIC;
   const toggleMood = (m: string) => setMoods((s) => (s.includes(m) ? s.filter((x) => x !== m) : [...s, m].slice(-3)));
   const [open, setOpenState] = useState<{ rec: Recommendation; play: boolean } | null>(null);
   const setOpen = (rec: Recommendation | null) => setOpenState(rec ? { rec, play: false } : null);
@@ -128,7 +131,8 @@ export default function Discover() {
   const SHELF_TITLE: Record<Category, string> = { youtube: 'Videos for you', music: 'Music for you', screen: 'Films & series', books: 'Books to read', podcasts: 'Podcasts to hear' };
   const tunedSubtitle = (n: number) => (moods.length ? `Tuned to ${moods.map((m) => conceptLabel(m).toLowerCase()).join(', ')}` : `${n} picks`);
   // Music arrives in listening lanes (metadata.lane): one shelf per lane, in feed order; songs without a lane stay together.
-  // A lane's live sessions / music videos are music items of that lane (never in the Videos shelf): they sit and play among its songs.
+  // A lane's live sessions / music videos are music items of that lane (never in the Videos shelf): they sit
+  // among its songs, but a tap plays one in its own player (the detail sheet) and "Play all" plays the songs.
   const musicLanes = groupByLane(rest.filter((r) => r.item.category === 'music'), (r) => r.item);
   const laneTitle = (g: LaneGroup<Recommendation>) => g.lane?.label ?? SHELF_TITLE.music;
   const laneSubtitle = (g: LaneGroup<Recommendation>) => (g.lane ? laneCountLabel(g.items.map((r) => r.item)) : tunedSubtitle(g.items.length));

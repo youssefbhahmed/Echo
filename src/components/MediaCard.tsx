@@ -7,7 +7,7 @@ import { CATEGORY_META, displayTitle, formatDuration, KIND_LABEL, PROVIDER_LABEL
 import { api } from '../lib/api';
 import { useFeedback, useLibraryMap } from '../hooks/data';
 import { isQueueable, usePlayQueue } from '../lib/player';
-import { isLaneVideo, ownedInEntityLane } from '../lib/lanes';
+import { isLaneVideo, ownedInEntityLane, sessionLine } from '../lib/lanes';
 import { EmbedPlayer, YouTubePlayer } from './Player';
 import { CollectionPicker } from './CollectionPicker';
 import { toast } from './Toast';
@@ -113,10 +113,9 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
   const meta = CATEGORY_META[item.category];
   const playable = !!item.embed;
   const canTrailer = item.provider === 'tmdb';
-  // Full songs (Spotify Premium connected) play in the user's Spotify app through ECHO's player bar; a live
-  // session / music video of a music lane always plays in the mini player (its lane's queue).
-  const laneVideo = playable && isLaneVideo(item);
-  const remoteSong = playable && isQueueable(item) && (player.mode === 'spotify' || laneVideo);
+  // Full songs (Spotify Premium connected) play in the user's Spotify app through ECHO's player bar. A live
+  // session of a music lane is a YouTube video: it plays right here, in its own player (never in the queue).
+  const remoteSong = playable && player.mode === 'spotify' && isQueueable(item);
   const isCurrent = remoteSong && player.currentId === item.id;
   const remotePlaying = isCurrent && player.playing;
   const showPause = playing || remotePlaying;
@@ -143,9 +142,8 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
 
   const togglePlay = async () => {
     if (remoteSong) {
-      // The song in the bar: pause or resume it (never restart it, never replace its lane queue). A video
-      // on screen in the mini player keeps playing (its own controls pause it).
-      if (isCurrent) return laneVideo ? undefined : player.togglePlay();
+      // The song in the bar: pause or resume it (never restart it, never replace its lane queue).
+      if (isCurrent) return player.togglePlay();
       player.playItem(item);
       onPlayStarted?.();
       return;
@@ -330,7 +328,7 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
       <div className="min-w-0 flex-1">
         <div className="flex items-center gap-2 text-[11px] font-semibold tracking-[0.13em] uppercase">
           <span className="h-1.5 w-1.5 shrink-0 rounded-full" style={{ background: meta.color }} aria-hidden />
-          <span style={{ color: meta.color }}>{KIND_LABEL[item.kind]}</span>
+          <span style={{ color: meta.color }}>{isLaneVideo(item) ? sessionLine(item) : KIND_LABEL[item.kind]}</span>
           {trajectoryStep !== undefined && <span className="rounded-full bg-white/[0.06] px-1.5 py-0.5 text-[10px] tracking-normal text-mist normal-case">step {trajectoryStep + 1}</span>}
           <a
             href={item.externalUrl}

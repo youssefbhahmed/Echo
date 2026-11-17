@@ -1,7 +1,7 @@
 // Mixing live sessions into music lanes: positions and caps in the lane block (Everything 1, Music page 2,
 // a short lane up to 3), explanations, the entity reply, and the whole pipeline with a cached pool (no
 // YouTube call, no search.list, never in the Videos shelf). Synthetic songs, artists and titles only.
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 import { parseIntent } from '@shared/engine/intent.ts';
 import { emptyProfile } from '@shared/engine/profile.ts';
 import { assembleLaneBlock, interleaveVideos, rankCandidates, videoExplanation } from '@shared/engine/rank.ts';
@@ -9,7 +9,7 @@ import { entityReply } from '@shared/engine/entities.ts';
 import { laneVideoItem, parseSessionTitle } from '@shared/engine/sessions.ts';
 import { isLaneVideo, librarySongIndex } from '@shared/engine/lanes.ts';
 import { analyzeItem } from '@shared/engine/analyze.ts';
-import { laneVideosPerLane, runPipeline } from '@shared/engine/pipeline.ts';
+import { laneVideosPerLane, POOL_WAIT_MS, runPipeline } from '@shared/engine/pipeline.ts';
 import { createHttp, MemoryCache } from '@shared/providers/http.ts';
 import { sessionPoolKey, type SessionVideo } from '@shared/providers/youtube.ts';
 import type { AnalyzedItem, MusicDna, MusicLane, Recommendation, TasteProfile } from '@shared/types.ts';
@@ -163,5 +163,25 @@ describe('pipeline: sessions from the cached pool join the lanes', () => {
     const next = again.res.recommendations.filter((r) => isLaneVideo(r.item));
     expect(next).toHaveLength(1);
     expect(next[0].item.id).not.toBe(vids[0].item.id);
+  });
+
+  it('a pool still being built when the songs are ready doesn’t hold the answer up: the last good copy is used', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout'] });
+    try {
+      const cache = new MemoryCache();
+      await cache.set(`${sessionPoolKey()}:stale`, pool, 7 * 86400);
+      // YouTube hangs (the day's pool has expired and is being rebuilt).
+      const hang = (async (u: string) => (String(u).includes('googleapis') ? new Promise<Response>(() => undefined) : new Response('{}', { status: 404 }))) as unknown as typeof fetch;
+      const env = (k: string) => (k === 'YOUTUBE_API_KEY' ? 'test-key' : undefined);
+      const p = runPipeline({ categories: ['music'], limit: 12 }, {
+        env, http: createHttp(cache, hang), profile, library, blockedProviders: new Set(['spotify']), catalogFallback: async (pr) => (pr === 'spotify' ? stored : []), seed: 1, now: NOW,
+      });
+      await vi.advanceTimersByTimeAsync(POOL_WAIT_MS + 100);
+      const res = await p;
+      expect(res.recommendations.filter((r) => isLaneVideo(r.item)).length).toBe(2);
+      expect(res.pipeline.find((x) => x.step === 'music-videos')?.detail).toMatch(/last good pool \(the day’s pool is still being built\)/);
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

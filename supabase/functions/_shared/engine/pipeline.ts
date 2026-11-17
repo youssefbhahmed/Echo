@@ -10,7 +10,7 @@ import { aiConfig, mergeHint, sanitizeHint } from './ai.ts';
 import { applyUnderstanding, llmUnderstand } from './understand.ts';
 import { askedRegions, curateMusic, entityLaneFallback, fallbackTierOf, laneFallback, laneLooseMusic, musicQuotaFor, namesOf, planMusic, SEARCH_ORDER, STORED_ORDER, withoutNames, type MusicPlan } from './curator.ts';
 import { allowScenes, ENTITY_BY_LANE, entityTagOf, isLaneVideo, laneTagOf, MIX_LANE, type LibrarySongs } from './lanes.ts';
-import { liveSessionPool, type SessionPoolResult } from '../providers/youtube.ts';
+import { liveSessionPool, staleSessionPool, type SessionPoolResult } from '../providers/youtube.ts';
 import { matchEntitySessions, matchLaneSessions, sessionsServe } from './sessions.ts';
 import { entityExtras, entityReply, extrasCap, isArtistEntity, primaryEntity, resolveEntity, type EntityResolution } from './entities.ts';
 import { analyzeItem } from './analyze.ts';
@@ -99,6 +99,9 @@ function canEmbed(item: ContentItem): boolean {
   // lanes are matched locally only: their titles aren't embedded either.
   return item.provider !== 'spotify' && !isLaneVideo(item);
 }
+
+/** How long music waits for a session pool still being built once its songs are ready (then: the last good copy). */
+export const POOL_WAIT_MS = 2500;
 
 /** Live sessions / music videos each music lane shows on top of its songs: 2 on a music page or for a named artist, 1 in a mixed feed. */
 export function laneVideosPerLane(categories: Category[], entity: boolean): number {
@@ -513,7 +516,14 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   // Sessions in the music lanes: matched locally to the curator's picks per lane and the user's library
   // artists (or a named artist), under the lane rules; the ranker places them among the lane's songs.
   if (poolP && musicPlan) {
-    const pool = await poolP;
+    // The day's pool is normally ready long before the curator; a build still running then (YouTube slow)
+    // doesn't hold the answer up: the last good copy is used and the build finishes for the next request.
+    let wait: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<SessionPoolResult>((resolve) => {
+      wait = setTimeout(() => resolve(staleSessionPool({ http: deps.http }, undefined, 'the day’s pool is still being built')), POOL_WAIT_MS);
+    });
+    const pool = await Promise.race([poolP, late]);
+    clearTimeout(wait);
     if (pool.quota) quota.note('youtube', pool.quota.retryAfterSec);
     const byLane = musicPlan.lanes.find((l) => l.id === ENTITY_BY_LANE);
     const videos = musicPlan.entity

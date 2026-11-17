@@ -25,8 +25,8 @@ export function Tile({ rec, onOpen, onPlay, onWatch, className = '' }: { rec: Re
   const watches = !playsInline && !!onWatch && item.embed?.type === 'youtube';
   const meta = CATEGORY_META[item.category];
   const liked = useLibraryMap().get(item.id)?.liked === true;
-  // A live session / music video inside a music lane: square-cropped thumbnail, a "Live"/"Video" badge,
-  // and it plays in the lane's queue like a song.
+  // A live session / music video inside a music lane: square-cropped thumbnail, a "Live"/"Video" badge;
+  // a tap plays it in its own YouTube player (the detail sheet), never in the lane's song queue.
   const badge = videoBadge(item);
   const name = badge ? displayTitle(item) : item.title;
   return (

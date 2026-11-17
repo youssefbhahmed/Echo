@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { canPlayFrom, classifyPlayerError, formatClock, IDLE_POLL_MS, isQuickSkip, isVideoItem, ListenTracker, livePosition, MAX_IDLE_POLLS, nextPollDelay, openInSpotifyAppUrl, openInSpotifyUrl, POLL_MS, queueWindow, remoteRunEnded, sameQueue, SKIP_WINDOW_MS, skipWindowMs, spotifyUri } from '../../../src/lib/playback';
+import { canPlayFrom, classifyPlayerError, formatClock, IDLE_POLL_MS, isQuickSkip, ListenTracker, livePosition, MAX_IDLE_POLLS, nextPollDelay, openInSpotifyAppUrl, openInSpotifyUrl, POLL_MS, queueWindow, sameQueue, SKIP_WINDOW_MS, skipWindowMs, spotifyUri } from '../../../src/lib/playback';
 
 // Synthetic 22-character Spotify ids.
 const sid = (n: number) => `T${String(n).padStart(21, '0')}`;
@@ -26,7 +26,7 @@ describe('spotifyUri / openInSpotifyUrl', () => {
 describe('queueWindow', () => {
   it('sends the whole queue and the start offset when it fits', () => {
     const q = [track(1), track(2), track(3)];
-    expect(queueWindow(q, 1)).toEqual({ uris: q.map((t) => t.embed.uri), offset: 1, begin: 0, end: 2, video: null });
+    expect(queueWindow(q, 1)).toEqual({ uris: q.map((t) => t.embed.uri), offset: 1, begin: 0, end: 2 });
   });
 
   it('skips items without a playable URI and keeps the offset aligned', () => {
@@ -56,41 +56,16 @@ describe('queueWindow', () => {
   });
 });
 
-describe('mixed lanes: queue windows stop at videos', () => {
+describe('mixed lanes: Spotify gets every song, never a video', () => {
   const video = (n: number) => ({ id: `youtube:music:V${n}`, embed: { type: 'youtube' } });
-  // s1 s2 V1 s3 s4 V2 s5
+  // s1 s2 V1 s3 s4 V2 s5: a lane as the ranker lays it out (a session after the 2nd song).
   const q = [track(1), track(2), video(1), track(3), track(4), video(2), track(5)];
+  const songs = [1, 2, 3, 4, 5].map((n) => track(n).embed.uri);
 
-  it('a video is never sent to Spotify: Spotify gets the run of songs up to the next video', () => {
-    expect(isVideoItem(video(1))).toBe(true);
-    expect(isVideoItem(track(1))).toBe(false);
-    expect(queueWindow(q, 0)).toEqual({ uris: [track(1).embed.uri, track(2).embed.uri], offset: 0, begin: 0, end: 1, video: 2 });
-    // After the first video: the songs from that point up to the next one.
-    expect(queueWindow(q, 3)).toEqual({ uris: [track(3).embed.uri, track(4).embed.uri], offset: 0, begin: 3, end: 4, video: 5 });
-    // The last run has no video after it.
-    expect(queueWindow(q, 6)).toEqual({ uris: [track(5).embed.uri], offset: 0, begin: 6, end: 6, video: null });
-  });
-
-  it('starting on a song inside a run keeps the songs before it in the same run (Previous works)', () => {
-    expect(queueWindow(q, 4)).toEqual({ uris: [track(3).embed.uri, track(4).embed.uri], offset: 1, begin: 3, end: 4, video: 5 });
-  });
-
-  it('a video start has no Spotify window', () => {
-    expect(queueWindow(q, 2)).toBeNull();
-  });
-
-  it('detects when Spotify is done with the run before a video', () => {
-    const last = track(2).embed.uri;
-    const run = { lastUri: last, uris: new Set([track(1).embed.uri, last]), sawLast: true };
-    const st = (over: Record<string, unknown>) => ({ isPlaying: true, progressMs: 1000, durationMs: 200_000, track: { uri: last }, ...over });
-    expect(remoteRunEnded(st({}), run)).toBe(false); // still playing the last song
-    expect(remoteRunEnded(st({ isPlaying: false, progressMs: 90_000 }), run)).toBe(false); // paused mid-song by the user
-    expect(remoteRunEnded(st({ isPlaying: false, progressMs: 199_000 }), run)).toBe(true); // stopped at its end
-    expect(remoteRunEnded(st({ isPlaying: false, progressMs: 0, track: { uri: track(1).embed.uri } }), run)).toBe(true); // reset to the start
-    expect(remoteRunEnded(st({ track: { uri: track(9).embed.uri } }), run)).toBe(true); // Spotify's autoplay took over
-    expect(remoteRunEnded(st({ track: null, isPlaying: false }), run)).toBe(true);
-    // Before the last song was ever seen playing, nothing counts as the end.
-    expect(remoteRunEnded(st({ track: { uri: track(9).embed.uri } }), { ...run, sawLast: false })).toBe(false);
+  it('the whole run of songs goes to Spotify (it plays on by itself, screen locked), the videos are skipped', () => {
+    expect(queueWindow(q, 0)).toEqual({ uris: songs, offset: 0, begin: 0, end: 6 });
+    // Starting on a later song: the same songs, the offset on that song (Previous works).
+    expect(queueWindow(q, 4)).toEqual({ uris: songs, offset: 3, begin: 0, end: 6 });
   });
 });
 

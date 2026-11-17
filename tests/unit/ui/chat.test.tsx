@@ -161,7 +161,7 @@ describe('Echo AI answer lanes', () => {
     expect(screen.queryByText('Hip-hop & R&B')).toBeNull();
   });
 
-  it('an artist’s live session plays inside their lane (badge, count), not among the other picks', async () => {
+  it('an artist’s live session sits inside their lane (badge, count), not among the other picks, and plays in its own player', async () => {
     const session: AnalyzedItem = {
       id: 'youtube:music:NOVA0000001', category: 'music', kind: 'video', provider: 'youtube', externalId: 'NOVA0000001', title: 'Nova Lyric: Tiny Desk Concert', creators: [ARTIST], genres: [], tags: [],
       externalUrl: 'https://www.youtube.com/watch?v=NOVA0000001', embed: { type: 'youtube', videoId: 'NOVA0000001' }, concepts: {},
@@ -178,13 +178,19 @@ describe('Echo AI answer lanes', () => {
     const by = screen.getByRole('region', { name: ARTIST });
     expect(within(by).getByText('3 songs · 1 live session · 2 not in your library yet')).toBeInTheDocument();
     const tile = within(by).getByRole('button', { name: `Tiny Desk Concert, ${ARTIST}. Live. Play` });
-    await act(async () => {
-      fireEvent.click(tile);
-    });
-    expect(h.playQueue).toHaveBeenLastCalledWith(mixed.slice(0, 4).map((r) => r.item), 2);
     // Not a card among the other picks.
     expect(screen.queryByRole('article', { name: /Tiny Desk/ })).toBeNull();
     expect(screen.getAllByText('Tiny Desk Concert')).toHaveLength(1);
+    // A tap plays it in its own YouTube player (the detail sheet), never in the lane's song queue.
+    const created: string[] = [];
+    (window as unknown as { YT: unknown }).YT = { Player: class { constructor(_el: unknown, o: { videoId: string }) { created.push(o.videoId); } destroy() {} } };
+    await act(async () => {
+      fireEvent.click(tile);
+    });
+    await act(async () => undefined);
+    expect(h.playQueue).not.toHaveBeenCalled();
+    expect(created).toEqual(['NOVA0000001']);
+    delete (window as unknown as { YT?: unknown }).YT;
   });
 
   it('a long conversation loads its picks in groups (each URL stays short), without the embedding column', async () => {

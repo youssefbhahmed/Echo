@@ -220,3 +220,53 @@ describe('curator model handover', () => {
     expect(picks).toEqual([{ artist: 'A', track: 'One', lane: 'edm', genre: 'edm' }]);
   });
 });
+
+describe('curator picks the lane rules turned down (live sessions)', () => {
+  it('an artist whose song the ISRC guard rejected is a regional artist, not a lane pick: their session never joins the lane', async () => {
+    const { curateMusic } = await import('@shared/engine/curator.ts');
+    const { matchLaneSessions } = await import('@shared/engine/sessions.ts');
+    const { LB_SPOTIFY_MAPPING_URL } = await import('@shared/providers/listenbrainz.ts');
+    const tid = (n: number) => `TRK${String(n).padStart(19, '0')}`;
+    const tracks: Record<string, { name: string; artist: string; isrc: string }> = {
+      [tid(1)]: { name: 'Meuda', artist: 'Synth Rappeur', isrc: 'FRUM72300001' },
+      [tid(2)]: { name: 'Flow', artist: 'US Rapper', isrc: 'USRC12300001' },
+    };
+    const lb: Record<string, string> = { 'Synth Rappeur|Meuda': tid(1), 'US Rapper|Flow': tid(2) };
+    const fetchImpl = (async (u: string, init?: RequestInit) => {
+      const url = String(u);
+      // The curator mislabels a French rapper: "English, afro trap".
+      if (url.includes('/chat/completions')) return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ items: [
+        { artist: 'Synth Rappeur', track: 'Meuda', lane: 'hiphop-rnb', lang: 'English', genre: 'afro trap' },
+        { artist: 'US Rapper', track: 'Flow', lane: 'hiphop-rnb', lang: 'English', genre: 'rap' },
+      ] }) } }] }));
+      if (url === LB_SPOTIFY_MAPPING_URL) {
+        const rows = JSON.parse(String(init?.body)) as Array<{ artist_name: string; track_name: string }>;
+        return new Response(JSON.stringify(rows.map((r) => ({ ...r, spotify_track_ids: lb[`${r.artist_name}|${r.track_name}`] ? [lb[`${r.artist_name}|${r.track_name}`]] : [] }))));
+      }
+      if (url.includes('accounts.spotify.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));
+      const m = /\/v1\/tracks\/([A-Za-z0-9]+)/.exec(url);
+      if (m && tracks[m[1]]) {
+        const t = tracks[m[1]];
+        return new Response(JSON.stringify({
+          id: m[1], name: t.name, artists: [{ id: 'a', name: t.artist }], album: { id: 'al', name: 'Album', images: [], release_date: '2023-05-01', album_type: 'album' },
+          duration_ms: 200000, external_urls: { spotify: `https://open.spotify.com/track/${m[1]}` }, is_playable: true, external_ids: { isrc: t.isrc },
+        }));
+      }
+      return new Response('{}', { status: 404 });
+    }) as unknown as typeof fetch;
+    const { profile } = importedProfile();
+    const frenchOff: TasteProfile = { ...profile, explicit: { ...profile.explicit, blockedFamilies: ['french-rap', 'french-chanson'] } };
+    const base = planMusic(frenchOff, { hasQuery: false, seed: 1, total: 6, now: NOW })!;
+    const hip = { ...base.lanes[0], id: 'hiphop-rnb', label: 'Hip-hop & R&B', regional: false, era: { from: 2010, to: 2026 } };
+    const plan = { ...base, mode: 'lanes' as const, lanes: [hip], order: ['hiphop-rnb'], targets: { 'hiphop-rnb': 6 } };
+    const env = (n: string) => ({ SPOTIFY_CLIENT_ID: 'a', SPOTIFY_CLIENT_SECRET: 'b' } as Record<string, string>)[n];
+    const r = await curateMusic(plan, { ai: { baseUrl: 'https://ai.test/v1', model: 'm' }, http: createHttp(new MemoryCache(), fetchImpl), env, profile: frenchOff, searchBlocked: true, now: NOW });
+    expect(r.items.map((i) => i.title)).toEqual(['Flow']);
+    expect(r.detail).toMatch(/regional-language 1/);
+    expect(r.lanePicks).toEqual({ 'hiphop-rnb': [{ artist: 'US Rapper' }] });
+    expect(r.regionalArtists).toContainEqual({ artist: 'Synth Rappeur', region: 'french' });
+    // Their COLORS session (no audio language, an English-looking title) stays out of the hip-hop lane.
+    const pool = [{ videoId: 'vidSYNTH001', channel: 'colors', title: 'Synth Rappeur - Meuda | A COLORS SHOW', publishedAt: '2026-11-10T00:00:00Z', durationSec: 240 }];
+    expect(matchLaneSessions(pool, { lanes: [hip], picks: r.lanePicks, regionalArtists: r.regionalArtists, profile: frenchOff })).toEqual([]);
+  });
+});

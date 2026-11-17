@@ -5,7 +5,7 @@ import { hydrateProfile } from './engine/profile.ts';
 import { blockUntil, hashKey, type CacheStore } from './providers/http.ts';
 import { SPOTIFY_LOOKUP_BLOCK } from './providers/spotify.ts';
 import type { EvidenceItem } from './engine/rank.ts';
-import { isEngineLane, LANE_VIDEO_PREFIX, laneTagOf, librarySongIndex, mergeCatalogMetadata, TAXONOMY_LANE_IDS, withoutPerUser, type LibrarySongs } from './engine/lanes.ts';
+import { fetchedAtOf, isEngineLane, LANE_VIDEO_PREFIX, laneTagOf, librarySongIndex, mergeCatalogMetadata, TAXONOMY_LANE_IDS, withoutPerUser, type LibrarySongs } from './engine/lanes.ts';
 import { CURATOR_MEMORY_MS, historyTiers, sharedPool, type CuratorMemoryEntry } from './engine/curator.ts';
 import { FEED_MAX_MS, parseFeedSession, type FeedSession } from './engine/session.ts';
 
@@ -134,7 +134,9 @@ export function itemToRow(i: AnalyzedItem) {
     language: i.language ?? null, release_date: i.releaseDate ?? null, external_url: i.externalUrl, embed: i.embed ?? null, playback_note: i.playbackNote ?? null,
     // content_items is a shared catalog readable by every signed-in user: per-user fields (last shown,
     // the user's lane era/mood, feed order) never go in. The lane tag and aiPick stay (fallback + feedback use them).
-    rating: i.rating ?? null, popularity: i.popularity ?? null, metadata: withoutPerUser(i.metadata), concepts: i.concepts, stale: false, fetched_at: new Date().toISOString(),
+    rating: i.rating ?? null, popularity: i.popularity ?? null, metadata: withoutPerUser(i.metadata), concepts: i.concepts, stale: false,
+    // YouTube's 30-day storage clock starts when YouTube returned the data (a pool copy may be days old).
+    fetched_at: fetchedAtOf(i),
   };
   if (i.embedding?.length) row.embedding = JSON.stringify(i.embedding);
   return row;

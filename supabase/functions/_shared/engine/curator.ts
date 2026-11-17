@@ -9,7 +9,7 @@ import { musicBrief } from '../importer.ts';
 import { llmMusicPicks, type AiConfig, type CuratorBrief, type CuratorLane, type MusicPick } from './ai.ts';
 import {
   allowScenes, chooseLanes, DEFAULT_MIN_YEAR, effectiveLanes, ENTITY_BY_LANE, ENTITY_LIKE_LANE, eraFloor, inLibrary, LANE_BY_ID, LANES, laneBlocked, laneKey, laneOfGenre, laneOfGenres, laneReject, laneTag,
-  laneTagOf, laneTargets, MIX_LANE, mixLane, moodPhrase, musicPolicy, popularityPhrase, REQUEST_LANE, VERSION_RE, withoutPerUser, type LaneRuleContext, type LibrarySongs,
+  laneTagOf, laneTargets, MIX_LANE, mixLane, moodPhrase, musicPolicy, popularityPhrase, regionOfIsrc, REQUEST_LANE, VERSION_RE, withoutPerUser, type LaneRuleContext, type LibrarySongs,
 } from './lanes.ts';
 import { CONCEPT_BY_ID } from './concepts.ts';
 import { categoryQuotas } from './rank.ts';
@@ -321,6 +321,11 @@ export function styleFitsLane(label: string, laneId: string): boolean {
 
 /** Arabic rap & pop and Maghreb fusion are one language scene (same "maghreb" family). */
 const regionKey = (id: string) => (id === 'maghreb-fusion' ? 'arabic-pop' : id);
+
+/** The language scene ('french' | 'arabic-pop') of a regional lane id; null for any other lane. */
+export function regionOfLane(id: string | null | undefined): string | null {
+  return id && LANE_BY_ID[id]?.regional ? regionKey(id) : null;
+}
 const REGION_LANGUAGE: Record<string, string> = { french: 'French', 'arabic-pop': 'Arabic' };
 
 /** Regional lanes (French, Arabic & Maghreb) this listener switched off in My Taste. */
@@ -425,6 +430,9 @@ export function majorityRegion(picks: Array<Pick<MusicPick, 'lang' | 'lane' | 'g
 /** Style labels of a pick (the curator's words), used for the blocked-style rule when the catalog has no genres. */
 const pickLabels = (p: Pick<MusicPick, 'lane' | 'genre'> | undefined) => [p?.genre, p?.lane].filter((x): x is string => !!x);
 
+/** laneReject reasons that speak against the ARTIST in that lane (not just this one song: shown lately, a remaster…). */
+const ARTIST_REJECTIONS = new Set(['regional-language', 'blocked', 'disliked']);
+
 /** Brief → curator → resolve on Spotify → items tagged with their lane, in the curator's order. */
 export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<CurateResult> {
   if (plan.entity) return curateEntityMusic(plan, deps);
@@ -526,12 +534,24 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
     } as ContentItem;
   });
   const rejected = [...(offStyle ? [`off-lane style ${offStyle}`] : []), ...(regionalDropped ? [`regional language ${regionalDropped}`] : []), ...Object.entries(res.stats.rejected).map(([k, v]) => `${k} ${v}`)].join(', ');
+  // The artists sessions may name for each lane: picks whose song was accepted, or never resolved. A pick
+  // whose real recording the lane rules turned down for its scene or style (an FR / Arabic ISRC, a
+  // switched-off style, a disliked artist) says nothing good about the artist in that lane.
+  const turnedDown = new Map((res.rejections ?? []).filter((r) => ARTIST_REJECTIONS.has(r.reason)).map((r) => [r.pick, r]));
   const lanePicks: Record<string, Array<{ artist: string; feat?: string[] }>> = {};
-  if (plan.mode === 'lanes') for (const sp of spicks) (lanePicks[sp.laneId] ??= []).push({ artist: sp.artist, ...(sp.feat?.length ? { feat: sp.feat } : {}) });
-  const regionalArtists = plan.mode === 'lanes' ? allPicks.flatMap((p) => {
-    const region = pickRegion(p);
-    return region ? [{ artist: p.artist, region }] : [];
-  }) : [];
+  if (plan.mode === 'lanes') for (const sp of spicks) if (!turnedDown.has(sp)) (lanePicks[sp.laneId] ??= []).push({ artist: sp.artist, ...(sp.feat?.length ? { feat: sp.feat } : {}) });
+  // Regional artists: the curator's own label, or the ISRC of their song (the curator may label a French
+  // rapper "English, afro trap": the recording's country still says French).
+  const regionalArtists = plan.mode === 'lanes' ? [
+    ...allPicks.flatMap((p) => {
+      const region = pickRegion(p);
+      return region ? [{ artist: p.artist, region }] : [];
+    }),
+    ...[...turnedDown.values()].flatMap((r) => {
+      const region = r.reason === 'regional-language' ? regionOfIsrc(r.isrc) : null;
+      return region ? [{ artist: r.pick.artist, region }] : [];
+    }),
+  ] : [];
   const detail = `${items.length}/${picks.length} curator picks resolved for ${plan.mode === 'request' ? 'the request' : plan.lanes.map((l) => l.label).join(' · ')} (cache ${res.stats.cached}, ListenBrainz ${res.stats.listenbrainz}, search ${res.stats.searched}${deps.searchBlocked ? ' blocked' : ''}${deps.lookupBlocked ? ', lookups blocked: cache only' : ''}${rejected ? `; rejected: ${rejected}` : ''})`;
   return {
     items, detail, rateLimitedSec: res.rateLimitedSec, lookupLimitedSec: res.lookupLimitedSec, perLane, ...(suggested.length ? { suggested } : {}),

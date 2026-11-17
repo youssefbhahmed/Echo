@@ -1,13 +1,13 @@
 // Official embedded players only: YouTube IFrame Player API and Spotify Embed.
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useId, useRef, useState } from 'react';
 import type { Embed } from '@shared/types.ts';
+import { claimSound, onSoundClaimed } from '../lib/media';
 
 /** The parts of a YouTube IFrame API player ECHO uses. */
 export interface YTPlayerLike {
   destroy(): void;
-  getCurrentTime?(): number;
-  getDuration?(): number;
   playVideo?(): void;
+  pauseVideo?(): void;
 }
 
 declare global {
@@ -18,35 +18,73 @@ declare global {
 }
 
 /** YT.PlayerState values (https://developers.google.com/youtube/iframe_api_reference#Playback_status). */
-export const YT_STATE = { ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 } as const;
+export const YT_STATE = { UNSTARTED: -1, ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 } as const;
+
+/** The IFrame API script must load within this long (a blocked or stalled script fails, and the next player tries again). */
+export const YT_API_TIMEOUT_MS = 10_000;
+/** No playback this long after the player is ready: the browser refused to start it (phones need a tap inside the player). */
+export const YT_START_HINT_MS = 3000;
 
 let ytReady: Promise<void> | null = null;
 export function loadYouTubeApi(): Promise<void> {
   if (window.YT?.Player) return Promise.resolve();
   if (!ytReady) {
-    ytReady = new Promise((resolve) => {
+    ytReady = new Promise<void>((resolve, reject) => {
+      const s = document.createElement('script');
+      const fail = (why: string) => {
+        clearTimeout(timer);
+        s.remove();
+        reject(new Error(why));
+      };
+      const timer = setTimeout(() => fail('The YouTube player took too long to load.'), YT_API_TIMEOUT_MS);
       const prev = window.onYouTubeIframeAPIReady;
       window.onYouTubeIframeAPIReady = () => {
+        clearTimeout(timer);
         prev?.();
         resolve();
       };
-      const s = document.createElement('script');
       s.src = 'https://www.youtube.com/iframe_api';
       s.async = true;
+      s.onerror = () => fail('The YouTube player could not load.');
       document.head.appendChild(s);
+    }).catch((e) => {
+      // Not cached: the next player tries again (a flaky network shouldn't break every video until a reload).
+      ytReady = null;
+      throw e;
     });
   }
   return ytReady;
 }
 
+/**
+ * The YouTube player (videos, trailers, and the live sessions of music lanes, which always play here, on
+ * their own: never in the music queue). It starts on the tap that opened it; when the browser refuses
+ * that (phones without a tap inside the player, or YouTube's autoplay block), a note under the player —
+ * never over it — says to tap it. It claims the sound when it plays (ECHO's music and any other YouTube
+ * player pause) and pauses when another player starts or the page is hidden (no background playback).
+ * At least 200 × 200 px, YouTube's minimum player size.
+ */
 export function YouTubePlayer({ videoId, title, onPlay }: { videoId: string; title: string; onPlay?: () => void }) {
   const host = useRef<HTMLDivElement>(null);
   const onPlayRef = useRef(onPlay);
   onPlayRef.current = onPlay;
+  const owner = `youtube:${useId()}`;
   const [error, setError] = useState<string | null>(null);
+  const [needsTap, setNeedsTap] = useState(false);
   useEffect(() => {
     let player: YTPlayerLike | null = null;
     let cancelled = false;
+    let started = false;
+    let hint: ReturnType<typeof setTimeout> | undefined;
+    setError(null);
+    setNeedsTap(false);
+    const offClaim = onSoundClaimed((o) => {
+      if (o !== owner) player?.pauseVideo?.();
+    });
+    const onVisibility = () => {
+      if (document.visibilityState === 'hidden') player?.pauseVideo?.();
+    };
+    document.addEventListener('visibilitychange', onVisibility);
     loadYouTubeApi().then(() => {
       if (cancelled || !host.current || !window.YT) return;
       const el = document.createElement('div');
@@ -57,23 +95,39 @@ export function YouTubePlayer({ videoId, title, onPlay }: { videoId: string; tit
         height: '100%',
         playerVars: { autoplay: 1, rel: 0, modestbranding: 1, playsinline: 1 },
         events: {
+          onReady: () => {
+            hint = setTimeout(() => !started && !cancelled && setNeedsTap(true), YT_START_HINT_MS);
+          },
+          onAutoplayBlocked: () => setNeedsTap(true),
           onStateChange: (e: { data: number }) => {
-            if (e.data === 1) onPlayRef.current?.();
+            if (e.data !== YT_STATE.PLAYING) return;
+            started = true;
+            clearTimeout(hint);
+            setNeedsTap(false);
+            claimSound(owner);
+            onPlayRef.current?.();
           },
           onError: (e: { data: number }) => {
+            clearTimeout(hint);
+            setNeedsTap(false);
             setError(e.data === 101 || e.data === 150 ? 'This video can’t play inside ECHO (embedding or regional restrictions).' : 'This video could not be played here.');
           },
         },
       });
+    }).catch((e: Error) => {
+      if (!cancelled) setError(e.message || 'The YouTube player could not load.');
     });
     return () => {
       cancelled = true;
+      clearTimeout(hint);
+      offClaim();
+      document.removeEventListener('visibilitychange', onVisibility);
       player?.destroy();
     };
-  }, [videoId]);
+  }, [videoId, owner]);
   if (error)
     return (
-      <div className="grid aspect-video place-items-center rounded-2xl bg-ink-3 p-6 text-center text-sm text-mist">
+      <div role="status" className="grid aspect-video min-h-[200px] place-items-center rounded-2xl bg-ink-3 p-6 text-center text-sm text-mist">
         <div>
           {error}{' '}
           <a className="text-ember underline" href={`https://www.youtube.com/watch?v=${videoId}`} target="_blank" rel="noreferrer">
@@ -82,73 +136,14 @@ export function YouTubePlayer({ videoId, title, onPlay }: { videoId: string; tit
         </div>
       </div>
     );
-  return <div ref={host} title={title} className="aspect-video w-full overflow-hidden rounded-2xl bg-black [&_iframe]:h-full [&_iframe]:w-full" />;
-}
-
-/**
- * The mini player's YouTube player for a video in a mixed music queue: autoplays inline (playsinline, so
- * phones don't jump to fullscreen), reports playback every 2 s while it plays, and says when the video
- * ended (YT.PlayerState.ENDED) so the queue moves on. A video that can't play here moves on by itself.
- */
-export function QueueVideoPlayer({ videoId, title, onProgress, onEnded }: { videoId: string; title: string; onProgress?: (playing: boolean, positionMs: number, durationMs?: number) => void; onEnded?: () => void }) {
-  const host = useRef<HTMLDivElement>(null);
-  const cb = useRef({ onProgress, onEnded });
-  cb.current = { onProgress, onEnded };
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    let player: YTPlayerLike | null = null;
-    let cancelled = false;
-    let tick: ReturnType<typeof setInterval> | undefined;
-    let skip: ReturnType<typeof setTimeout> | undefined;
-    setError(null);
-    const report = (playing: boolean) => {
-      const pos = Math.max(0, Math.round((player?.getCurrentTime?.() ?? 0) * 1000));
-      const dur = player?.getDuration?.();
-      cb.current.onProgress?.(playing, pos, dur ? Math.round(dur * 1000) : undefined);
-    };
-    loadYouTubeApi().then(() => {
-      if (cancelled || !host.current || !window.YT) return;
-      const el = document.createElement('div');
-      host.current.appendChild(el);
-      player = new window.YT.Player(el, {
-        videoId,
-        width: '100%',
-        height: '100%',
-        playerVars: { autoplay: 1, playsinline: 1, rel: 0, modestbranding: 1 },
-        events: {
-          onReady: (e: { target?: YTPlayerLike }) => e.target?.playVideo?.(),
-          onStateChange: (e: { data: number }) => {
-            clearInterval(tick);
-            if (e.data === YT_STATE.PLAYING) {
-              report(true);
-              tick = setInterval(() => report(true), 2000);
-            } else if (e.data === YT_STATE.PAUSED) report(false);
-            else if (e.data === YT_STATE.ENDED) cb.current.onEnded?.();
-          },
-          onError: (e: { data: number }) => {
-            setError(e.data === 101 || e.data === 150 ? 'This video can’t play inside ECHO.' : 'This video could not be played here.');
-            skip = setTimeout(() => cb.current.onEnded?.(), 4000);
-          },
-        },
-      });
-    });
-    return () => {
-      cancelled = true;
-      clearInterval(tick);
-      clearTimeout(skip);
-      player?.destroy();
-    };
-  }, [videoId]);
   return (
-    <div className="relative aspect-video w-full overflow-hidden rounded-[12px] bg-black">
-      <div ref={host} title={title} className="absolute inset-0 [&_iframe]:h-full [&_iframe]:w-full" />
-      {error && (
-        <div role="status" className="absolute inset-0 grid place-items-center bg-ink-3 p-2 text-center text-[11.5px] leading-snug text-mist">
-          <span>
-            {error}{' '}
-            <a className="text-ember underline" href={`https://www.youtube.com/watch?v=${videoId}`} target="_blank" rel="noreferrer">YouTube</a>
-          </span>
-        </div>
+    <div>
+      <div ref={host} title={title} className="aspect-video min-h-[200px] w-full min-w-[200px] overflow-hidden rounded-2xl bg-black [&_iframe]:h-full [&_iframe]:w-full" />
+      {needsTap && (
+        <p role="status" className="mt-2 text-center text-[13px] text-mist">
+          Tap the video to start it.{' '}
+          <a className="text-ember underline" href={`https://www.youtube.com/watch?v=${videoId}`} target="_blank" rel="noreferrer">Open on YouTube</a>
+        </p>
       )}
     </div>
   );

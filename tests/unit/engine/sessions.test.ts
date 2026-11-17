@@ -3,10 +3,10 @@
 // Synthetic artists and titles only.
 import { describe, expect, it } from 'vitest';
 import { creditNames, looksFrench, matchEntitySessions, matchLaneSessions, parseSessionTitle, refreshedLaneVideo } from '@shared/engine/sessions.ts';
-import { isLaneVideo, LANE_VIDEO_PREFIX, librarySongIndex, sessionTagOf, withoutPerUser } from '@shared/engine/lanes.ts';
+import { fetchedAtOf, isLaneVideo, LANE_VIDEO_PREFIX, laneOfGenres, librarySongIndex, sessionTagOf, withoutPerUser } from '@shared/engine/lanes.ts';
 import { emptyProfile } from '@shared/engine/profile.ts';
 import type { SessionVideo } from '@shared/providers/youtube.ts';
-import type { MusicLane, TasteProfile } from '@shared/types.ts';
+import type { ContentItem, MusicLane, TasteProfile } from '@shared/types.ts';
 
 describe('session titles, per channel format', () => {
   it.each([
@@ -211,5 +211,139 @@ describe('library artist lanes and catalog refresh', () => {
     const stripped = { ...v, title: 'YouTube video', creators: [], metadata: {} };
     const back = refreshedLaneVideo(stripped, { ...fresh, title: 'Nova Lyric - Song | A COLORS SHOW', metadata: { channelTitle: 'COLORS' } });
     expect(back).toMatchObject({ id: v.id, category: 'music', creators: ['Nova Lyric'], metadata: { video: true, videoKind: 'live', session: { channel: 'colors', venue: 'COLORS', artist: 'Nova Lyric', label: 'Song' } } });
+  });
+});
+
+describe('review fixes: band names, regional evidence, repeats, refresh', () => {
+  it('a band name is one act: its full credit is the creator, and a disliked band is never shown', () => {
+    expect(parseSessionTitle('Mumford & Sons: Tiny Desk Concert', 'tinydesk')).toMatchObject({ artist: 'Mumford & Sons', credits: ['Mumford & Sons'], artists: ['Mumford', 'Sons'] });
+    expect(parseSessionTitle('Tyler, The Creator - Song | A COLORS SHOW', 'colors')?.credits).toEqual(['Tyler, The Creator']);
+    expect(parseSessionTitle('Earth, Wind & Fire: Tiny Desk Concert', 'tinydesk')?.credits).toEqual(['Earth, Wind & Fire']);
+    // Real collaborations still name each act.
+    expect(parseSessionTitle('Pulse Theory b2b Night Owl | Boiler Room x Festival', 'boilerroom')?.credits).toEqual(['Pulse Theory', 'Night Owl']);
+    expect(parseSessionTitle('Nova Lyric feat. Amber Coast - Song | A COLORS SHOW', 'colors')?.credits).toEqual(['Nova Lyric', 'Amber Coast']);
+
+    const pool = [video('kexp', 'Salt & Pepper Club - Iron Sky (Live on KEXP)'), video('tinydesk', 'Mumford & Sons: Tiny Desk Concert')];
+    const lanes = [ROCK, SOUL];
+    // Not disliked: the KEXP session keeps the band's real name (ranking, one-per-artist and feedback use it).
+    const ok = matchLaneSessions(pool, { lanes, profile: profileWith() });
+    expect(ok.find((v) => v.title.startsWith('Salt'))?.creators).toEqual(['Salt & Pepper Club']);
+    // A thumbs-down on one of their songs (profile.creators keyed by the full credit), or a dislike typed in chat.
+    expect(matchLaneSessions(pool, { lanes, profile: profileWith({ creators: { 'salt pepper club': -1.2 } }) }).some((v) => v.title.startsWith('Salt'))).toBe(false);
+    expect(matchLaneSessions(pool, { lanes, profile: profileWith({ dislikes: ['Salt & Pepper Club'] }) }).some((v) => v.title.startsWith('Salt'))).toBe(false);
+    expect(matchLaneSessions(pool, { lanes, picks: { 'blues-soul': [{ artist: 'Mumford & Sons' }] }, profile: profileWith({ creators: { 'mumford sons': -0.7 } }) }).some((v) => v.title.startsWith('Mumford'))).toBe(false);
+  });
+
+  it('Arabic script in the title: never in a non-regional lane', () => {
+    const arabic = video('colors', 'Nour Synth - ليالي | A COLORS SHOW', { lang: 'en' });
+    expect(matchLaneSessions([arabic], { lanes: [HIP], picks: { 'hiphop-rnb': [{ artist: 'Nour Synth' }] }, profile: profileWith() })).toEqual([]);
+    expect(matchLaneSessions([arabic], { lanes: [HIP], profile: profileWith() })).toEqual([]);
+  });
+
+  it('French in the credit, not just the song, marks the session French', () => {
+    const fr = video('colors', 'Toujours Nous - Moon | A COLORS SHOW');
+    expect(matchLaneSessions([fr], { lanes: [HIP], picks: { 'hiphop-rnb': [{ artist: 'Toujours Nous' }] }, profile: profileWith({ frenchOff: true }) })).toEqual([]);
+    expect(looksFrench('Moon')).toBe(false);
+  });
+
+  it('a library artist whose songs sit in the French lane is French: no session in hip-hop, even as a curator pick', () => {
+    const lib = librarySongIndex([{ title: 'Bolide', creators: ['Rap Maison'], genres: ['french hip hop', 'rap francais'] }]);
+    expect(lib.artistLanes?.get('rap maison')).toBe('french');
+    const s = video('colors', 'Rap Maison - Bolide | A COLORS SHOW');
+    expect(matchLaneSessions([s], { lanes: [HIP], picks: { 'hiphop-rnb': [{ artist: 'Rap Maison' }] }, profile: profileWith({ frenchOff: true }), libraryArtistLanes: lib.artistLanes })).toEqual([]);
+    // Same with French on: a French recording only ever fills the (capped) French lane.
+    expect(matchLaneSessions([s], { lanes: [HIP], picks: { 'hiphop-rnb': [{ artist: 'Rap Maison' }] }, profile: profileWith(), libraryArtistLanes: lib.artistLanes })).toEqual([]);
+  });
+
+  it('a library song registered in France votes for the French lane (the ISRC rule songs follow), electronic music aside', () => {
+    const lib = librarySongIndex([
+      { title: 'Meuda', creators: ['Synth Rappeur'], isrc: 'FRUM72300001', genres: ['afro trap', 'pop urbaine'] },
+      { title: 'Layali', creators: ['Nour Synth'], isrc: 'MAA012300001', genres: ['rap'] },
+      { title: 'Groove', creators: ['House Duo'], isrc: 'FRX452300001', genres: ['french house'] },
+      { title: 'Plain', creators: ['US Rapper'], isrc: 'USRC12300001', genres: ['rap'] },
+    ]);
+    expect(lib.artistLanes?.get('synth rappeur')).toBe('french');
+    expect(lib.artistLanes?.get('nour synth')).toBe('arabic-pop');
+    expect(lib.artistLanes?.get('house duo')).toBe('melodic-house');
+    expect(lib.artistLanes?.get('us rapper')).toBe('hiphop-rnb');
+    // An artist the ISRC guard caught (curator said "English, afro trap") is regional on every path.
+    const s = video('colors', 'Synth Rappeur - Meuda | A COLORS SHOW');
+    const ctx = { lanes: [HIP], profile: profileWith({ frenchOff: true }) };
+    expect(matchLaneSessions([s], { ...ctx, regionalArtists: [{ artist: 'Synth Rappeur', region: 'french' }], picks: { 'hiphop-rnb': [{ artist: 'Synth Rappeur' }] } })).toEqual([]);
+    expect(matchLaneSessions([s], { ...ctx, libraryArtistLanes: lib.artistLanes })).toEqual([]);
+  });
+
+  it('channel-only needs language evidence outside language-neutral lanes: COLORS never while French is off; Tiny Desk with a declared language', () => {
+    const colorsNoLang = video('colors', 'Unknown Act - Meuda | A COLORS SHOW');
+    const colorsEn = video('colors', 'Unknown Act - Flow | A COLORS SHOW', { lang: 'en' });
+    const tinyNoLang = video('tinydesk', 'Quiet Act: Tiny Desk Concert');
+    const tinyEn = video('tinydesk', 'Other Act: Tiny Desk Concert', { lang: 'en' });
+    const kexp = video('kexp', 'Loud Band - Iron Sky (Live on KEXP)');
+    const cercle = video('cercle', 'Deep Meridian live at the Old Harbour for Cercle');
+    const lanes = [HIP, ROCK, HOUSE];
+    const off = matchLaneSessions([colorsNoLang, colorsEn, tinyNoLang, kexp, cercle], { lanes, profile: profileWith({ frenchOff: true }) });
+    expect(titles(off).sort()).toEqual([cercle.title, kexp.title].sort());
+    // French on: COLORS with a declared non-regional language may fill the hip-hop slot; without one, never.
+    expect(titles(matchLaneSessions([colorsNoLang], { lanes: [HIP], profile: profileWith() }))).toEqual([]);
+    expect(titles(matchLaneSessions([colorsEn], { lanes: [HIP], profile: profileWith() }))).toEqual([colorsEn.title]);
+    expect(titles(matchLaneSessions([tinyNoLang, tinyEn], { lanes: [HIP], profile: profileWith({ frenchOff: true }) }))).toEqual([tinyEn.title]);
+  });
+
+  it('a session shown lately is not shown again through another of its videos (each song, then the full performance)', () => {
+    const songC = video('kexp', 'Loud Band - Song C (Live on KEXP)');
+    const songB = video('kexp', 'Loud Band - Song B (Live on KEXP)');
+    const full = video('kexp', 'Loud Band - Full Performance (Live on KEXP)');
+    const other = video('audiotree', 'Grey Harbour on Audiotree Live (Full Session)');
+    const pool = [songC, songB, full, other];
+    const first = matchLaneSessions(pool, { lanes: [ROCK], profile: profileWith() });
+    expect(titles(first)).toEqual([songC.title]);
+    const next = matchLaneSessions(pool, { lanes: [ROCK], profile: profileWith(), excludeIds: new Set([first[0].id]) });
+    expect(titles(next)).toEqual([other.title]);
+  });
+
+  it('a lane video keeps the time YouTube returned its data (its 30-day storage clock)', () => {
+    const v = video('kexp', 'Loud Band - Iron Sky (Live on KEXP)', { fetchedAt: '2026-11-10T08:00:00.000Z' });
+    const [item] = matchLaneSessions([v], { lanes: [ROCK], profile: profileWith() });
+    expect(item.metadata?.fetchedAt).toBe('2026-11-10T08:00:00.000Z');
+    expect(fetchedAtOf(item, Date.parse('2026-11-17T08:00:00Z'))).toBe('2026-11-10T08:00:00.000Z');
+    // Other providers' rows (and a stamp from the future) start now.
+    expect(fetchedAtOf({ provider: 'spotify', metadata: { fetchedAt: '2026-11-10T08:00:00.000Z' } }, Date.parse('2026-11-17T08:00:00Z'))).toBe('2026-11-17T08:00:00.000Z');
+    expect(fetchedAtOf({ provider: 'youtube', metadata: { fetchedAt: '2027-01-01T00:00:00Z' } }, Date.parse('2026-11-17T08:00:00Z'))).toBe('2026-11-17T08:00:00.000Z');
+  });
+
+  it('a stripped row is refreshed in its own channel’s format (never another venue’s generic one)', () => {
+    const stripped = (title: string): ContentItem => ({ id: 'youtube:music:x', category: 'music', kind: 'video', provider: 'youtube', externalId: 'x', title: 'YouTube video', creators: [], genres: [], tags: [], externalUrl: 'https://www.youtube.com/watch?v=x', metadata: {}, description: title });
+    const fresh = (title: string, channelTitle: string): ContentItem => ({ ...stripped(title), id: 'youtube:video:x', category: 'youtube', title, creators: [channelTitle], metadata: { channelTitle } });
+    const kexp = refreshedLaneVideo(stripped(''), fresh('Loud Band - Iron Sky (Live on KEXP)', 'KEXP'));
+    expect(kexp.metadata?.session).toMatchObject({ channel: 'kexp', venue: 'KEXP', artist: 'Loud Band', label: 'Iron Sky' });
+    const br = refreshedLaneVideo(stripped(''), fresh('Deep Meridian live at Boiler Room London', 'Boiler Room'));
+    expect(br.metadata?.session).toMatchObject({ channel: 'boilerroom', venue: 'Boiler Room', artist: 'Deep Meridian' });
+    const tiny = refreshedLaneVideo(stripped(''), fresh('Velvet Static: Tiny Desk Concert', 'NPR Music'));
+    expect(tiny.metadata?.session).toMatchObject({ channel: 'tinydesk', venue: 'Tiny Desk' });
+    // An unknown uploader: only a channel's own distinctive format counts; a generic "(Live)" title gets no venue.
+    expect(refreshedLaneVideo(stripped(''), fresh('Amber Coast - Tidal | A COLORS SHOW', 'Someone')).metadata?.session).toMatchObject({ channel: 'colors' });
+    expect(refreshedLaneVideo(stripped(''), fresh('Amber Coast - Tidal (Live)', 'Someone')).metadata?.session).toBeUndefined();
+  });
+
+  it('matching a full pool against a full curator plan stays cheap (names folded once)', () => {
+    const big: SessionVideo[] = [];
+    for (let i = 0; i < 400; i++) big.push(video(['tinydesk', 'colors', 'kexp', 'audiotree', 'mahogany', 'cercle', 'boilerroom', 'sofar'][i % 8], i % 5 ? `Synthetic Act ${i} - Song ${i} (Live on KEXP)` : `Duo ${i} & Partner ${i}: Tiny Desk Concert`, { lang: 'en' }));
+    const picks = Object.fromEntries([HIP, SOUL, ROCK, HOUSE].map((l, li) => [l.id, Array.from({ length: 24 }, (_, j) => ({ artist: `Pick Artist ${li}-${j}`, feat: [`Guest ${li}-${j}`] }))]));
+    const regionalArtists = Array.from({ length: 10 }, (_, i) => ({ artist: `Regional ${i}`, region: 'french' }));
+    const t0 = performance.now();
+    for (let k = 0; k < 3; k++) matchLaneSessions(big, { lanes: [HIP, SOUL, ROCK, HOUSE], picks, regionalArtists, profile: profileWith() });
+    expect((performance.now() - t0) / 3).toBeLessThan(120); // ~18 ms here; ~200 ms when every comparison folded both names
+  });
+});
+
+describe('library artist lanes, cheaply', () => {
+  it('each distinct genre set is classified once (genres repeat per artist across a 10k-song library)', () => {
+    const G = ['rap', 'trap', 'soul', 'pop', 'indie rock', 'afro house'];
+    const rows = Array.from({ length: 3000 }, (_, i) => ({ title: `Song ${i}`, creators: [`Artist ${i % 300}`], genres: [G[i % 300 % 6], G[(i % 300) % 4]] }));
+    const calls: string[][] = [];
+    const lib = librarySongIndex(rows, (g) => (calls.push(g), laneOfGenres(g)));
+    expect(calls.length).toBe(new Set(rows.map((r) => r.genres.join('|'))).size);
+    expect(calls.length).toBeLessThanOrEqual(12);
+    expect(lib.artistLanes?.get('artist 0')).toBe('hiphop-rnb');
   });
 });

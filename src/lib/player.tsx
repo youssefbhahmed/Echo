@@ -3,20 +3,22 @@
 //  • SPOTIFY — the user's Spotify Premium account is connected with playback permission: full songs play in their
 //    Spotify app (Spotify Connect, remote-controlled through the `spotify` function) and ECHO shows its own bar.
 //  • PREVIEW — Spotify's official embedded player inside ECHO (previews unless signed in to Spotify in the browser).
-// Music lanes also hold YouTube live sessions / music videos: ECHO plays those itself (the mini player's
-// YouTube player) in queue order. In Spotify mode Spotify is paused first and only ever gets the run of
-// songs up to the next video; when a video ends, the next song starts with the songs that follow it.
+// The queue holds Spotify songs only. A music lane's live sessions (YouTube) play in their own player, on a
+// tap, and are never chained to or from Spotify songs: Spotify always gets the lane's whole run of songs (so
+// it plays on with the screen locked), and Spotify playback is never mixed with other audio (Spotify
+// Developer Policy). When a YouTube player starts, the music pauses — even a play still on its way to
+// Spotify (src/lib/media.ts: one sound at a time).
 import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 import type { AnalyzedItem } from '@shared/types.ts';
 import { api, ApiError, type SpotifyPlayerState } from './api';
 import { useFeedback, useSpotifyStatus } from '../hooks/data';
-import { canPlayFrom, classifyPlayerError, isVideoItem, ListenTracker, livePosition, nextPollDelay, openInSpotifyAppUrl, openInSpotifyUrl, POLL_MS, queueWindow, remoteRunEnded, sameQueue, spotifyUri } from './playback';
+import { canPlayFrom, classifyPlayerError, ListenTracker, livePosition, nextPollDelay, openInSpotifyAppUrl, openInSpotifyUrl, POLL_MS, queueWindow, sameQueue, spotifyUri } from './playback';
 import { connectSpotify, consumeSpotifyReturn } from './spotify';
+import { claimSound, MUSIC, onSoundClaimed } from './media';
 
-/** Songs and episodes on Spotify, and the YouTube sessions / music videos inside music lanes. */
+/** Songs and episodes on Spotify. YouTube videos — a music lane's live sessions included — never join the queue. */
 export function isQueueable(item: AnalyzedItem): boolean {
-  if (item.embed?.type === 'youtube') return item.category === 'music';
   return item.embed?.type === 'spotify' && (item.kind === 'track' || item.kind === 'episode');
 }
 
@@ -60,10 +62,6 @@ interface PlayerApi {
   connect: () => void;
   /** Preview mode: the embed reports playback (feeds skip detection; `durationMs` is 30 s for a preview). */
   previewProgress: (item: AnalyzedItem, playing: boolean, positionMs: number, durationMs?: number) => void;
-  /** The mini player's YouTube player reports playback of a queued video (first play → 'play' feedback). */
-  videoProgress: (item: AnalyzedItem, playing: boolean, positionMs: number, durationMs?: number) => void;
-  /** A queued video ended (YT.PlayerState.ENDED): the next item plays (never a skip). */
-  videoEnded: (item: AnalyzedItem) => void;
 }
 
 const Ctx = createContext<PlayerApi | null>(null);
@@ -91,8 +89,6 @@ interface PlayCtx {
 
 /** Ask Spotify how things went this long after a tap. */
 const CONFIRM_MS = 1500;
-/** Spotify mode, before a video: stop the run's last song this long before its end (so no autoplay song slips in). */
-const BOUNDARY_LEAD_MS = 400;
 
 export function PlayerProvider({ children }: { children: ReactNode }) {
   const qc = useQueryClient();
@@ -112,8 +108,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const statusLoading = status.configured && !status.data && status.isFetching;
   // Full songs stop: a missing permission, no Premium, or a fresh status saying the link is gone.
   const blocked = reconnectNeeded || premiumMissing || (!!status.data && !status.canPlay);
-  // No Spotify polling while a video plays (Spotify is paused; the video's end starts the next songs).
-  const polling = queueMode === 'spotify' && queue.length > 0 && spotifyReady && !isVideoItem(queue[index]);
+  const polling = queueMode === 'spotify' && queue.length > 0 && spotifyReady;
   const since = status.data?.since ?? null;
 
   // Latest values for async callbacks.
@@ -134,11 +129,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const pollRef = useRef<() => Promise<void>>(async () => undefined);
   /** A background check answered "reconnect" once: confirm before ending full songs. */
   const reconnectStrikes = useRef(0);
-  /** Spotify mode: the run of songs Spotify was given ends before a video (its last URI, all its URIs, the video's index). */
-  const runEnd = useRef<{ lastUri: string; uris: Set<string>; video: number; sawLast: boolean } | null>(null);
-  const boundaryTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   /** The link's `since` when full songs were blocked for a reconnect: a newer one means the link was renewed. */
   const reconnectSince = useRef<string | null>(null);
+  /** Counts the times another player (a YouTube video) took the sound: a Spotify command sent before that must not start music under it. */
+  const yielded = useRef(0);
 
   const record = useCallback((item: AnalyzedItem, type: 'play' | 'skip') => live.current.mutate({ item, type, source: 'feed', silent: true }), []);
 
@@ -150,7 +144,7 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const now = Date.now();
     let progress: number | undefined;
     let duration: number | undefined;
-    if (m === 'spotify' && !isVideoItem(playing)) {
+    if (m === 'spotify') {
       if (r?.track && r.track.uri === spotifyUri(playing)) {
         progress = livePosition(r, now);
         duration = r.durationMs;
@@ -270,35 +264,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
   }, [blockForReconnect, qc, schedulePoll, toPreview, undoOptimistic]);
 
-  /**
-   * Play the queued video at `i`: Spotify pauses first (whatever it plays: the song before, or its autoplay),
-   * then the mini player's YouTube player takes over. `auto`: the song before played to its end (not a skip).
-   */
-  const enterVideo = useCallback((i: number, auto = false, seen?: SpotifyPlayerState) => {
-    clearTimeout(boundaryTimer.current);
-    runEnd.current = null;
-    windowRef.current = null;
-    if (auto) tracker.stop();
-    const r = seen ? { ...seen, at: Date.now() } : live.current.remote;
-    if (r?.isPlaying) {
-      const now = Date.now();
-      expect.current = null;
-      before.current = undefined;
-      setRemote({ ...r, isPlaying: false, progressMs: livePosition(r, now), at: now });
-      api.spotifyControl('pause').catch(() => undefined);
-    }
-    setIndex(i);
-  }, [tracker]);
-
-  /** The boundary timer fired: the run's last song is (still) ending → on to the video. */
-  const boundaryRef = useRef<() => void>(() => undefined);
-  boundaryRef.current = () => {
-    const run = runEnd.current;
-    const r = live.current.remote;
-    if (!run || !r || isVideoItem(live.current.queue[live.current.index])) return;
-    if (r.isPlaying && r.track?.uri === run.lastUri && r.durationMs > 0 && livePosition(r, Date.now()) >= r.durationMs - 1500) enterVideo(run.video, true);
-  };
-
   /** Take a player-state sample, unless Spotify hasn't caught up with the last tap yet. */
   const applyState = useCallback((s: SpotifyPlayerState) => {
     if (!live.current.queue.length) return;
@@ -313,24 +278,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     before.current = undefined;
     setRemote({ ...s, at: now });
     const q = live.current.queue;
-    // A video plays: Spotify's state never moves the queue.
-    if (isVideoItem(q[live.current.index])) return;
-    const run = runEnd.current;
-    if (run) {
-      if (s.isPlaying && s.track?.uri === run.lastUri) {
-        run.sawLast = true;
-        clearTimeout(boundaryTimer.current);
-        if (s.durationMs > 0) boundaryTimer.current = setTimeout(() => boundaryRef.current(), Math.max(0, s.durationMs - s.progressMs - BOUNDARY_LEAD_MS));
-      } else if (remoteRunEnded(s, run)) {
-        // Spotify finished the songs before the video (stopped, or moved on to its own autoplay).
-        return enterVideo(run.video, true, s);
-      }
-    }
     const i = s.track ? q.findIndex((x) => spotifyUri(x) === s.track!.uri) : -1;
     if (i < 0) return;
     if (i !== live.current.index) setIndex(i);
     if (s.isPlaying && tracker.started(q[i], now - s.progressMs)) record(q[i], 'play');
-  }, [enterVideo, record, tracker]);
+  }, [record, tracker]);
 
   const poll = useCallback(async () => {
     stopPolling();
@@ -365,6 +317,32 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   }, [applyState, fail, schedulePoll, stopPolling]);
   pollRef.current = poll;
 
+  /** Pause Spotify for another player (no undo, no notice: a background courtesy, confirmed by the next poll). */
+  const pauseForOther = useCallback(() => {
+    const { queueMode: m, remote: r, queue: q } = live.current;
+    if (m !== 'spotify' || !q.length || !r?.isPlaying) return;
+    const now = Date.now();
+    before.current = undefined;
+    expect.current = { isPlaying: false, until: now + 6000 };
+    setRemote({ ...r, isPlaying: false, progressMs: livePosition(r, now), at: now });
+    api.spotifyControl('pause').then(() => schedulePoll(CONFIRM_MS)).catch(() => undefined);
+  }, [schedulePoll]);
+
+  /**
+   * A Spotify command (sent when `y` was the yield count) has landed: if a YouTube player took the sound
+   * meanwhile, Spotify may have just started under it (a play is several steps, a pause one) → pause again.
+   * True when the music may go on.
+   */
+  const stillOurs = useCallback((y: number) => {
+    if (yielded.current === y) return true;
+    const { remote: r } = live.current;
+    const now = Date.now();
+    if (r) setRemote({ ...r, isPlaying: false, progressMs: livePosition(r, now), at: now });
+    expect.current = { isPlaying: false, until: now + 6000 };
+    api.spotifyControl('pause').then(() => schedulePoll(CONFIRM_MS)).catch(() => undefined);
+    return false;
+  }, [schedulePoll]);
+
   /** Show the requested song as playing right away; the next polls confirm it. */
   const showOptimistic = useCallback((item: AnalyzedItem) => {
     const uri = spotifyUri(item);
@@ -382,10 +360,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }));
   }, []);
 
-  /** Hand the queue to the user's Spotify app, starting at `i` (up to the next video; a video plays in ECHO). */
+  /** Hand the queue to the user's Spotify app, starting at `i`. */
   const startRemote = useCallback(async (q: AnalyzedItem[], i: number, auto = false) => {
-    clearTimeout(boundaryTimer.current);
-    if (isVideoItem(q[i])) return enterVideo(i);
     const win = queueWindow(q, i);
     if (!win) {
       setNotice({ kind: 'error', message: 'This song can’t be played on Spotify.' });
@@ -393,10 +369,11 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     }
     const start = q.findIndex((x) => spotifyUri(x) === win.uris[win.offset]);
     windowRef.current = { begin: win.begin, end: win.end };
-    runEnd.current = win.video !== null ? { lastUri: win.uris[win.uris.length - 1], uris: new Set(win.uris), video: win.video, sawLast: false } : null;
     if (start !== live.current.index) setIndex(start);
     // Known to be off already: the function can skip turning shuffle off.
     const shuffleOff = live.current.remote?.shuffle === false;
+    claimSound(MUSIC);
+    const y = yielded.current;
     showOptimistic(q[start]);
     setBusy(true);
     try {
@@ -405,13 +382,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       setNotice((n) => (n?.kind === 'premium_required' ? n : null));
       // The function also turned shuffle off, so the lane plays in ECHO's order.
       setRemote((s) => (s ? { ...s, shuffle: false, device: r.device ?? s.device } : s));
+      if (!stillOurs(y)) return;
       schedulePoll(CONFIRM_MS);
     } catch (e) {
       fail(e, { queue: q, index: start, auto });
     } finally {
       setBusy(false);
     }
-  }, [enterVideo, fail, schedulePoll, showOptimistic]);
+  }, [fail, schedulePoll, showOptimistic, stillOurs]);
 
   const next = useCallback(() => {
     const { queue: q, index: i, queueMode: m, remote: r } = live.current;
@@ -421,15 +399,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     setIndex(t);
     if (m !== 'spotify' || blockedSpotify()) return;
     const win = windowRef.current;
-    // Spotify's own "next" only while it plays ECHO's queue in order (with shuffle on it would pick a random song),
-    // and never into a video (Spotify's run stops before it).
-    const inSync = !isVideoItem(q[t]) && !!r?.track && r.track.uri === spotifyUri(q[i]) && !r.shuffle && !expect.current && !!win && t <= win.end;
+    // Spotify's own "next" only while it plays ECHO's queue in order (with shuffle on it would pick a random song).
+    const inSync = !!r?.track && r.track.uri === spotifyUri(q[i]) && !r.shuffle && !expect.current && !!win && t <= win.end;
     if (!inSync) return void startRemote(q, t);
+    const y = yielded.current;
     showOptimistic(q[t]);
     api.spotifyControl('next')
-      .then(() => schedulePoll(1200))
+      .then(() => stillOurs(y) && schedulePoll(1200))
       .catch((e) => (e instanceof ApiError && e.code === 'no_device' ? void startRemote(q, t) : fail(e, { queue: q, index: t })));
-  }, [blockedSpotify, fail, noteLeave, schedulePoll, showOptimistic, startRemote]);
+  }, [blockedSpotify, fail, noteLeave, schedulePoll, showOptimistic, startRemote, stillOurs]);
 
   const prev = useCallback(() => {
     const { queue: q, index: i, queueMode: m } = live.current;
@@ -447,20 +425,10 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (m === 'spotify' && !blockedSpotify()) void startRemote(q, t);
   }, [blockedSpotify, noteLeave, startRemote]);
 
-  /** The current item ended by itself: the next one plays (a song in Spotify mode starts with the songs after it). */
   const advance = useCallback(() => {
     tracker.stop();
-    const { queue: q, index: i, queueMode: m } = live.current;
-    const t = i + 1;
-    if (t >= q.length) return;
-    if (m === 'spotify' && !isVideoItem(q[t]) && !blockedSpotify()) return void startRemote(q, t);
-    setIndex(t);
-  }, [blockedSpotify, startRemote, tracker]);
-
-  const videoEnded = useCallback((item: AnalyzedItem) => {
-    const { queue: q, index: i } = live.current;
-    if (q[i]?.id === item.id) advance();
-  }, [advance]);
+    setIndex((i) => (i + 1 < live.current.queue.length ? i + 1 : i));
+  }, [tracker]);
 
   const togglePlay = useCallback(() => {
     const { queue: q, index: i, remote: r, queueMode: m } = live.current;
@@ -478,13 +446,15 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
       if (before.current === undefined) before.current = r;
       expect.current = { uri: r.track.uri, isPlaying: true, until: now + 6000 };
       setRemote({ ...r, isPlaying: true, at: now });
+      claimSound(MUSIC);
+      const y = yielded.current;
       api.spotifyControl('resume')
-        .then(() => schedulePoll(CONFIRM_MS))
+        .then(() => stillOurs(y) && schedulePoll(CONFIRM_MS))
         .catch((e) => (e instanceof ApiError && e.code === 'no_device' ? void startRemote(q, i) : fail(e, { queue: q, index: i })));
       return;
     }
     void startRemote(q, i);
-  }, [blockedSpotify, fail, schedulePoll, startRemote]);
+  }, [blockedSpotify, fail, schedulePoll, startRemote, stillOurs]);
 
   const playQueue = useCallback((items: AnalyzedItem[], start = 0) => {
     const q = items.filter(isQueueable);
@@ -492,8 +462,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     const first = items[start] && isQueueable(items[start]) ? q.findIndex((x) => x.id === items[start].id) : 0;
     const i = Math.max(0, first);
     const cur = live.current;
-    // The video on screen tapped again: it keeps playing.
-    if (i === cur.index && isVideoItem(q[i]) && sameQueue(q, cur.queue)) return;
     // The queue Spotify is already playing (a shelf or a song tapped again): carry on instead of restarting the song.
     if (cur.queueMode === 'spotify' && cur.spotifyReady && sameQueue(q, cur.queue)) {
       if (i !== cur.index) return jump(i);
@@ -537,8 +505,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
   const close = useCallback(() => {
     const { queueMode: m, remote: r } = live.current;
     if (m === 'spotify' && r?.isPlaying) api.spotifyControl('pause').catch(() => undefined);
-    clearTimeout(boundaryTimer.current);
-    runEnd.current = null;
     tracker.stop();
     pending.current = null;
     expect.current = null;
@@ -570,12 +536,6 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     if (playing && positionMs > 0) tracker.started(item, Date.now() - positionMs);
   }, [tracker]);
 
-  const videoProgress = useCallback((item: AnalyzedItem, playing: boolean, positionMs: number, durationMs?: number) => {
-    previewPos.current = { id: item.id, ms: positionMs, durationMs };
-    // The first time it plays: one 'play' (a quick Next later counts as a skip, like a song).
-    if (playing && tracker.started(item, Date.now() - positionMs)) record(item, 'play');
-  }, [record, tracker]);
-
   // Keep the bar in sync with the Spotify app (cadence: nextPollDelay), never while hidden; on return, check again or
   // retry a pending play.
   useEffect(() => {
@@ -597,10 +557,14 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     };
   }, [polling, schedulePoll, startRemote, stopPolling]);
 
-  useEffect(() => () => {
-    stopPolling();
-    clearTimeout(boundaryTimer.current);
-  }, [stopPolling]);
+  useEffect(() => stopPolling, [stopPolling]);
+
+  // A YouTube player started: the music pauses (and a play still on its way is paused when it lands).
+  useEffect(() => onSoundClaimed((owner) => {
+    if (owner === MUSIC) return;
+    yielded.current++;
+    pauseForOther();
+  }), [pauseForOther]);
 
   // Back from Spotify's consent screen (?spotify=connected|denied): confirm once and refresh the link status.
   useEffect(() => {
@@ -622,8 +586,8 @@ export function PlayerProvider({ children }: { children: ReactNode }) {
     [status.configured, status.data, status.connected, status.canPlay, reconnectNeeded],
   );
   const value = useMemo<PlayerApi>(
-    () => ({ queue, index, current: queue[index] ?? null, mode, spotify, remote, busy, notice, playQueue, next, prev, jump, advance, togglePlay, close, retry, dismissNotice, connect, previewProgress, videoProgress, videoEnded }),
-    [queue, index, mode, spotify, remote, busy, notice, playQueue, next, prev, jump, advance, togglePlay, close, retry, dismissNotice, connect, previewProgress, videoProgress, videoEnded],
+    () => ({ queue, index, current: queue[index] ?? null, mode, spotify, remote, busy, notice, playQueue, next, prev, jump, advance, togglePlay, close, retry, dismissNotice, connect, previewProgress }),
+    [queue, index, mode, spotify, remote, busy, notice, playQueue, next, prev, jump, advance, togglePlay, close, retry, dismissNotice, connect, previewProgress],
   );
   const currentId = queue[index]?.id ?? null;
   const playing = queueMode === 'spotify' && !!remote?.isPlaying;

@@ -121,7 +121,7 @@ export async function refreshYouTube(ids: string[], ctx: { http: import('./http.
 
 // ───────────── live-session pool (music lanes) ─────────────
 //
-// Music lanes mix Spotify songs with live sessions from a fixed set of well-known session channels. No
+// Music lanes show live sessions from a fixed set of well-known session channels next to their songs. No
 // search.list (100 units) is ever spent on this: once a day the pool lists each channel's recent uploads
 // (playlistItems.list, 1 unit per 50 items) and checks them (videos.list, 1 unit per 50 ids), and the
 // result is cached for everyone in the shared provider cache. Channel ids → uploads playlists come from
@@ -145,8 +145,15 @@ export interface SessionChannel {
   session: string;
   /** Lanes a session may join when its title names an artist of that lane (a curator pick or a library artist). */
   lanes: string[];
-  /** Lanes a session may join on the channel alone (no artist match): where a recent upload most likely fits. */
+  /**
+   * Lanes a session may join on the channel alone (no artist match): where a recent upload most likely fits.
+   * Outside language-neutral lanes that also needs language evidence (engine/sessions.ts).
+   */
   open: string[];
+  /** Its sessions are English-language (a US/UK venue for local acts): evidence enough for a channel-only pick. */
+  english?: boolean;
+  /** Films acts from everywhere, French and Arabic ones included: no channel-only pick while a regional scene is off. */
+  multilingual?: boolean;
 }
 
 /**
@@ -156,18 +163,34 @@ export interface SessionChannel {
  */
 export const SESSION_CHANNELS: SessionChannel[] = [
   { key: 'tinydesk', name: 'NPR Music (Tiny Desk)', handle: '@nprmusic', id: 'UC4eYXhJI4-7wSWc8UNRwD4A', venue: 'Tiny Desk', prep: 'at', session: 'Tiny Desk Concert', lanes: ['hiphop-rnb', 'blues-soul', 'afro-latin', 'jazz-classical'], open: ['hiphop-rnb', 'blues-soul'] },
-  { key: 'colors', name: 'COLORS', handle: '@COLORSxSTUDIOS', id: 'UC2Qw1dzXDBAZPwS7zm37g8g', venue: 'COLORS', prep: 'on', session: 'A COLORS SHOW', lanes: ['hiphop-rnb', 'blues-soul', 'afro-latin'], open: ['hiphop-rnb'] },
-  { key: 'kexp', name: 'KEXP', handle: '@kexp', id: 'UC3I2GFN_F8WudD_2jUZbojA', venue: 'KEXP', prep: 'on', session: 'Live on KEXP', lanes: ['rock-metal', 'blues-soul'], open: ['rock-metal'] },
-  { key: 'audiotree', name: 'Audiotree', handle: '@audiotreetv', venue: 'Audiotree', prep: 'on', session: 'Audiotree Live session', lanes: ['rock-metal', 'blues-soul'], open: ['rock-metal'] },
-  { key: 'mahogany', name: 'Mahogany Sessions', handle: '@mahoganysessions', venue: 'Mahogany Sessions', prep: 'for', session: 'Mahogany Session', lanes: ['blues-soul'], open: ['blues-soul'] },
+  { key: 'colors', name: 'COLORS', handle: '@COLORSxSTUDIOS', id: 'UC2Qw1dzXDBAZPwS7zm37g8g', venue: 'COLORS', prep: 'on', session: 'A COLORS SHOW', lanes: ['hiphop-rnb', 'blues-soul', 'afro-latin'], open: ['hiphop-rnb'], multilingual: true },
+  { key: 'kexp', name: 'KEXP', handle: '@kexp', id: 'UC3I2GFN_F8WudD_2jUZbojA', venue: 'KEXP', prep: 'on', session: 'Live on KEXP', lanes: ['rock-metal', 'blues-soul'], open: ['rock-metal'], english: true },
+  { key: 'audiotree', name: 'Audiotree', handle: '@audiotreetv', venue: 'Audiotree', prep: 'on', session: 'Audiotree Live session', lanes: ['rock-metal', 'blues-soul'], open: ['rock-metal'], english: true },
+  { key: 'mahogany', name: 'Mahogany Sessions', handle: '@mahoganysessions', venue: 'Mahogany Sessions', prep: 'for', session: 'Mahogany Session', lanes: ['blues-soul'], open: ['blues-soul'], english: true },
   { key: 'cercle', name: 'Cercle', handle: '@Cercle', id: 'UCPKT_csvP72boVX0XrMtagQ', venue: 'Cercle', prep: 'for', session: 'Live for Cercle', lanes: ['melodic-house', 'edm', 'afro-latin'], open: ['melodic-house'] },
-  { key: 'boilerroom', name: 'Boiler Room', handle: '@boilerroom', id: 'UCGBpxWJr9FNOcFYA5GkKrMg', venue: 'Boiler Room', prep: 'at', session: 'Boiler Room set', lanes: ['melodic-house', 'edm', 'afro-latin'], open: ['edm'] },
-  { key: 'sofar', name: 'Sofar Sounds', handle: '@SofarSounds', venue: 'Sofar Sounds', prep: 'at', session: 'Sofar Sounds session', lanes: ['blues-soul'], open: ['blues-soul'] },
+  { key: 'boilerroom', name: 'Boiler Room', handle: '@boilerroom', id: 'UCGBpxWJr9FNOcFYA5GkKrMg', venue: 'Boiler Room', prep: 'at', session: 'Boiler Room set', lanes: ['melodic-house', 'edm', 'afro-latin'], open: ['edm'], multilingual: true },
+  { key: 'sofar', name: 'Sofar Sounds', handle: '@SofarSounds', venue: 'Sofar Sounds', prep: 'at', session: 'Sofar Sounds session', lanes: ['blues-soul'], open: ['blues-soul'], multilingual: true },
 ];
 
 export const SESSION_CHANNEL_BY_KEY: Record<string, SessionChannel> = Object.fromEntries(SESSION_CHANNELS.map((c) => [c.key, c]));
 
-/** One checked upload of a session channel (embeddable, public, 60 s or longer, not a Short). Compact: no description. */
+/**
+ * The session channel a YouTube channel title belongs to ("NPR Music" → tinydesk, "KEXP" → kexp), or null.
+ * Matched on the channel's own name or venue, never on a video title.
+ */
+export function sessionChannelOfTitle(channelTitle: string | undefined | null, channels: SessionChannel[] = SESSION_CHANNELS): SessionChannel | null {
+  const t = (channelTitle ?? '').toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  if (t.length < 3) return null;
+  const norm = (x: string) => x.toLowerCase().replace(/[^a-z0-9]+/g, ' ').trim();
+  return channels.find((c) => t === norm(c.name) || t === norm(c.venue))
+    ?? channels.find((c) => norm(c.name).startsWith(`${t} `) || ` ${t} `.includes(` ${norm(c.venue)} `))
+    ?? null;
+}
+
+/**
+ * One checked upload of a session channel (embeddable, public, 60 s or longer, not a Short: never a
+ * portrait or square frame). Compact: no description.
+ */
 export interface SessionVideo {
   videoId: string;
   /** SessionChannel.key */
@@ -175,37 +198,46 @@ export interface SessionVideo {
   title: string;
   publishedAt: string;
   durationSec: number;
+  /** A true 16:9 thumbnail (maxres, else medium): no letterbox bars when a tile crops it square. */
   thumb?: string;
   /** defaultAudioLanguage / defaultLanguage (two letters), when the uploader set one. */
   lang?: string;
+  /** When YouTube returned this video's data (ISO): the 30-day storage clock of anything stored from it. */
+  fetchedAt?: string;
 }
 
 /** Recent uploads read per channel (one playlistItems.list page). */
 export const SESSION_UPLOADS = 50;
 /** The checked pool is shared by every user for a day... */
 export const SESSION_POOL_TTL = 86400;
-/** ...and kept a week as the copy served while YouTube is out of quota (well inside the 30-day storage policy). */
+/** ...and kept a week as the copy served while YouTube is out of quota or failing (videos older than that are never served). */
 export const SESSION_POOL_STALE_TTL = 7 * 86400;
+/** A pool some channels didn't answer for is rebuilt this soon (their answers only: the others' are cached). */
+export const SESSION_POOL_RETRY_TTL = 30 * 60;
+/** YouTube failed for every channel: the last good copy is served, without calling YouTube, this long. */
+export const SESSION_POOL_BACKOFF_TTL = 15 * 60;
+/** A build in progress (best effort: concurrent requests serve the last good copy instead of building it again). */
+export const SESSION_POOL_LOCK_TTL = 60;
 /** Channel id → uploads playlist (never changes; re-checked monthly). */
 export const SESSION_CHANNEL_TTL = 30 * 86400;
 
-export const sessionPoolKey = (channels: SessionChannel[] = SESSION_CHANNELS) => `yt:sessions:v1:${channels.map((c) => c.key).join(',')}`;
+export const sessionPoolKey = (channels: SessionChannel[] = SESSION_CHANNELS) => `yt:sessions:v2:${channels.map((c) => c.key).join(',')}`;
 
 /**
  * Quota units per day for the whole pool (shared by all users through the provider cache): one
- * playlistItems.list per channel, videos.list per 50 uploads, and the channel lookups spread over their
- * 30-day cache (one batched call for the known ids, one per handle to resolve). 8 channels ≈ 16.3 units/day.
+ * playlistItems.list per channel, videos.list per 50 uploads of a channel, and the channel lookups spread
+ * over their 30-day cache (one batched call for the known ids, one per handle to resolve). 8 channels ≈ 16.3 units/day.
  */
 export function sessionPoolUnitsPerDay(channels: SessionChannel[] = SESSION_CHANNELS, perChannel = SESSION_UPLOADS): number {
   const lists = channels.length * Math.ceil(perChannel / 50);
-  const details = Math.ceil((channels.length * perChannel) / 50);
+  const details = channels.length * Math.ceil(perChannel / 50);
   const lookups = (1 + channels.filter((c) => !c.id).length) / 30;
   return lists + details + lookups;
 }
 
 export interface SessionPoolResult {
   videos: SessionVideo[];
-  /** cache = the shared day's pool; network = built now; stale = last week's copy (YouTube out of quota or failing); none = nothing. */
+  /** cache = the shared day's pool; network = built now; stale = last good copy (YouTube out of quota, failing, or busy building); none = nothing. */
   source: 'cache' | 'network' | 'stale' | 'none';
   /** Quota units spent by this call (cache hits excluded). */
   units: number;
@@ -215,13 +247,58 @@ export interface SessionPoolResult {
 }
 
 interface YTChannel { id: string; snippet?: { customUrl?: string; title?: string }; contentDetails?: { relatedPlaylists?: { uploads?: string } } }
+interface YTSessionVideo extends YTVideo { player?: { embedWidth?: string | number; embedHeight?: string | number } }
 
 const sameHandle = (a: string | undefined, b: string) => !!a && a.replace(/^@/, '').toLowerCase() === b.replace(/^@/, '').toLowerCase();
+const byNewest = (a: SessionVideo, b: SessionVideo) => (a.publishedAt < b.publishedAt ? 1 : a.publishedAt > b.publishedAt ? -1 : 0);
+/** Videos whose data YouTube returned less than a week ago (older copies are never served: storage policy). */
+const servable = (xs: SessionVideo[], now = Date.now()) => xs.filter((v) => !v.fetchedAt || now - Date.parse(v.fetchedAt) < SESSION_POOL_STALE_TTL * 1000);
+const channelsIn = (xs: SessionVideo[]) => new Set(xs.map((v) => v.channel)).size;
+// Only the fields the pool reads (smaller answers and cache rows; same quota).
+const VIDEO_FIELDS = 'items(id,snippet(title,publishedAt,defaultAudioLanguage,defaultLanguage,thumbnails(maxres/url,medium/url,high/url,default/url)),contentDetails(duration,regionRestriction),status(embeddable,privacyStatus),player(embedWidth,embedHeight))';
+
+/**
+ * A videos.list item as a pool video, or null when it can't be one: not embeddable, not public, geo-blocked
+ * in `region`, shorter than a minute, tagged #shorts, or a Short's portrait / square frame (Shorts run up to
+ * 3 minutes: the player's aspect ratio, from part=player with maxWidth, tells them apart at no extra quota).
+ */
+export function sessionVideoOf(v: YTSessionVideo, channel: string, region: string | undefined, fetchedAt: string): SessionVideo | null {
+  const sec = parseIsoDuration(v.contentDetails?.duration) ?? 0;
+  const rr = v.contentDetails?.regionRestriction;
+  const geoBlocked = !!region && !!rr && ((!!rr.allowed && !rr.allowed.includes(region)) || (rr.blocked ?? []).includes(region));
+  if (v.status?.embeddable === false || (v.status?.privacyStatus && v.status.privacyStatus !== 'public') || geoBlocked) return null;
+  if (sec < 60 || /#shorts?\b/i.test(v.snippet.title)) return null;
+  const w = Number(v.player?.embedWidth);
+  const h = Number(v.player?.embedHeight);
+  if (w > 0 && h > 0 && h >= w) return null;
+  const t = v.snippet.thumbnails ?? {};
+  const thumb = (t.maxres ?? t.medium ?? t.high ?? t.default)?.url;
+  const lang = (v.snippet.defaultAudioLanguage ?? v.snippet.defaultLanguage)?.slice(0, 2).toLowerCase();
+  return {
+    videoId: v.id, channel, title: decodeEntities(v.snippet.title), publishedAt: v.snippet.publishedAt, durationSec: sec,
+    ...(thumb ? { thumb } : {}), ...(lang ? { lang } : {}), fetchedAt,
+  };
+}
+
+/** The last good pool (no network): what a caller serves when the day's pool isn't ready in time. */
+export async function staleSessionPool(ctx: Pick<ProviderContext, 'http'>, channels: SessionChannel[] = SESSION_CHANNELS, why = 'pool not ready'): Promise<SessionPoolResult> {
+  const key = sessionPoolKey(channels);
+  const fresh = (await ctx.http.cache?.get(key).catch(() => undefined)) as SessionVideo[] | undefined;
+  if (Array.isArray(fresh)) return { videos: servable(fresh), source: 'cache', units: 0, detail: `${fresh.length} sessions (cached)` };
+  const old = (await ctx.http.cache?.get(`${key}:stale`).catch(() => undefined)) as SessionVideo[] | undefined;
+  const videos = Array.isArray(old) ? servable(old) : [];
+  return videos.length
+    ? { videos, source: 'stale', units: 0, detail: `${videos.length} sessions from the last good pool (${why})` }
+    : { videos: [], source: 'none', units: 0, detail: `no sessions (${why})` };
+}
 
 /**
  * Recent uploads of the session channels, checked and cached (see above). `allowNetwork: false` (YouTube
- * blocked) serves the cached pool or last week's copy only. A channel that fails is skipped; an
- * out-of-quota answer stops the build and serves last week's copy.
+ * blocked) serves the cached pool or last good copy only. A channel that fails is skipped and the build is
+ * partial: its videos come from the last good copy, and the pool is cached for 30 minutes only, so the
+ * next build retries it (the other channels' answers are cached). When every channel fails, the last
+ * good copy is served and YouTube isn't called again for 15 minutes; an out-of-quota answer stops the
+ * build and serves it too. The last good copy is never replaced by one covering fewer channels.
  */
 export async function liveSessionPool(ctx: ProviderContext, opts: { allowNetwork?: boolean; channels?: SessionChannel[]; perChannel?: number } = {}): Promise<SessionPoolResult> {
   const { http, env } = ctx;
@@ -231,16 +308,27 @@ export async function liveSessionPool(ctx: ProviderContext, opts: { allowNetwork
   const cache = http.cache;
   let units = 0;
   const fresh = (await cache?.get(key)) as SessionVideo[] | undefined;
-  if (Array.isArray(fresh)) return { videos: fresh, source: 'cache', units: 0, detail: `${fresh.length} sessions (cached)` };
-  const stale = async (why: string, quota?: ProviderError): Promise<SessionPoolResult> => {
+  if (Array.isArray(fresh)) return { videos: servable(fresh), source: 'cache', units: 0, detail: `${fresh.length} sessions (cached)` };
+  const lastGood = async () => {
     const old = (await cache?.get(`${key}:stale`)) as SessionVideo[] | undefined;
-    return Array.isArray(old)
+    return Array.isArray(old) ? servable(old) : null;
+  };
+  const stale = async (why: string, quota?: ProviderError): Promise<SessionPoolResult> => {
+    const old = await lastGood();
+    return old?.length
       ? { videos: old, source: 'stale', units, quota, detail: `${old.length} sessions from the last good pool (${why})` }
       : { videos: [], source: 'none', units, quota, detail: `no sessions (${why})` };
   };
   const apiKey = env('YOUTUBE_API_KEY');
   if (!apiKey) return stale('YouTube not configured');
   if (opts.allowNetwork === false) return stale('YouTube quota reached today');
+  if (await cache?.get(`${key}:retry`)) return stale('YouTube failing: retrying later');
+  // Another request is building it right now (best effort: the cache has no atomic insert): serve the last good copy.
+  if (await cache?.get(`${key}:lock`)) {
+    const s = await stale('being rebuilt');
+    if (s.videos.length) return s;
+  }
+  await cache?.set(`${key}:lock`, Date.now(), SESSION_POOL_LOCK_TTL);
   /** One API call (1 unit) unless the provider cache already holds its answer. */
   const call = async <T>(path: string, params: URLSearchParams, cacheKey: string, ttl: number): Promise<T> => {
     const hit = await cache?.get(cacheKey);
@@ -249,73 +337,91 @@ export async function liveSessionPool(ctx: ProviderContext, opts: { allowNetwork
     return http.json<T>(`https://www.googleapis.com/youtube/v3/${path}?${params}&key=${apiKey}`, { cacheKey, ttl, provider: 'youtube' });
   };
   const notes: string[] = [];
+  /** Channels that didn't answer (a transient error): their videos come from the last good copy. */
+  const failed = new Set<string>();
+  const isQuota = (e: unknown) => e instanceof ProviderError && e.kind === 'quota';
   try {
     // 1. Uploads playlists: known ids in one call (verified by handle), the rest resolved by handle.
     const uploads = new Map<string, string>();
     const known = channels.filter((c) => c.id);
     if (known.length) {
       const ids = known.map((c) => c.id!).join(',');
-      const r = await call<{ items?: YTChannel[] }>('channels', new URLSearchParams({ part: 'snippet,contentDetails', id: ids, maxResults: '50' }), `yt:channels:${ids}`, SESSION_CHANNEL_TTL);
-      for (const c of known) {
-        const ch = (r.items ?? []).find((x) => x.id === c.id);
-        const up = ch?.contentDetails?.relatedPlaylists?.uploads;
-        // An id whose channel carries another handle is wrong: resolved by handle below.
-        if (up && (!ch?.snippet?.customUrl || sameHandle(ch.snippet.customUrl, c.handle))) uploads.set(c.key, up);
+      try {
+        const r = await call<{ items?: YTChannel[] }>('channels', new URLSearchParams({ part: 'snippet,contentDetails', id: ids, maxResults: '50' }), `yt:channels:${ids}`, SESSION_CHANNEL_TTL);
+        for (const c of known) {
+          const ch = (r.items ?? []).find((x) => x.id === c.id);
+          const up = ch?.contentDetails?.relatedPlaylists?.uploads;
+          // An id whose channel carries another handle is wrong: resolved by handle below.
+          if (up && (!ch?.snippet?.customUrl || sameHandle(ch.snippet.customUrl, c.handle))) uploads.set(c.key, up);
+        }
+      } catch (e) {
+        if (isQuota(e)) throw e;
+        notes.push('channel lookup failed');
       }
     }
-    for (const c of channels.filter((x) => !uploads.has(x.key))) {
+    await Promise.all(channels.filter((x) => !uploads.has(x.key)).map(async (c) => {
       try {
         const r = await call<{ items?: YTChannel[] }>('channels', new URLSearchParams({ part: 'snippet,contentDetails', forHandle: c.handle }), `yt:channel-handle:${c.handle.toLowerCase()}`, SESSION_CHANNEL_TTL);
         const up = r.items?.[0]?.contentDetails?.relatedPlaylists?.uploads;
         if (up) uploads.set(c.key, up);
         else notes.push(`${c.handle} not found`);
       } catch (e) {
-        if (e instanceof ProviderError && e.kind === 'quota') throw e;
+        if (isQuota(e)) throw e;
+        failed.add(c.key);
         notes.push(`${c.handle} lookup failed`);
       }
-    }
-    // 2. Recent uploads per channel (newest first).
-    const recent: Array<{ videoId: string; channel: string }> = [];
-    await Promise.all(channels.filter((c) => uploads.has(c.key)).map(async (c) => {
+    }));
+    // 2. Recent uploads per channel (newest first), and 3. their details: embeddable, public, long enough,
+    // landscape, not geo-blocked in YOUTUBE_REGION (1 unit per 50 ids). Each channel's ids are checked in
+    // their own videos.list calls, cached as compact rows, so a rebuild after a partial one reuses them.
+    const region = env('YOUTUBE_REGION')?.toUpperCase();
+    const details = async (channel: string, ids: string[]): Promise<SessionVideo[]> => {
+      const ck = `yt:session-videos:v2:${region ?? ''}:${ids.join(',')}`;
+      const hit = await cache?.get(ck);
+      if (Array.isArray(hit)) return hit as SessionVideo[];
+      units++;
+      const params = new URLSearchParams({ part: 'snippet,contentDetails,status,player', id: ids.join(','), maxWidth: '640', fields: VIDEO_FIELDS });
+      const r = await http.json<{ items?: YTSessionVideo[] }>(`https://www.googleapis.com/youtube/v3/videos?${params}&key=${apiKey}`, { provider: 'youtube' });
+      const at = new Date().toISOString();
+      const out = (r.items ?? []).map((v) => sessionVideoOf(v, channel, region, at)).filter((v): v is SessionVideo => !!v);
+      await cache?.set(ck, out, SESSION_POOL_TTL);
+      return out;
+    };
+    const perCh = await Promise.all(channels.filter((c) => uploads.has(c.key)).map(async (c) => {
       const pl = uploads.get(c.key)!;
       try {
-        const r = await call<{ items?: Array<{ contentDetails?: { videoId?: string } }> }>('playlistItems', new URLSearchParams({ part: 'contentDetails', playlistId: pl, maxResults: String(perChannel) }), `yt:uploads:${pl}:${perChannel}`, SESSION_POOL_TTL);
-        for (const it of r.items ?? []) if (it.contentDetails?.videoId) recent.push({ videoId: it.contentDetails.videoId, channel: c.key });
+        const r = await call<{ items?: Array<{ contentDetails?: { videoId?: string } }> }>('playlistItems', new URLSearchParams({ part: 'contentDetails', playlistId: pl, maxResults: String(perChannel), fields: 'items/contentDetails/videoId' }), `yt:uploads:${pl}:${perChannel}`, SESSION_POOL_TTL);
+        const ids = [...new Set((r.items ?? []).map((it) => it.contentDetails?.videoId).filter((x): x is string => !!x))];
+        const out: SessionVideo[] = [];
+        for (let i = 0; i < ids.length; i += 50) out.push(...await details(c.key, ids.slice(i, i + 50)));
+        return out;
       } catch (e) {
-        if (e instanceof ProviderError && e.kind === 'quota') throw e;
+        if (isQuota(e)) throw e;
+        failed.add(c.key);
         notes.push(`${c.key} uploads failed`);
+        return [];
       }
     }));
-    // 3. Details: embeddable, public, long enough, not geo-blocked in YOUTUBE_REGION (1 unit per 50 ids).
-    const channelOf = new Map(recent.map((r) => [r.videoId, r.channel]));
-    const ids = [...channelOf.keys()];
-    const region = env('YOUTUBE_REGION')?.toUpperCase();
-    const videos: SessionVideo[] = [];
-    for (let i = 0; i < ids.length; i += 50) {
-      const chunk = ids.slice(i, i + 50);
-      const r = await call<{ items?: YTVideo[] }>('videos', new URLSearchParams({ part: 'snippet,contentDetails,status', id: chunk.join(',') }), `yt:session-videos:${chunk.join(',')}`, SESSION_POOL_TTL);
-      for (const v of r.items ?? []) {
-        const sec = parseIsoDuration(v.contentDetails?.duration) ?? 0;
-        const rr = v.contentDetails?.regionRestriction;
-        const geoBlocked = !!region && !!rr && ((!!rr.allowed && !rr.allowed.includes(region)) || (rr.blocked ?? []).includes(region));
-        if (v.status?.embeddable === false || (v.status?.privacyStatus && v.status.privacyStatus !== 'public') || geoBlocked) continue;
-        if (sec < 60 || /#shorts?\b/i.test(v.snippet.title)) continue;
-        const t = v.snippet.thumbnails ?? {};
-        const lang = (v.snippet.defaultAudioLanguage ?? v.snippet.defaultLanguage)?.slice(0, 2).toLowerCase();
-        videos.push({
-          videoId: v.id, channel: channelOf.get(v.id)!, title: decodeEntities(v.snippet.title), publishedAt: v.snippet.publishedAt, durationSec: sec,
-          ...((t.high ?? t.medium ?? t.default)?.url ? { thumb: (t.high ?? t.medium ?? t.default)!.url } : {}), ...(lang ? { lang } : {}),
-        });
-      }
+    const videos = perCh.flat();
+    const old = failed.size ? await lastGood() : null;
+    if (failed.size && !videos.length) {
+      // Every channel failed: the last good copy, and no calls to YouTube for a while.
+      await cache?.set(`${key}:retry`, Date.now(), SESSION_POOL_BACKOFF_TTL);
+      return await stale(`YouTube failing: ${notes.join(', ').slice(0, 120)}`);
     }
-    videos.sort((a, b) => (a.publishedAt < b.publishedAt ? 1 : a.publishedAt > b.publishedAt ? -1 : 0));
-    if (cache && videos.length) {
-      await cache.set(key, videos, SESSION_POOL_TTL);
-      await cache.set(`${key}:stale`, videos, SESSION_POOL_STALE_TTL);
+    // A partial build keeps the failed channels' videos from the last good copy.
+    const pool = [...videos, ...(old ?? []).filter((v) => failed.has(v.channel))].sort(byNewest);
+    if (cache && pool.length) {
+      await cache.set(key, pool, failed.size ? SESSION_POOL_RETRY_TTL : SESSION_POOL_TTL);
+      // A complete build is the new last good copy; a partial one only when it covers as many channels.
+      if (!failed.size || !old || channelsIn(pool) >= channelsIn(old)) await cache.set(`${key}:stale`, pool, SESSION_POOL_STALE_TTL);
     }
-    return { videos, source: 'network', units, detail: `${videos.length} sessions from ${uploads.size} channels (${units} quota units)${notes.length ? `; ${notes.join(', ')}` : ''}` };
+    const answered = uploads.size - [...failed].filter((k) => uploads.has(k)).length;
+    return { videos: pool, source: 'network', units, detail: `${pool.length} sessions, ${answered}/${channels.length} channels answered (${units} quota units)${notes.length ? `; ${notes.join(', ')}` : ''}` };
   } catch (e) {
-    if (e instanceof ProviderError && e.kind === 'quota') return stale('YouTube out of quota', e);
+    if (isQuota(e)) return stale('YouTube out of quota', e as ProviderError);
     return stale(`pool failed: ${String((e as Error)?.message ?? e).slice(0, 60)}`);
+  } finally {
+    await cache?.set(`${key}:lock`, 0, 1);
   }
 }

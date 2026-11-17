@@ -244,7 +244,7 @@ const laneVideo = (n: number, lane = { id: 'hiphop-rnb', label: 'Hip-hop & R&B' 
 });
 
 describe('Discover: live sessions inside music lanes', () => {
-  it('Everything: the session sits in its lane shelf (badge, count, plays with the lane), never in the Videos shelf', async () => {
+  it('Everything: the session sits in its lane shelf (badge, count), never in the Videos shelf; it plays in its own player', async () => {
     everything = feed([item(100, 'books'), item(101, 'youtube'), item(102), item(103), laneVideo(1), item(104)]);
     mount();
     await screen.findByText('Today’s echo', { exact: false });
@@ -255,16 +255,44 @@ describe('Discover: live sessions inside music lanes', () => {
     const videos = screen.getByRole('region', { name: 'Videos for you' });
     expect(within(videos).queryByText(/Session Artist/)).toBeNull();
     expect(within(videos).getByText('Pick 101')).toBeInTheDocument();
-    // Tapping it plays the whole mixed lane from the session, in order.
+    // Tapping it opens its own YouTube player (the detail sheet, playing): never the lane's song queue.
+    const created: string[] = [];
+    (window as unknown as { YT: unknown }).YT = { Player: class { constructor(_el: unknown, o: { videoId: string }) { created.push(o.videoId); } destroy() {} } };
     await act(async () => {
       fireEvent.click(tile);
     });
-    expect(h.playQueue).toHaveBeenLastCalledWith([item(102), item(103), laneVideo(1), item(104)], 2);
-    // "Play all" plays the mixed lane from its first song.
+    await act(async () => undefined);
+    expect(created).toEqual(['LV1']);
+    delete (window as unknown as { YT?: unknown }).YT;
+    expect(h.playQueue).not.toHaveBeenCalled();
+    expect(screen.getByRole('dialog', { name: 'Session Artist 1: Tiny Desk Concert' })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Close player' })).toBeInTheDocument();
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Close details' }));
+    });
+    // "Play all" hands the lane to the player, which queues its songs only (tests/unit/ui/player-mixed.test.tsx).
     await act(async () => {
       fireEvent.click(within(lane).getByRole('button', { name: 'Play all: Hip-hop & R&B' }));
     });
     expect(h.playQueue).toHaveBeenLastCalledWith([item(102), item(103), laneVideo(1), item(104)], 0);
+  });
+
+  it('Music tab: sessions don’t count as picks — 5 songs + 3 sessions is still a short page (no hero, "Get more")', async () => {
+    musicResponses.push(async () => feed([item(1), item(2), laneVideo(1), laneVideo(2), item(3), item(4), laneVideo(3), item(5)]));
+    await openMusicTab();
+    await screen.findByText('That’s all ECHO could verify right now.');
+    expect(screen.getByRole('button', { name: /Get more/ })).toBeInTheDocument();
+    expect(screen.queryByText(/Today’s echo/)).toBeNull();
+    expect(songTiles()).toHaveLength(5);
+    expect(screen.getAllByText('5 songs · 3 live sessions').length).toBeGreaterThan(0);
+  });
+
+  it('Music tab: a page with enough songs gets a hero, and it is a song, never a session', async () => {
+    musicResponses.push(async () => feed([laneVideo(1), ...[1, 2, 3, 4, 5, 6, 7, 8].map((n) => item(n))]));
+    await openMusicTab();
+    await screen.findByText('Today’s echo', { exact: false });
+    expect(screen.getByRole('heading', { level: 1, name: 'Pick 1' })).toBeInTheDocument();
+    expect(screen.queryByText('That’s all ECHO could verify right now.')).toBeNull();
   });
 
   it('Music tab: the lane counts its songs and sessions', async () => {

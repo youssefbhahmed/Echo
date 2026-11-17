@@ -1,17 +1,16 @@
 // Persistent mini player.
 //  • Spotify mode (Premium connected): ECHO's own now-playing bar, remote-controlling the user's Spotify app.
 //  • Preview mode: Spotify's official embed — one tap plays, then it auto-advances through the queue.
-//  • A video in a mixed music lane (either mode): a compact 16:9 YouTube player in place of the bar; when it
-//    ends, the queue moves on (Spotify was paused before it started).
+// Songs only: a music lane's live sessions play in their own YouTube player (the detail sheet), never here.
+// When one starts, the music here pauses (src/lib/media.ts: one sound at a time).
 import { useEffect, useRef, useState, type RefObject } from 'react';
 import { AnimatePresence, motion } from 'motion/react';
 import { ExternalLink, Laptop, ListMusic, LoaderCircle, Music2, Pause, Play, SkipBack, SkipForward, Smartphone, Speaker, X } from 'lucide-react';
 import { usePlayer } from '../lib/player';
 import { useFeedback } from '../hooks/data';
 import { displayTitle } from '../lib/meta';
-import { sessionLine, videoBadge } from '../lib/lanes';
-import { formatClock, isVideoItem, livePosition, spotifyUri } from '../lib/playback';
-import { QueueVideoPlayer } from './Player';
+import { claimSound, MUSIC, onSoundClaimed } from '../lib/media';
+import { formatClock, livePosition, spotifyUri } from '../lib/playback';
 
 interface PlaybackState { isPaused: boolean; isBuffering: boolean; duration: number; position: number }
 
@@ -80,9 +79,7 @@ export function MiniPlayer() {
           <NoDeviceSheet />
           <div ref={card} className="overflow-hidden rounded-[20px] border border-line bg-ink-2/95 shadow-[0_24px_60px_-20px_rgba(0,0,0,0.95)] backdrop-blur-xl">
             <NoteRow />
-            {isVideoItem(current) ? (
-              <VideoBar queueOpen={showQueue} onQueue={() => setShowQueue((s) => !s)} />
-            ) : mode === 'spotify' ? (
+            {mode === 'spotify' ? (
               <SpotifyBar queueOpen={showQueue} onQueue={() => setShowQueue((s) => !s)} />
             ) : (
               <PreviewBar queueOpen={showQueue} onQueue={() => setShowQueue((s) => !s)} />
@@ -109,7 +106,7 @@ function QueueList({ onDone }: { onDone: () => void }) {
           <li key={q.id}>
             <button type="button" onClick={() => jump(i)} aria-current={i === index ? 'true' : undefined} className={`flex min-h-11 w-full items-center gap-3 rounded-xl px-2.5 py-2 text-left text-sm hover:bg-white/[0.06] ${i === index ? 'text-ember' : 'text-bone/90'}`}>
               <span className="w-5 shrink-0 text-right text-xs text-dim tabular-nums">{i + 1}</span>
-              <span className="min-w-0 flex-1 truncate">{displayTitle(q)} <span className="text-dim">· {q.creators[0]}{videoBadge(q) ? ` · ${videoBadge(q)}` : ''}</span></span>
+              <span className="min-w-0 flex-1 truncate">{displayTitle(q)} <span className="text-dim">· {q.creators[0]}</span></span>
             </button>
           </li>
         ))}
@@ -153,7 +150,7 @@ function NoDeviceSheet() {
 
 /** One compact line at the top of the bar: preview label, permission banner, or a short notice. */
 function NoteRow() {
-  const { mode, notice, spotify, connect, dismissNotice, current } = usePlayer();
+  const { mode, notice, spotify, connect, dismissNotice } = usePlayer();
   let text: string | null = null;
   let action: { label: string; onClick: () => void } | null = null;
   let dismiss = false;
@@ -165,7 +162,7 @@ function NoteRow() {
   } else if (spotify.needsReconnect) {
     text = 'Full songs need one more Spotify permission';
     action = { label: 'Reconnect', onClick: connect };
-  } else if (mode === 'preview' && spotify.configured && spotify.known && !spotify.connected && !isVideoItem(current)) {
+  } else if (mode === 'preview' && spotify.configured && spotify.known && !spotify.connected) {
     text = 'Preview · Connect Spotify for full songs';
     action = { label: 'Connect', onClick: connect };
   }
@@ -259,43 +256,6 @@ function SpotifyBar({ queueOpen, onQueue }: { queueOpen: boolean; onQueue: () =>
   );
 }
 
-/** A live session / music video of a mixed lane: YouTube's player (16:9, inline), title, and the queue controls. */
-function VideoBar({ queueOpen, onQueue }: { queueOpen: boolean; onQueue: () => void }) {
-  const { current, queue, index, next, prev, close, videoProgress, videoEnded } = usePlayer();
-  const live = useRef({ current, videoProgress, videoEnded });
-  live.current = { current, videoProgress, videoEnded };
-  if (!current || current.embed?.type !== 'youtube') return null;
-  const videoId = current.embed.videoId;
-  const title = displayTitle(current);
-  const line = sessionLine(current);
-  return (
-    <div className="flex items-center gap-2.5 p-1.5">
-      <div className="w-[46%] max-w-[15rem] shrink-0 sm:w-56">
-        <QueueVideoPlayer
-          key={videoId}
-          videoId={videoId}
-          title={`Now playing: ${title}`}
-          onProgress={(playing, pos, dur) => live.current.current && live.current.videoProgress(live.current.current, playing, pos, dur)}
-          onEnded={() => live.current.current && live.current.videoEnded(live.current.current)}
-        />
-      </div>
-      <div className="flex min-w-0 flex-1 flex-col gap-1">
-        <button type="button" onClick={onQueue} aria-expanded={queueOpen} aria-label={`${title}${current.creators[0] ? `, ${current.creators[0]}` : ''}. ${line}. Queue, ${index + 1} of ${queue.length}`} className="min-w-0 rounded-[10px] text-left">
-          <span className="block truncate text-[13.5px] leading-tight font-semibold text-bone">{title}</span>
-          <span className="mt-0.5 block truncate text-[12px] leading-tight text-mist">{current.creators.slice(0, 2).join(', ')}</span>
-          <span className="mt-0.5 block truncate text-[11.5px] leading-tight text-coral">{line}</span>
-        </button>
-        <div className="-ml-2 flex items-center">
-          <button type="button" onClick={prev} disabled={index === 0} aria-label="Previous" className="grid h-11 w-10 place-items-center rounded-full text-mist hover:text-bone disabled:opacity-30"><SkipBack className="h-[18px] w-[18px]" /></button>
-          <button type="button" onClick={next} disabled={index >= queue.length - 1} aria-label="Next" className="grid h-11 w-10 place-items-center rounded-full text-mist hover:text-bone disabled:opacity-30"><SkipForward className="h-[18px] w-[18px]" /></button>
-          <span className="ml-auto hidden px-1 text-xs text-dim tabular-nums sm:inline" aria-hidden>{index + 1}/{queue.length}</span>
-          <button type="button" onClick={close} aria-label="Close player" className="grid h-11 w-10 place-items-center rounded-full text-dim hover:text-bone"><X className="h-[18px] w-[18px]" /></button>
-        </div>
-      </div>
-    </div>
-  );
-}
-
 /** Spotify's official embed (previews unless signed in to Spotify in this browser). */
 function PreviewBar({ queueOpen, onQueue }: { queueOpen: boolean; onQueue: () => void }) {
   const { current, queue, index, next, prev, close, advance, previewProgress } = usePlayer();
@@ -303,11 +263,11 @@ function PreviewBar({ queueOpen, onQueue }: { queueOpen: boolean; onQueue: () =>
   const feedback = useFeedback();
   const live = useRef({ advance, current, feedback, previewProgress });
   live.current = { advance, current, feedback, previewProgress };
-  const track = useRef({ id: '', advanced: false, played: false, lastPos: 0 });
+  const track = useRef({ id: '', advanced: false, played: false, lastPos: 0, playing: false });
   const uri = current?.embed?.type === 'spotify' ? current.embed.uri : null;
 
   useEffect(() => {
-    track.current = { id: current?.id ?? '', advanced: false, played: false, lastPos: 0 };
+    track.current = { id: current?.id ?? '', advanced: false, played: false, lastPos: 0, playing: false };
   }, [current?.id]);
 
   // Talk to the official Spotify embed directly (the same messages its iFrame API exchanges),
@@ -325,6 +285,9 @@ function PreviewBar({ queueOpen, onQueue }: { queueOpen: boolean; onQueue: () =>
       if (data?.type !== 'playback_update' || !data.payload) return;
       const { isPaused, duration, position } = data.payload;
       const t = track.current;
+      // The preview started (or resumed): any YouTube player pauses.
+      if (!isPaused && !t.playing) claimSound(MUSIC);
+      t.playing = !isPaused;
       const { current: item, feedback: fb, advance: goNext, previewProgress: report } = live.current;
       if (item) report(item, !isPaused, position, duration);
       if (!isPaused && position > 0 && !t.played && item) {
@@ -340,7 +303,14 @@ function PreviewBar({ queueOpen, onQueue }: { queueOpen: boolean; onQueue: () =>
       }
     };
     window.addEventListener('message', onMessage);
-    return () => window.removeEventListener('message', onMessage);
+    // A YouTube player started: the preview pauses (never two sounds at once).
+    const offClaim = onSoundClaimed((owner) => {
+      if (owner !== MUSIC) send({ command: 'pause' });
+    });
+    return () => {
+      window.removeEventListener('message', onMessage);
+      offClaim();
+    };
   }, []);
 
   return (

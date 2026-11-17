@@ -156,10 +156,12 @@ export function isEntityExtra(item: { category: string; metadata?: Record<string
 // Contract: a YouTube live session or music video placed in a music lane is a MUSIC item —
 // category 'music', kind 'video', provider 'youtube', embed { type: 'youtube' }, its own id
 // `youtube:music:<videoId>` (never the Videos feed's `youtube:video:<videoId>` row), creators = the
-// performing artists (so one-per-artist, disliked artists and feedback work as for songs),
+// credited acts, band names whole ("Mumford & Sons"; "A b2b B" is two), so one-per-artist, disliked
+// artists and feedback work as for songs,
 // metadata.lane = its lane, metadata.video = true, metadata.videoKind 'live' | 'video',
 // metadata.session = where it was filmed. Being category 'music', it is grouped into the lane shelves on
-// Discover and in Echo AI answers and never appears in the Videos shelf.
+// Discover and in Echo AI answers and never appears in the Videos shelf. It plays in its own YouTube
+// player on a tap, never in the song queue (Spotify playback is never chained to another service's).
 
 export const LANE_VIDEO_PREFIX = 'youtube:music:';
 
@@ -506,8 +508,13 @@ export function passesEra(year: number | undefined, l: { regional: boolean; era?
 export const VERSION_RE = /(\s[-–]\s|[([]).*\b(live|remix(ed)?|re-?mix|sped up|slowed|reverb|nightcore|karaoke|instrumental|acapella|a cappella|8d audio|cover)\b/i;
 
 export function isDislikedArtist(artists: string[], profile: TasteProfile): boolean {
+  return dislikedArtistCheck(profile)(artists);
+}
+
+/** isDislikedArtist with the profile's dislikes read once (for checking many items). */
+export function dislikedArtistCheck(profile: TasteProfile): (artists: string[]) => boolean {
   const dislikes = new Set(profile.explicit.dislikes.map(normKey));
-  return artists.some((a) => {
+  return (artists) => artists.some((a) => {
     const k = normKey(a);
     return !!k && ((profile.creators[k] ?? 0) <= -0.5 || dislikes.has(k));
   });
@@ -527,20 +534,46 @@ export interface LibrarySongs {
   artistLanes?: Map<string, string>;
 }
 
+/**
+ * When the provider returned an item's data, for the catalog row's fetched_at: a YouTube item carries its
+ * own metadata.fetchedAt (a lane video from a pool copy can be days old), so its 30-day storage clock
+ * starts there, never at the upsert. Anything else (or a missing / future stamp): now.
+ */
+export function fetchedAtOf(item: { provider: string; metadata?: Record<string, unknown> }, now = Date.now()): string {
+  const f = item.provider === 'youtube' && typeof item.metadata?.fetchedAt === 'string' ? Date.parse(item.metadata.fetchedAt) : NaN;
+  return new Date(Number.isFinite(f) && f < now ? f : now).toISOString();
+}
+
 export function normIsrc(x: unknown): string {
   const s = typeof x === 'string' ? x.replace(/[-\s]/g, '').toUpperCase() : '';
   return /^[A-Z]{2}[A-Z0-9]{3}\d{7}$/.test(s) ? s : '';
 }
 
-/** Index of library songs (title, credited artists, ISRC when the export had one). */
-export function librarySongIndex(rows: Array<{ id?: string | null; title?: string | null; creators?: string[] | null; isrc?: unknown; genres?: string[] | null }>): LibrarySongs {
+/**
+ * Index of library songs (title, credited artists, ISRC when the export had one). An artist's lane is the
+ * vote of their songs' genres, except that a recording registered in France / the Arab world votes for its
+ * regional lane wherever lyrics language marks it (the same ISRC rule songs follow: regionalByIsrc).
+ * Genre sets repeat per artist, so each distinct set is classified once.
+ */
+export function librarySongIndex(
+  rows: Array<{ id?: string | null; title?: string | null; creators?: string[] | null; isrc?: unknown; genres?: string[] | null }>,
+  classify: (genres: string[]) => string | null = laneOfGenres,
+): LibrarySongs {
   const lib: LibrarySongs = { isrcs: new Set(), songs: new Set(), ids: new Set() };
   const votes = new Map<string, Map<string, number>>();
+  const byGenres = new Map<string, string | null>();
+  const laneOfRow = (genres: string[]) => {
+    const k = genres.join('\u0001');
+    if (!byGenres.has(k)) byGenres.set(k, classify(genres));
+    return byGenres.get(k)!;
+  };
   for (const r of rows) {
     if (r.id) lib.ids!.add(r.id);
     const isrc = normIsrc(r.isrc);
     if (isrc) lib.isrcs.add(isrc);
-    const lane = r.genres?.length ? laneOfGenres(r.genres) : null;
+    let lane = r.genres?.length ? laneOfRow(r.genres) : null;
+    const regional = lane && isrc ? regionalByIsrc({ metadata: { isrc } }, { id: lane, regional: !!LANE_BY_ID[lane]?.regional }) : null;
+    if (regional) lane = regional === 'french' ? 'french' : 'arabic-pop';
     for (const a of r.creators ?? []) {
       const k = r.title ? songKey(a, r.title) : '';
       if (k) lib.songs.add(k);
@@ -591,6 +624,12 @@ export interface LaneRuleContext {
 const FRENCH_ISRC = /^FR/i;
 const ARABIC_ISRC = /^(MA|DZ|TN|LY|EG|LB|SY|JO|PS|IQ|SA|AE|KW|QA|BH|OM|YE)/i;
 const LANGUAGE_NEUTRAL_LANES = new Set(['melodic-house', 'edm', 'jazz-classical']);
+
+/** The language scene of a recording's registration country ('french' | 'arabic-pop'), or null. */
+export function regionOfIsrc(isrc: unknown): 'french' | 'arabic-pop' | null {
+  const s = String(isrc ?? '').trim();
+  return FRENCH_ISRC.test(s) ? 'french' : ARABIC_ISRC.test(s) ? 'arabic-pop' : null;
+}
 
 /** 'french' | 'arabic' when the ISRC says the recording is regional in a lane where that is a language signal. */
 export function regionalByIsrc(item: Pick<ContentItem, 'metadata'>, lane: { id?: string; regional: boolean }): 'french' | 'arabic' | null {
