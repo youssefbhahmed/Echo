@@ -1,12 +1,12 @@
 // POST /functions/v1/discover — personalised feed (filters, moods, exploration) or a one-shot query.
 import { runPipeline } from '../_shared/engine/pipeline.ts';
-import { reshowableIds } from '../_shared/engine/curator.ts';
+import { curatorMemoryFor, rememberSuggestions, reshowableIds } from '../_shared/engine/curator.ts';
 import { feedFilterKey, freshFeedSeed, reusableSession } from '../_shared/engine/session.ts';
 import { createHttp } from '../_shared/providers/http.ts';
 import { DiscoverBody } from '../_shared/schemas.ts';
 import {
-  catalogFns, collaborativeFn, DbCache, embedder, env, evidenceItems, exclusions, json, librarySongs, loadFeedSession, loadProfile, markPipelineQuota, providerBlocks, rateLimit, readJson,
-  recentMusic, requireUser, saveFeedSession, serve, serviceClient, storedEmbeddings, upsertItems,
+  catalogFns, collaborativeFn, DbCache, embedder, env, evidenceItems, exclusions, json, librarySongs, loadCuratorMemory, loadFeedSession, loadProfile, markPipelineQuota, providerBlocks, rateLimit, readJson,
+  recentMusic, requireUser, saveCuratorMemory, saveFeedSession, serve, serviceClient, storedEmbeddings, upsertItems,
 } from '../_shared/server.ts';
 
 serve(async (req) => {
@@ -20,8 +20,8 @@ serve(async (req) => {
   const filterKey = feedFilterKey(body);
   const session = reusableSession(await loadFeedSession(userId, filterKey), clientSeed, now);
   const asOf = session?.createdAt ?? now;
-  const [profile, held, evidence, blocks, recent, library] = await Promise.all([
-    loadProfile(db, userId), exclusions(db, userId), evidenceItems(db, userId), providerBlocks(), recentMusic(userId, { asOf }), librarySongs(db, userId),
+  const [profile, held, evidence, blocks, recent, library, memory] = await Promise.all([
+    loadProfile(db, userId), exclusions(db, userId), evidenceItems(db, userId), providerBlocks(), recentMusic(userId, { asOf }), librarySongs(db, userId), loadCuratorMemory(userId),
   ]);
   const exclude = held.all;
   for (const id of body.exclude ?? []) exclude.add(id);
@@ -44,6 +44,8 @@ serve(async (req) => {
       env, http, profile, excludeIds: exclude, shownIds, reshowable, library, evidence, blockedProviders: blocks.providers, spotifyLookupBlocked: blocks.spotifyLookup, collaborative: collaborativeFn(db), embed: embedder(),
       // The feed's own clock (when it was first served) keeps lane fill and explanations identical on a re-fetch.
       storedEmbeddings, catalogFallback: catalog.fallback, catalogByName: catalog.byName, seed, now: new Date(asOf),
+      // What the music curator already suggested before this feed was first served (a re-fetch sends the same brief).
+      curatorRecent: curatorMemoryFor(memory, asOf),
     },
   );
   await markPipelineQuota(result);
@@ -55,6 +57,8 @@ serve(async (req) => {
     );
     await saveFeedSession(userId, filterKey, { clientSeed, seed, createdAt: asOf, lastAt: now });
   }
-  const { candidates: _c, quotaErrors: _q, quotaRetryAfter: _r, spotifyLookupLimitedSec: _l, ...response } = result;
+  // A re-fetch (reused session) repeats the same curator answer: nothing new to remember.
+  if (result.curatorSuggested?.length && !session) await saveCuratorMemory(userId, rememberSuggestions(memory, result.curatorSuggested, asOf));
+  const { candidates: _c, quotaErrors: _q, quotaRetryAfter: _r, spotifyLookupLimitedSec: _l, curatorSuggested: _m, ...response } = result;
   return json(req, { ...response, recommendations: recs.map((r) => ({ ...r, item: { ...r.item, embedding: undefined } })) });
 });

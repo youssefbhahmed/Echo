@@ -22,6 +22,8 @@ export interface PipelineDeps {
   env: Env;
   http: HttpClient;
   profile: TasteProfile;
+  /** The music curator's own recent suggestions to this user ("Artist – Title"), not to be repeated. */
+  curatorRecent?: string[];
   excludeIds?: Set<string>;
   /** The user's liked/saved songs by ISRC and artist|title: never served again under another id. */
   library?: LibrarySongs;
@@ -79,6 +81,8 @@ export interface PipelineResult extends DiscoverResponse {
   quotaRetryAfter: Partial<Record<ProviderId, number>>;
   /** Spotify single-track lookups answered 429: seconds to wait (blocked separately from search). */
   spotifyLookupLimitedSec?: number;
+  /** The curator's suggestions in this request (its own words), for the server to remember. */
+  curatorSuggested?: string[];
 }
 
 const CATEGORY_NOUN: Record<Category, string> = { youtube: 'videos', music: 'music', screen: 'films & series', books: 'books', podcasts: 'podcasts' };
@@ -352,6 +356,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   // only) and every pick is resolved and checked on Spotify. Runs in parallel with provider searches.
   let spotifyLimitedSec: number | undefined;
   let spotifyLookupLimitedSec: number | undefined;
+  let curatorSuggested: string[] | undefined;
   // The named artist's own lane may bring back songs from the library (flagged), never ones just shown.
   const libraryIds = deps.library?.ids;
   const entityExcludeIds = musicPlan?.entity && deps.excludeIds && libraryIds?.size
@@ -370,8 +375,9 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     const moods = intent.moods.filter((m) => CONCEPT_BY_ID[m]).map((m) => conceptLabel(m).toLowerCase());
     const r = await curateMusic(musicPlan, {
       ai, http: deps.http, env: deps.env, profile: deps.profile, intent, words, moods, concepts, excludeIds: deps.excludeIds, entityExcludeIds, library: deps.library, searchBlocked,
-      lookupBlocked: deps.spotifyLookupBlocked, seed: deps.seed ?? 0, now: deps.now,
+      lookupBlocked: deps.spotifyLookupBlocked, seed: deps.seed ?? 0, now: deps.now, recentSongs: deps.curatorRecent,
     });
+    if (r.suggested?.length) curatorSuggested = r.suggested;
     if (r.rateLimitedSec !== undefined) spotifyLimitedSec = r.rateLimitedSec;
     if (r.lookupLimitedSec !== undefined) spotifyLookupLimitedSec = r.lookupLimitedSec;
     return r;
@@ -593,6 +599,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     quotaErrors,
     quotaRetryAfter,
     spotifyLookupLimitedSec,
+    curatorSuggested,
   };
 }
 

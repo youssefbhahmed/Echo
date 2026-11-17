@@ -81,7 +81,7 @@ serve(async (req) => {
     providers: result.providers,
   };
   await db.from('chat_messages').insert({ session_id: sessionId, user_id: userId, role: 'assistant', content: reply.slice(0, 4000) || '…', payload });
-  const { candidates: _c, quotaErrors: _q, quotaRetryAfter: _r, spotifyLookupLimitedSec: _l, ...rest } = result;
+  const { candidates: _c, quotaErrors: _q, quotaRetryAfter: _r, spotifyLookupLimitedSec: _l, curatorSuggested: _m, ...rest } = result;
   await db.from('chat_sessions').update({ last_intent: { ...rest.intent, statements: [] }, last_result_ids: ids.length ? ids : previousIds }).eq('id', sessionId);
   if (recs.length) {
     await serviceClient().from('recommendation_events').insert(recs.map((r, i) => ({ user_id: userId, item_id: r.item.id, source: 'chat', position: i, score: r.score, explanation: r.explanation.text.slice(0, 500) })));

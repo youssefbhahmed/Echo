@@ -204,6 +204,8 @@ export interface CurateDeps {
   lookupBlocked?: boolean;
   seed?: number;
   now?: Date;
+  /** The curator's own recent suggestions to this user ("Artist – Title"), not to be repeated. */
+  recentSongs?: string[];
 }
 
 export interface CurateResult {
@@ -214,6 +216,52 @@ export interface CurateResult {
   /** Spotify single-track lookups answered 429 (seconds to wait); recorded under its own block key. */
   lookupLimitedSec?: number;
   perLane: Record<string, number>;
+  /** The curator's raw suggestions this time ("Artist – Title", its own words), for its memory. */
+  suggested?: string[];
+}
+
+/** One remembered curator suggestion: its own artist/title text and when it was made (ms). */
+export interface CuratorMemoryEntry { s: string; at: number }
+export const CURATOR_MEMORY_MS = 3 * 86400_000;
+export const CURATOR_MEMORY_MAX = 160;
+
+/** "Artist – Title" from a curator pick (its own words). */
+export const pickLabel = (p: Pick<MusicPick, 'artist' | 'track'>) => `${p.artist.trim()} – ${p.track.trim()}`.slice(0, 120);
+
+/**
+ * Suggestions to hand back to the curator as "don't repeat": the last 3 days as of `asOf`, newest
+ * first, deduped. Entries made at or after `asOf` are left out, so a re-fetch of the same feed sends
+ * the same brief (same cache key, same songs).
+ */
+export function curatorMemoryFor(entries: CuratorMemoryEntry[] | null | undefined, asOf: number, max = 80): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const e of [...(entries ?? [])].sort((a, b) => b.at - a.at)) {
+    if (!e || typeof e.s !== 'string' || !(e.at < asOf) || asOf - e.at > CURATOR_MEMORY_MS) continue;
+    const k = e.s.toLowerCase();
+    if (seen.has(k)) continue;
+    seen.add(k);
+    out.push(e.s);
+    if (out.length >= max) break;
+  }
+  return out;
+}
+
+/**
+ * Memory after this request: the older entries still within 3 days + this request's new suggestions
+ * (stamped `at`), capped. A song suggested again keeps its first time, so a re-fetch of this feed
+ * (memory as of `at`) still sees it and sends the same brief.
+ */
+export function rememberSuggestions(entries: CuratorMemoryEntry[] | null | undefined, suggested: string[], at: number): CuratorMemoryEntry[] {
+  const old = (entries ?? []).filter((e) => e && typeof e.s === 'string' && Number.isFinite(e.at) && at - e.at <= CURATOR_MEMORY_MS);
+  const known = new Set(old.map((e) => e.s.toLowerCase()));
+  const fresh: CuratorMemoryEntry[] = [];
+  for (const x of suggested.map((v) => v.trim().slice(0, 120)).filter(Boolean)) {
+    if (known.has(x.toLowerCase())) continue;
+    known.add(x.toLowerCase());
+    fresh.push({ s: x, at });
+  }
+  return [...fresh, ...old].sort((a, b) => b.at - a.at).slice(0, CURATOR_MEMORY_MAX);
 }
 
 /** Rules a song must pass for a lane (era/regional, exclusions, library, disliked artists, versions). */
@@ -374,8 +422,12 @@ const pickLabels = (p: Pick<MusicPick, 'lane' | 'genre'> | undefined) => [p?.gen
 /** Brief → curator → resolve on Spotify → items tagged with their lane, in the curator's order. */
 export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<CurateResult> {
   if (plan.entity) return curateEntityMusic(plan, deps);
-  const brief = buildBrief(plan, deps.profile, { intent: deps.intent, words: deps.words, moods: deps.moods });
+  const base = buildBrief(plan, deps.profile, { intent: deps.intent, words: deps.words, moods: deps.moods });
+  // Taste-lane feeds: the curator is told what it already suggested lately (its own words), so a refresh
+  // brings songs that weren't just shown instead of the same famous ones the recently-shown filter drops.
+  const brief = plan.mode === 'lanes' && deps.recentSongs?.length ? { ...base, avoidSongs: deps.recentSongs } : base;
   let picks = await llmMusicPicks(brief, deps.ai, deps.http, { seed: deps.seed ?? 0 });
+  const suggested = plan.mode === 'lanes' ? picks.map(pickLabel) : [];
   let regionalDropped = 0;
   // A typed request's own words may ask for a switched-off scene ("rap français"): its picks are then
   // allowed by language AND by style (the blocked-family rule), never just one of the two.
@@ -468,7 +520,7 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
   });
   const rejected = [...(offStyle ? [`off-lane style ${offStyle}`] : []), ...(regionalDropped ? [`regional language ${regionalDropped}`] : []), ...Object.entries(res.stats.rejected).map(([k, v]) => `${k} ${v}`)].join(', ');
   const detail = `${items.length}/${picks.length} curator picks resolved for ${plan.mode === 'request' ? 'the request' : plan.lanes.map((l) => l.label).join(' · ')} (cache ${res.stats.cached}, ListenBrainz ${res.stats.listenbrainz}, search ${res.stats.searched}${deps.searchBlocked ? ' blocked' : ''}${deps.lookupBlocked ? ', lookups blocked: cache only' : ''}${rejected ? `; rejected: ${rejected}` : ''})`;
-  return { items, detail, rateLimitedSec: res.rateLimitedSec, lookupLimitedSec: res.lookupLimitedSec, perLane };
+  return { items, detail, rateLimitedSec: res.rateLimitedSec, lookupLimitedSec: res.lookupLimitedSec, perLane, ...(suggested.length ? { suggested } : {}) };
 }
 
 // ───────────── a request naming an artist ─────────────

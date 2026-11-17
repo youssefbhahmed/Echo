@@ -205,6 +205,12 @@ export interface CuratorBrief {
   moods?: string[];
   /** User-typed dislikes only. */
   avoid?: string[];
+  /**
+   * Songs the curator itself suggested to this listener in the last days ("Artist – Title", its own
+   * words, never Spotify data): not to be suggested again, so refreshes don't keep hitting the
+   * recently-shown filter with the same famous songs.
+   */
+  avoidSongs?: string[];
 }
 
 const NEVER_STOCK = 'never novelty, meme, comedy, parody, children\'s, sleep, meditation, relaxation, study, frequency or stock music, and no compilations or "best of" collections';
@@ -308,7 +314,9 @@ Choose real, officially released songs that are on Spotify:
       l.regional ? `modern only: released ${l.fromYear} or later, no traditional or classic-era songs` : `released ${l.fromYear} or later`,
       `${l.count} songs`,
     ].filter(Boolean).join('; ');
-  const user = `Lanes for this listener:\n${lanes.map(laneLine).join('\n')}${brief.moods?.length ? `\nSession mood: ${brief.moods.join(', ')}` : ''}${avoidLine}`;
+  const recent = (brief.avoidSongs ?? []).map((x) => x.replace(/[\n;]/g, ' ').trim()).filter(Boolean).slice(0, 80);
+  const recentLine = recent.length ? `\nAlready suggested recently (never repeat these songs; other songs by the same artists are fine): ${recent.join('; ').slice(0, 2400)}` : '';
+  const user = `Lanes for this listener:\n${lanes.map(laneLine).join('\n')}${brief.moods?.length ? `\nSession mood: ${brief.moods.join(', ')}` : ''}${avoidLine}${recentLine}`;
   return { system, user };
 }
 

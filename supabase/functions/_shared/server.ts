@@ -6,7 +6,7 @@ import { blockUntil, hashKey, type CacheStore } from './providers/http.ts';
 import { SPOTIFY_LOOKUP_BLOCK } from './providers/spotify.ts';
 import type { EvidenceItem } from './engine/rank.ts';
 import { isEngineLane, laneTagOf, librarySongIndex, mergeCatalogMetadata, TAXONOMY_LANE_IDS, withoutPerUser, type LibrarySongs } from './engine/lanes.ts';
-import { historyTiers, sharedPool } from './engine/curator.ts';
+import { CURATOR_MEMORY_MS, historyTiers, sharedPool, type CuratorMemoryEntry } from './engine/curator.ts';
 import { FEED_MAX_MS, parseFeedSession, type FeedSession } from './engine/session.ts';
 
 /** Read an env var; empty strings count as unset. */
@@ -443,6 +443,26 @@ export async function loadFeedSession(userId: string, filterKey: string): Promis
     return parseFeedSession(await new DbCache().get(await feedSessionKey(userId, filterKey)));
   } catch {
     return null;
+  }
+}
+
+// The music curator's own recent suggestions to this user (its words, never Spotify data), 3 days.
+const curatorMemoryKey = (userId: string) => `curator-memory:${userId}`;
+
+export async function loadCuratorMemory(userId: string): Promise<CuratorMemoryEntry[]> {
+  try {
+    const v = await new DbCache().get(curatorMemoryKey(userId));
+    return Array.isArray(v) ? (v as CuratorMemoryEntry[]).filter((e) => e && typeof e.s === 'string' && Number.isFinite(e.at)) : [];
+  } catch {
+    return [];
+  }
+}
+
+export async function saveCuratorMemory(userId: string, entries: CuratorMemoryEntry[]) {
+  try {
+    await new DbCache().set(curatorMemoryKey(userId), entries, Math.ceil(CURATOR_MEMORY_MS / 1000));
+  } catch (e) {
+    console.error('[echo] curator memory write failed', (e as Error).message);
   }
 }
 
