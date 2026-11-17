@@ -10,7 +10,7 @@ import { openLibrary, openLibraryAuthorWorks } from '../providers/openlibrary.ts
 import { tmdbPersonWorks } from '../providers/tmdb.ts';
 import { tvmazePersonShows } from '../providers/tvmaze.ts';
 import { youtube } from '../providers/youtube.ts';
-import { ENTITY_BY_LANE, ENTITY_LIKE_LANE, entityTagOf, isEntityExtra, laneTagOf } from './lanes.ts';
+import { ENTITY_BY_LANE, ENTITY_LIKE_LANE, entityTagOf, isEntityExtra, isLaneVideo, laneTagOf } from './lanes.ts';
 
 export { entityTagOf, isEntityExtra };
 import { fold } from './text.ts';
@@ -452,8 +452,10 @@ function titlesList(titles: string[]): string {
  * nothing shown answers the entity itself: the caller describes the other picks instead.
  */
 export function entityReply(e: Entity, recs: Array<Pick<Recommendation, 'item'>>): string | null {
-  const lane = (id: string) => recs.filter((r) => r.item.category === 'music' && laneTagOf(r.item)?.id === id);
+  const laneItems = (id: string) => recs.filter((r) => r.item.category === 'music' && laneTagOf(r.item)?.id === id);
+  const lane = (id: string) => laneItems(id).filter((r) => !isLaneVideo(r.item));
   const bySongs = lane(ENTITY_BY_LANE);
+  const byVideos = laneItems(ENTITY_BY_LANE).filter((r) => isLaneVideo(r.item));
   const likeSongs = lane(ENTITY_LIKE_LANE);
   const extras = recs.filter((r) => isEntityExtra(r.item));
   const role = (r: EntityTag['role']) => extras.filter((x) => entityTagOf(x.item)?.role === r);
@@ -463,6 +465,7 @@ export function entityReply(e: Entity, recs: Array<Pick<Recommendation, 'item'>>
     const saved = fresh === bySongs.length ? 'none of them in your library yet' : fresh === 0 ? 'all already in your library' : `${fresh} you haven't saved`;
     parts.push(`${plural(bySongs.length, `song by ${e.name}`, `songs by ${e.name}`)} (${saved})`);
   }
+  if (byVideos.length) parts.push(byVideos.every((r) => r.item.metadata?.videoKind !== 'video') ? plural(byVideos.length, 'live session') : plural(byVideos.length, 'video'));
   if (likeSongs.length) parts.push(`${plural(new Set(likeSongs.map((r) => fold(r.item.creators[0] ?? r.item.id))).size, 'artist')} in the same lane`);
   const byItems = role('by');
   if (byItems.length) parts.push(e.kind === 'film' || e.kind === 'series' || e.kind === 'book' || e.kind === 'podcast' ? `the ${KIND_WORD[byItems[0].item.kind] ?? 'work'} itself` : `${plural(byItems.length, 'work')} by ${e.name}`);
@@ -472,6 +475,6 @@ export function entityReply(e: Entity, recs: Array<Pick<Recommendation, 'item'>>
   if (aboutItems.length) parts.push(`${plural(aboutItems.length, 'thing')} about ${e.name}: ${titlesList(aboutItems.map((r) => r.item.title))}`);
   if (!parts.length) return null;
   const last = parts.length > 1 ? `${parts.slice(0, -1).join(', ')} and ${parts[parts.length - 1]}` : parts[0];
-  const others = recs.length - bySongs.length - likeSongs.length - extras.length;
+  const others = recs.length - bySongs.length - byVideos.length - likeSongs.length - extras.length;
   return `Here's ${e.name}: ${last}${others > 0 ? `, plus ${plural(others, 'other pick')}` : ''}.`;
 }

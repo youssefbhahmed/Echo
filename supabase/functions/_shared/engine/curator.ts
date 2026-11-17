@@ -218,6 +218,12 @@ export interface CurateResult {
   perLane: Record<string, number>;
   /** The curator's raw suggestions this time ("Artist – Title", its own words), for its memory. */
   suggested?: string[];
+  /**
+   * Taste-lane feeds: the artists the curator picked per lane (its own words, resolved or not), and those
+   * it placed in a French / Arabic scene. Live sessions are matched to lanes by them, locally (sessions.ts).
+   */
+  lanePicks?: Record<string, Array<{ artist: string; feat?: string[] }>>;
+  regionalArtists?: Array<{ artist: string; region: string }>;
 }
 
 /** One remembered curator suggestion: its own artist/title text and when it was made (ms). */
@@ -427,6 +433,7 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
   // brings songs that weren't just shown instead of the same famous ones the recently-shown filter drops.
   const brief = plan.mode === 'lanes' && deps.recentSongs?.length ? { ...base, avoidSongs: deps.recentSongs } : base;
   let picks = await llmMusicPicks(brief, deps.ai, deps.http, { seed: deps.seed ?? 0 });
+  const allPicks = picks;
   const suggested = plan.mode === 'lanes' ? picks.map(pickLabel) : [];
   let regionalDropped = 0;
   // A typed request's own words may ask for a switched-off scene ("rap français"): its picks are then
@@ -519,8 +526,17 @@ export async function curateMusic(plan: MusicPlan, deps: CurateDeps): Promise<Cu
     } as ContentItem;
   });
   const rejected = [...(offStyle ? [`off-lane style ${offStyle}`] : []), ...(regionalDropped ? [`regional language ${regionalDropped}`] : []), ...Object.entries(res.stats.rejected).map(([k, v]) => `${k} ${v}`)].join(', ');
+  const lanePicks: Record<string, Array<{ artist: string; feat?: string[] }>> = {};
+  if (plan.mode === 'lanes') for (const sp of spicks) (lanePicks[sp.laneId] ??= []).push({ artist: sp.artist, ...(sp.feat?.length ? { feat: sp.feat } : {}) });
+  const regionalArtists = plan.mode === 'lanes' ? allPicks.flatMap((p) => {
+    const region = pickRegion(p);
+    return region ? [{ artist: p.artist, region }] : [];
+  }) : [];
   const detail = `${items.length}/${picks.length} curator picks resolved for ${plan.mode === 'request' ? 'the request' : plan.lanes.map((l) => l.label).join(' · ')} (cache ${res.stats.cached}, ListenBrainz ${res.stats.listenbrainz}, search ${res.stats.searched}${deps.searchBlocked ? ' blocked' : ''}${deps.lookupBlocked ? ', lookups blocked: cache only' : ''}${rejected ? `; rejected: ${rejected}` : ''})`;
-  return { items, detail, rateLimitedSec: res.rateLimitedSec, lookupLimitedSec: res.lookupLimitedSec, perLane, ...(suggested.length ? { suggested } : {}) };
+  return {
+    items, detail, rateLimitedSec: res.rateLimitedSec, lookupLimitedSec: res.lookupLimitedSec, perLane, ...(suggested.length ? { suggested } : {}),
+    ...(plan.mode === 'lanes' ? { lanePicks, regionalArtists } : {}),
+  };
 }
 
 // ───────────── a request naming an artist ─────────────

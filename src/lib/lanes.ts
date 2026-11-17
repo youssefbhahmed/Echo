@@ -40,6 +40,42 @@ export function songsLabel(n: number): string {
   return `${n} ${n === 1 ? 'song' : 'songs'}`;
 }
 
+type LaneItemLike = { category?: string; kind?: string; embed?: { type: string } | null; metadata?: Record<string, unknown> | null };
+
+/**
+ * A YouTube live session / music video inside a music lane (category 'music', kind 'video', YouTube embed:
+ * see the contract in supabase/functions/_shared/engine/lanes.ts). It plays in the lane's queue.
+ */
+export function isLaneVideo(item: LaneItemLike): boolean {
+  return item.category === 'music' && item.kind === 'video' && item.embed?.type === 'youtube';
+}
+
+/** The tile badge of a lane video: "Live" for a session, "Video" for a music video; null for songs. */
+export function videoBadge(item: LaneItemLike): 'Live' | 'Video' | null {
+  if (!isLaneVideo(item)) return null;
+  return item.metadata?.videoKind === 'video' ? 'Video' : 'Live';
+}
+
+/** "Live at Tiny Desk", "Live on COLORS", "Music video" — where a lane video was filmed. */
+export function sessionLine(item: LaneItemLike): string {
+  const s = item.metadata?.session as { venue?: unknown; prep?: unknown } | undefined;
+  const live = item.metadata?.videoKind !== 'video';
+  if (!s || typeof s.venue !== 'string') return live ? 'Live session' : 'Music video';
+  const prep = s.prep === 'on' || s.prep === 'for' ? s.prep : 'at';
+  return `${live ? 'Live' : 'Music video'} ${prep} ${s.venue}`;
+}
+
+/** A lane's count: "8 songs", or "6 songs · 2 live sessions" / "5 songs · 1 video" when it mixes in videos. */
+export function laneCountLabel(items: LaneItemLike[]): string {
+  const videos = items.filter(isLaneVideo);
+  if (!videos.length) return songsLabel(items.length);
+  const live = videos.every((v) => videoBadge(v) === 'Live');
+  const n = videos.length;
+  const v = live ? `${n} live ${n === 1 ? 'session' : 'sessions'}` : `${n} ${n === 1 ? 'video' : 'videos'}`;
+  const songs = items.length - n;
+  return songs ? `${songsLabel(songs)} · ${v}` : v;
+}
+
 /** A DOM-id-safe slug for a lane id. */
 export function laneDomId(key: string): string {
   return key.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '') || 'for-you';

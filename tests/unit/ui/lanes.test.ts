@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { groupByLane, laneDomId, laneOf, songsLabel } from '../../../src/lib/lanes';
+import { groupByLane, laneDomId, laneOf, songsLabel, isLaneVideo, videoBadge, sessionLine, laneCountLabel } from '../../../src/lib/lanes';
 
 // Synthetic fixtures only (no real library data).
 const rec = (id: string, lane?: unknown) => ({ item: { id, metadata: lane === undefined ? {} : { lane, aiPick: true } } });
@@ -62,5 +62,33 @@ describe('labels', () => {
   it('makes DOM-safe ids', () => {
     expect(laneDomId('Hip-hop & R&B')).toBe('hip-hop-r-b');
     expect(laneDomId('')).toBe('for-you');
+  });
+});
+
+describe('videos inside music lanes', () => {
+  const v = (kind: 'live' | 'video' = 'live') => ({
+    category: 'music', kind: 'video', embed: { type: 'youtube' }, metadata: { lane: { id: 'hiphop-rnb', label: 'Hip-hop & R&B' }, videoKind: kind, session: { venue: 'COLORS', prep: 'on' } },
+  });
+  const s = { category: 'music', kind: 'track', embed: { type: 'spotify' }, metadata: { lane: { id: 'hiphop-rnb', label: 'Hip-hop & R&B' } } };
+
+  it('badges, session lines and lane counts', () => {
+    expect(isLaneVideo(v())).toBe(true);
+    expect(isLaneVideo(s)).toBe(false);
+    expect(isLaneVideo({ ...v(), category: 'youtube' })).toBe(false);
+    expect(videoBadge(v())).toBe('Live');
+    expect(videoBadge(v('video'))).toBe('Video');
+    expect(videoBadge(s)).toBeNull();
+    expect(sessionLine(v())).toBe('Live on COLORS');
+    expect(sessionLine({ ...v(), metadata: { videoKind: 'live' } })).toBe('Live session');
+    expect(laneCountLabel([s, s, v(), s])).toBe('3 songs · 1 live session');
+    expect(laneCountLabel([s, v('video'), v('live')])).toBe('1 song · 2 videos');
+    expect(laneCountLabel([s, s])).toBe('2 songs');
+    expect(laneCountLabel([v(), v()])).toBe('2 live sessions');
+  });
+
+  it('a lane groups its songs and videos together, in listening order', () => {
+    const groups = groupByLane([s, v(), s], (x) => x);
+    expect(groups).toHaveLength(1);
+    expect(groups[0].items.map((x) => x.kind)).toEqual(['track', 'video', 'track']);
   });
 });

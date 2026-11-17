@@ -1,10 +1,15 @@
 // Pure playback helpers (no React, no network): Spotify URIs, queue windows, listen tracking
 // for play/skip feedback, and player error classification. Unit-tested in tests/unit/ui.
 
-/** Queue items only need their id and (optional) Spotify embed. */
+/** Queue items only need their id and (optional) Spotify or YouTube embed. */
 export interface QueueItemLike {
   id: string;
   embed?: { type: string; uri?: string } | null;
+}
+
+/** A YouTube live session / music video in a mixed music lane: ECHO plays it itself, Spotify never can. */
+export function isVideoItem(item: QueueItemLike | null | undefined): boolean {
+  return item?.embed?.type === 'youtube';
 }
 
 const PLAYABLE_URI = /^spotify:(track|episode):[A-Za-z0-9]{22}$/;
@@ -33,15 +38,40 @@ export function openInSpotifyAppUrl(item: QueueItemLike | null | undefined): str
  * The URIs to hand Spotify for a queue started at `start` (at most `max`, Spotify's limit), and the
  * offset of the start item within them. Items without a playable URI are left out; when the start
  * item has none, the next playable one starts instead. `begin`/`end` are queue indexes covered.
+ * A mixed lane's videos split the queue into runs of songs: Spotify only gets the run around `start`,
+ * so it stops where a video comes next (`video`: that video's index, else null). A video start → null.
  */
-export function queueWindow(items: QueueItemLike[], start: number, max = 100): { uris: string[]; offset: number; begin: number; end: number } | null {
-  const playable = items.map((it, i) => ({ i, uri: spotifyUri(it) })).filter((x): x is { i: number; uri: string } => !!x.uri);
+export function queueWindow(items: QueueItemLike[], start: number, max = 100): { uris: string[]; offset: number; begin: number; end: number; video: number | null } | null {
+  if (isVideoItem(items[start])) return null;
+  let lo = Math.max(0, Math.min(start, items.length - 1));
+  let hi = lo;
+  while (lo > 0 && !isVideoItem(items[lo - 1])) lo--;
+  while (hi < items.length - 1 && !isVideoItem(items[hi + 1])) hi++;
+  const playable = items.map((it, i) => ({ i, uri: spotifyUri(it) })).filter((x): x is { i: number; uri: string } => !!x.uri && x.i >= lo && x.i <= hi);
   if (!playable.length) return null;
   let pos = playable.findIndex((x) => x.i >= start);
   if (pos < 0) pos = playable.length - 1;
   const from = Math.max(0, Math.min(pos - Math.floor(max / 10), playable.length - max));
   const slice = playable.slice(from, from + max);
-  return { uris: slice.map((x) => x.uri), offset: pos - from, begin: slice[0].i, end: slice[slice.length - 1].i };
+  const end = slice[slice.length - 1].i;
+  // The video after this run (only when the run reaches it: a run longer than `max` stops earlier).
+  const video = end === hi && hi + 1 < items.length && isVideoItem(items[hi + 1]) ? hi + 1 : null;
+  return { uris: slice.map((x) => x.uri), offset: pos - from, begin: slice[0].i, end, video };
+}
+
+/**
+ * Spotify is done with the last song of a run ECHO handed it (a video comes next): after that song was
+ * seen playing, Spotify shows nothing, a song outside the run (its autoplay), or stopped back at 0:00,
+ * or the last song paused at its very end.
+ */
+export function remoteRunEnded(
+  s: { isPlaying: boolean; progressMs: number; durationMs: number; track: { uri: string } | null },
+  run: { lastUri: string; uris: ReadonlySet<string>; sawLast: boolean },
+): boolean {
+  if (!run.sawLast) return false;
+  if (!s.track || !run.uris.has(s.track.uri)) return true;
+  if (s.isPlaying) return false;
+  return s.progressMs === 0 || (s.track.uri === run.lastUri && s.durationMs > 0 && s.progressMs >= s.durationMs - 2000);
 }
 
 /** Full-song playback is allowed when the linked account granted playback control. */

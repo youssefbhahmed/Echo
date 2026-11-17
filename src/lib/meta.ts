@@ -27,9 +27,15 @@ export function formatDuration(sec?: number): string | null {
   return `${m}:${String(s).padStart(2, '0')}`;
 }
 
-/** YouTube titles carry channel/SEO suffixes ("Title | British Short Film | Sci-Fi"): show the real title. */
-export function displayTitle(item: { title: string; provider: string }): string {
+/**
+ * YouTube titles carry channel/SEO suffixes ("Title | British Short Film | Sci-Fi"): show the real title.
+ * A live session in a music lane shows its song, or what the session is called ("Tiny Desk Concert"),
+ * next to the artist (its credit).
+ */
+export function displayTitle(item: { title: string; provider: string; metadata?: Record<string, unknown> | null }): string {
   if (item.provider !== 'youtube') return item.title;
+  const label = (item.metadata?.session as { label?: unknown } | undefined)?.label;
+  if (typeof label === 'string' && label.trim()) return label.trim();
   const first = item.title.split(/\s+[|•]\s+|\s+[-–—]\s+(?=[A-Z0-9])/)[0].trim();
   return first.length >= 3 ? first : item.title;
 }

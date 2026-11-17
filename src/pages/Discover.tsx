@@ -16,7 +16,7 @@ import { isQueueable, usePlayQueue } from '../lib/player';
 import { conceptLabel } from '@shared/engine/concepts.ts';
 import { CategoryTabs, ExplorationSlider, MoodChips } from '../components/Controls';
 import { CATEGORY_META, displayTitle, KIND_LABEL } from '../lib/meta';
-import { groupByLane, laneDomId, laneOf, songsLabel, type LaneGroup } from '../lib/lanes';
+import { groupByLane, laneCountLabel, laneDomId, laneOf, type LaneGroup } from '../lib/lanes';
 
 function greeting() {
   const h = new Date().getHours();
@@ -128,9 +128,10 @@ export default function Discover() {
   const SHELF_TITLE: Record<Category, string> = { youtube: 'Videos for you', music: 'Music for you', screen: 'Films & series', books: 'Books to read', podcasts: 'Podcasts to hear' };
   const tunedSubtitle = (n: number) => (moods.length ? `Tuned to ${moods.map((m) => conceptLabel(m).toLowerCase()).join(', ')}` : `${n} picks`);
   // Music arrives in listening lanes (metadata.lane): one shelf per lane, in feed order; songs without a lane stay together.
+  // A lane's live sessions / music videos are music items of that lane (never in the Videos shelf): they sit and play among its songs.
   const musicLanes = groupByLane(rest.filter((r) => r.item.category === 'music'), (r) => r.item);
   const laneTitle = (g: LaneGroup<Recommendation>) => g.lane?.label ?? SHELF_TITLE.music;
-  const laneSubtitle = (g: LaneGroup<Recommendation>) => (g.lane ? songsLabel(g.items.length) : tunedSubtitle(g.items.length));
+  const laneSubtitle = (g: LaneGroup<Recommendation>) => (g.lane ? laneCountLabel(g.items.map((r) => r.item)) : tunedSubtitle(g.items.length));
   const playLane = (g: LaneGroup<Recommendation>, i = 0) => player.playQueue(g.items.map((r) => r.item), i);
   const playHero = () => {
     if (!hero) return;
@@ -172,7 +173,7 @@ export default function Discover() {
             <div className="mt-5 max-w-2xl">
               <h1 className="font-display text-[34px] leading-[1.05] font-medium tracking-[-0.015em] md:text-[52px]">{single ? CATEGORY_META[category].label : 'Your picks'}</h1>
               <p className="mt-2 text-base text-mist">
-                {feed.isError ? 'Your picks could not be loaded.' : recs.length === 0 ? 'Nothing new right now.' : category === 'music' ? songsLabel(recs.length) : `${recs.length} ${recs.length === 1 ? 'pick' : 'picks'}`}
+                {feed.isError ? 'Your picks could not be loaded.' : recs.length === 0 ? 'Nothing new right now.' : category === 'music' ? laneCountLabel(recs.map((r) => r.item)) : `${recs.length} ${recs.length === 1 ? 'pick' : 'picks'}`}
               </p>
               <div className="mt-6 flex flex-wrap items-center gap-2.5">{newPicksButton}{tuneButton}</div>
             </div>

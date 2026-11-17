@@ -1,9 +1,9 @@
 import { motion } from 'motion/react';
-import { AudioLines, Check, Heart, History, Info, Play } from 'lucide-react';
+import { AudioLines, Check, Heart, History, Info, Play, Radio, Video } from 'lucide-react';
 import { isQueueable, usePlayQueue } from '../lib/player';
 import type { Recommendation } from '@shared/types.ts';
 import { CATEGORY_META, displayTitle, KIND_LABEL } from '../lib/meta';
-import { ownedInEntityLane, shownAgain } from '../lib/lanes';
+import { ownedInEntityLane, shownAgain, videoBadge } from '../lib/lanes';
 import { useLibraryMap } from '../hooks/data';
 import { Artwork } from './MediaCard';
 
@@ -25,6 +25,10 @@ export function Tile({ rec, onOpen, onPlay, onWatch, className = '' }: { rec: Re
   const watches = !playsInline && !!onWatch && item.embed?.type === 'youtube';
   const meta = CATEGORY_META[item.category];
   const liked = useLibraryMap().get(item.id)?.liked === true;
+  // A live session / music video inside a music lane: square-cropped thumbnail, a "Live"/"Video" badge,
+  // and it plays in the lane's queue like a song.
+  const badge = videoBadge(item);
+  const name = badge ? displayTitle(item) : item.title;
   return (
     <motion.button
       type="button"
@@ -34,7 +38,7 @@ export function Tile({ rec, onOpen, onPlay, onWatch, className = '' }: { rec: Re
       transition={{ duration: 0.4, ease: [0.22, 1, 0.36, 1] }}
       onClick={() => (playsInline ? onPlay!() : watches ? onWatch!(rec) : onOpen(rec))}
       className={`group shrink-0 snap-start text-left ${TILE_WIDTH[item.category]} ${className}`}
-      aria-label={`${item.title}${item.creators[0] ? `, ${item.creators[0]}` : ''}. ${playsInline || watches ? 'Play' : 'Open details'}`}
+      aria-label={`${name}${item.creators[0] ? `, ${item.creators[0]}` : ''}${badge ? `. ${badge}` : ''}. ${playsInline || watches ? 'Play' : 'Open details'}`}
     >
       <div className="relative">
         <Artwork item={item} rounded="rounded-[14px]" className="shadow-[0_18px_40px_-22px_rgba(0,0,0,0.95)] transition-transform duration-300 ease-[var(--ease-echo)] group-hover:-translate-y-1" />
@@ -58,6 +62,11 @@ export function Tile({ rec, onOpen, onPlay, onWatch, className = '' }: { rec: Re
             </span>
           </span>
         )}
+        {badge && (
+          <span className="absolute bottom-2 left-2 inline-flex h-6 items-center gap-1 rounded-full bg-ink/75 px-2 text-[11px] font-semibold tracking-wide text-bone uppercase backdrop-blur-md" aria-hidden>
+            {badge === 'Live' ? <Radio className="h-3 w-3 text-coral" /> : <Video className="h-3 w-3 text-coral" />} {badge}
+          </span>
+        )}
         {liked && (
           <span className="absolute top-2 left-2 grid h-7 w-7 place-items-center rounded-full bg-ink/70 text-ember backdrop-blur-md" aria-label="Liked">
             <Heart className="h-3.5 w-3.5 fill-current" />
@@ -68,7 +77,7 @@ export function Tile({ rec, onOpen, onPlay, onWatch, className = '' }: { rec: Re
       <p className="mt-0.5 truncate text-[12.5px] text-mist">
         {item.creators[0] ?? KIND_LABEL[item.kind]}
         <span className="text-dim"> · </span>
-        <span style={{ color: meta.color }}>{KIND_LABEL[item.kind]}</span>
+        <span style={{ color: meta.color }}>{badge ?? KIND_LABEL[item.kind]}</span>
       </p>
       {shownAgain(item) && (
         <p className="mt-1 inline-flex items-center gap-1 text-[11.5px] font-medium text-mist">

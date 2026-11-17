@@ -5,7 +5,7 @@ import { hydrateProfile } from './engine/profile.ts';
 import { blockUntil, hashKey, type CacheStore } from './providers/http.ts';
 import { SPOTIFY_LOOKUP_BLOCK } from './providers/spotify.ts';
 import type { EvidenceItem } from './engine/rank.ts';
-import { isEngineLane, laneTagOf, librarySongIndex, mergeCatalogMetadata, TAXONOMY_LANE_IDS, withoutPerUser, type LibrarySongs } from './engine/lanes.ts';
+import { isEngineLane, LANE_VIDEO_PREFIX, laneTagOf, librarySongIndex, mergeCatalogMetadata, TAXONOMY_LANE_IDS, withoutPerUser, type LibrarySongs } from './engine/lanes.ts';
 import { CURATOR_MEMORY_MS, historyTiers, sharedPool, type CuratorMemoryEntry } from './engine/curator.ts';
 import { FEED_MAX_MS, parseFeedSession, type FeedSession } from './engine/session.ts';
 
@@ -330,19 +330,21 @@ export async function recentMusic(userId: string, opts: { asOf?: number; days?: 
   const db = serviceClient();
   const now = Date.now();
   const asOf = opts.asOf ?? now;
-  const isMusic = (id: string) => id.startsWith('spotify:track:') || id.startsWith('spotify:album:');
-  const [shown, skipped] = await Promise.all([
-    pagedRows<{ item_id: string; created_at: string }>((f, t) =>
-      db.from('recommendation_events').select('item_id, created_at').eq('user_id', userId).like('item_id', 'spotify:%').gte('created_at', iso(asOf - (opts.days ?? 3) * 86400_000)).lt('created_at', iso(asOf))
-        .order('created_at', { ascending: false }).order('id', { ascending: false }).range(f, t), 3000),
-    db.from('interactions').select('item_id').eq('user_id', userId).eq('type', 'skip').like('item_id', 'spotify:%').gte('created_at', iso(now - 14 * 86400_000)).limit(1000),
+  // Songs, and the live sessions / music videos shown in music lanes (their own `youtube:music:` ids).
+  const isMusic = (id: string) => id.startsWith('spotify:track:') || id.startsWith('spotify:album:') || id.startsWith(LANE_VIDEO_PREFIX);
+  const shownSince = (prefix: string, max: number) => pagedRows<{ item_id: string; created_at: string }>((f, t) =>
+    db.from('recommendation_events').select('item_id, created_at').eq('user_id', userId).like('item_id', `${prefix}%`).gte('created_at', iso(asOf - (opts.days ?? 3) * 86400_000)).lt('created_at', iso(asOf))
+      .order('created_at', { ascending: false }).order('id', { ascending: false }).range(f, t), max);
+  const skippedSince = (prefix: string) => db.from('interactions').select('item_id').eq('user_id', userId).eq('type', 'skip').like('item_id', `${prefix}%`).gte('created_at', iso(now - 14 * 86400_000)).limit(1000);
+  const [shownSongs, shownVideos, skippedSongs, skippedVideos] = await Promise.all([
+    shownSince('spotify:', 3000), shownSince(LANE_VIDEO_PREFIX, 1000), skippedSince('spotify:'), skippedSince(LANE_VIDEO_PREFIX),
   ]);
   const lastShown = new Map<string, number>();
   // Newest first: the first row per song is its last showing.
-  for (const r of shown) if (isMusic(r.item_id) && !lastShown.has(r.item_id)) lastShown.set(r.item_id, new Date(r.created_at).getTime());
+  for (const r of [...shownSongs, ...shownVideos]) if (isMusic(r.item_id) && !lastShown.has(r.item_id)) lastShown.set(r.item_id, new Date(r.created_at).getTime());
   return {
     shown: new Set(lastShown.keys()),
-    skipped: new Set((skipped.data ?? []).map((r) => r.item_id as string).filter(isMusic)),
+    skipped: new Set([...(skippedSongs.data ?? []), ...(skippedVideos.data ?? [])].map((r) => r.item_id as string).filter(isMusic)),
     lastShown,
   };
 }
@@ -352,11 +354,12 @@ export async function recentMusic(userId: string, opts: { asOf?: number; days?: 
  * a liked song resolved under another id (single vs album vs deluxe) isn't served as a discovery.
  */
 export async function librarySongs(db: SupabaseClient, userId: string): Promise<LibrarySongs> {
-  type Row = { item_id: string; content_items: { title?: string; creators?: string[]; metadata?: Record<string, unknown> } | null };
+  type Row = { item_id: string; content_items: { title?: string; creators?: string[]; genres?: string[]; metadata?: Record<string, unknown> } | null };
   const rows = await pagedRows<Row>((f, t) =>
-    db.from('library_items').select('item_id, content_items(title, creators, metadata)').eq('user_id', userId).like('item_id', 'spotify:track:%').or('status.eq.consumed,saved.eq.true,liked.eq.true')
+    db.from('library_items').select('item_id, content_items(title, creators, genres, metadata)').eq('user_id', userId).like('item_id', 'spotify:track:%').or('status.eq.consumed,saved.eq.true,liked.eq.true')
       .order('item_id').range(f, t) as unknown as PromiseLike<{ data: Row[] | null }>, 10_000);
-  return librarySongIndex(rows.map((r) => ({ id: r.item_id, title: r.content_items?.title, creators: r.content_items?.creators, isrc: r.content_items?.metadata?.isrc })));
+  // Genres too: which lane each library artist's songs sit in (live sessions by them join that lane).
+  return librarySongIndex(rows.map((r) => ({ id: r.item_id, title: r.content_items?.title, creators: r.content_items?.creators, genres: r.content_items?.genres, isrc: r.content_items?.metadata?.isrc })));
 }
 
 /**

@@ -2,7 +2,7 @@
 // Discover on a single-category tab: a small page shows every pick (no hero swallowing it), a short music
 // page offers "Get more", an empty page says so, and a failed request offers Retry. Network mocked.
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react';
+import { act, cleanup, fireEvent, render, screen, within } from '@testing-library/react';
 import { QueryClient, QueryClientProvider } from '@tanstack/react-query';
 import { MemoryRouter } from 'react-router-dom';
 import { MotionGlobalConfig } from 'motion/react';
@@ -232,5 +232,47 @@ describe('Discover, single-category tab', () => {
     await screen.findByText('That’s all ECHO could verify right now.');
     expect(songTiles()).toHaveLength(2);
     expect(screen.queryByRole('alert')).toBeNull();
+  });
+});
+
+// A live session in a music lane: a music item of that lane (kind 'video', YouTube embed).
+const laneVideo = (n: number, lane = { id: 'hiphop-rnb', label: 'Hip-hop & R&B' }): AnalyzedItem => ({
+  id: `youtube:music:LV${String(n).padStart(9, '0')}`, category: 'music', kind: 'video', provider: 'youtube', externalId: `LV${n}`, title: `Session Artist ${n}: Tiny Desk Concert`,
+  creators: [`Session Artist ${n}`], genres: ['rap'], tags: ['live session'], externalUrl: `https://www.youtube.com/watch?v=LV${n}`, artworkUrl: 'https://i.ytimg.com/vi/x/hqdefault.jpg',
+  embed: { type: 'youtube', videoId: `LV${n}` }, concepts: {},
+  metadata: { lane, video: true, videoKind: 'live', session: { channel: 'tinydesk', venue: 'Tiny Desk', prep: 'at', artist: `Session Artist ${n}`, label: 'Tiny Desk Concert' } },
+});
+
+describe('Discover: live sessions inside music lanes', () => {
+  it('Everything: the session sits in its lane shelf (badge, count, plays with the lane), never in the Videos shelf', async () => {
+    everything = feed([item(100, 'books'), item(101, 'youtube'), item(102), item(103), laneVideo(1), item(104)]);
+    mount();
+    await screen.findByText('Today’s echo', { exact: false });
+    const lane = screen.getByRole('region', { name: 'Hip-hop & R&B' });
+    const tile = within(lane).getByRole('button', { name: 'Tiny Desk Concert, Session Artist 1. Live. Play' });
+    expect(within(tile).getAllByText('Live').length).toBeGreaterThan(0);
+    expect(within(lane).getByText('3 songs · 1 live session')).toBeInTheDocument();
+    const videos = screen.getByRole('region', { name: 'Videos for you' });
+    expect(within(videos).queryByText(/Session Artist/)).toBeNull();
+    expect(within(videos).getByText('Pick 101')).toBeInTheDocument();
+    // Tapping it plays the whole mixed lane from the session, in order.
+    await act(async () => {
+      fireEvent.click(tile);
+    });
+    expect(h.playQueue).toHaveBeenLastCalledWith([item(102), item(103), laneVideo(1), item(104)], 2);
+    // "Play all" plays the mixed lane from its first song.
+    await act(async () => {
+      fireEvent.click(within(lane).getByRole('button', { name: 'Play all: Hip-hop & R&B' }));
+    });
+    expect(h.playQueue).toHaveBeenLastCalledWith([item(102), item(103), laneVideo(1), item(104)], 0);
+  });
+
+  it('Music tab: the lane counts its songs and sessions', async () => {
+    musicResponses.push(async () => feed([item(1), item(2), laneVideo(2), item(3)]));
+    await openMusicTab();
+    await screen.findByText('That’s all ECHO could verify right now.');
+    expect(screen.getAllByText('3 songs · 1 live session')).toHaveLength(2);
+    expect(screen.getByRole('button', { name: 'Tiny Desk Concert, Session Artist 2. Live. Play' })).toBeInTheDocument();
+    expect(songTiles()).toHaveLength(3);
   });
 });

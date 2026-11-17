@@ -161,6 +161,32 @@ describe('Echo AI answer lanes', () => {
     expect(screen.queryByText('Hip-hop & R&B')).toBeNull();
   });
 
+  it('an artist’s live session plays inside their lane (badge, count), not among the other picks', async () => {
+    const session: AnalyzedItem = {
+      id: 'youtube:music:NOVA0000001', category: 'music', kind: 'video', provider: 'youtube', externalId: 'NOVA0000001', title: 'Nova Lyric: Tiny Desk Concert', creators: [ARTIST], genres: [], tags: [],
+      externalUrl: 'https://www.youtube.com/watch?v=NOVA0000001', embed: { type: 'youtube', videoId: 'NOVA0000001' }, concepts: {},
+      metadata: { lane: BY, video: true, videoKind: 'live', entity: { name: ARTIST, role: 'by', note: 'live at Tiny Desk' }, session: { channel: 'tinydesk', venue: 'Tiny Desk', prep: 'at', artist: ARTIST, label: 'Tiny Desk Concert' } },
+    };
+    const mixed = [answer[0], answer[1], rec(session, 'Nova Lyric live at Tiny Desk'), ...answer.slice(2)];
+    h.api.chat.mockResolvedValueOnce({ intent: {}, recommendations: mixed, reply: "Here's Nova Lyric with a session.", providers: [], pipeline: [], sessionId: '44444444-4444-4444-8444-444444444444' });
+    mount();
+    fireEvent.change(screen.getByLabelText('Message Echo'), { target: { value: 'nova lyric' } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole('button', { name: 'Send' }));
+    });
+    await screen.findByText(/with a session/);
+    const by = screen.getByRole('region', { name: ARTIST });
+    expect(within(by).getByText('3 songs · 1 live session · 2 not in your library yet')).toBeInTheDocument();
+    const tile = within(by).getByRole('button', { name: `Tiny Desk Concert, ${ARTIST}. Live. Play` });
+    await act(async () => {
+      fireEvent.click(tile);
+    });
+    expect(h.playQueue).toHaveBeenLastCalledWith(mixed.slice(0, 4).map((r) => r.item), 2);
+    // Not a card among the other picks.
+    expect(screen.queryByRole('article', { name: /Tiny Desk/ })).toBeNull();
+    expect(screen.getAllByText('Tiny Desk Concert')).toHaveLength(1);
+  });
+
   it('a long conversation loads its picks in groups (each URL stays short), without the embedding column', async () => {
     const sid = '33333333-3333-4333-8333-333333333333';
     const many = Array.from({ length: 230 }, (_, i) => rec(song(`Song ${i}`, `Artist ${i}`, BY), 'x'));

@@ -7,7 +7,7 @@ import { CATEGORY_META, displayTitle, formatDuration, KIND_LABEL, PROVIDER_LABEL
 import { api } from '../lib/api';
 import { useFeedback, useLibraryMap } from '../hooks/data';
 import { isQueueable, usePlayQueue } from '../lib/player';
-import { ownedInEntityLane } from '../lib/lanes';
+import { isLaneVideo, ownedInEntityLane } from '../lib/lanes';
 import { EmbedPlayer, YouTubePlayer } from './Player';
 import { CollectionPicker } from './CollectionPicker';
 import { toast } from './Toast';
@@ -113,8 +113,10 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
   const meta = CATEGORY_META[item.category];
   const playable = !!item.embed;
   const canTrailer = item.provider === 'tmdb';
-  // Full songs (Spotify Premium connected) play in the user's Spotify app through ECHO's player bar.
-  const remoteSong = playable && player.mode === 'spotify' && isQueueable(item);
+  // Full songs (Spotify Premium connected) play in the user's Spotify app through ECHO's player bar; a live
+  // session / music video of a music lane always plays in the mini player (its lane's queue).
+  const laneVideo = playable && isLaneVideo(item);
+  const remoteSong = playable && isQueueable(item) && (player.mode === 'spotify' || laneVideo);
   const isCurrent = remoteSong && player.currentId === item.id;
   const remotePlaying = isCurrent && player.playing;
   const showPause = playing || remotePlaying;
@@ -141,8 +143,9 @@ export const MediaCard = memo(forwardRef<HTMLElement, Props>(function MediaCard(
 
   const togglePlay = async () => {
     if (remoteSong) {
-      // The song in the bar: pause or resume it (never restart it, never replace its lane queue).
-      if (isCurrent) return player.togglePlay();
+      // The song in the bar: pause or resume it (never restart it, never replace its lane queue). A video
+      // on screen in the mini player keeps playing (its own controls pause it).
+      if (isCurrent) return laneVideo ? undefined : player.togglePlay();
       player.playItem(item);
       onPlayStarted?.();
       return;

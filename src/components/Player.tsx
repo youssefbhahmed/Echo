@@ -2,15 +2,26 @@
 import { useEffect, useRef, useState } from 'react';
 import type { Embed } from '@shared/types.ts';
 
+/** The parts of a YouTube IFrame API player ECHO uses. */
+export interface YTPlayerLike {
+  destroy(): void;
+  getCurrentTime?(): number;
+  getDuration?(): number;
+  playVideo?(): void;
+}
+
 declare global {
   interface Window {
-    YT?: { Player: new (el: HTMLElement, opts: Record<string, unknown>) => { destroy(): void } };
+    YT?: { Player: new (el: HTMLElement, opts: Record<string, unknown>) => YTPlayerLike };
     onYouTubeIframeAPIReady?: () => void;
   }
 }
 
+/** YT.PlayerState values (https://developers.google.com/youtube/iframe_api_reference#Playback_status). */
+export const YT_STATE = { ENDED: 0, PLAYING: 1, PAUSED: 2, BUFFERING: 3, CUED: 5 } as const;
+
 let ytReady: Promise<void> | null = null;
-function loadYouTubeApi(): Promise<void> {
+export function loadYouTubeApi(): Promise<void> {
   if (window.YT?.Player) return Promise.resolve();
   if (!ytReady) {
     ytReady = new Promise((resolve) => {
@@ -34,7 +45,7 @@ export function YouTubePlayer({ videoId, title, onPlay }: { videoId: string; tit
   onPlayRef.current = onPlay;
   const [error, setError] = useState<string | null>(null);
   useEffect(() => {
-    let player: { destroy(): void } | null = null;
+    let player: YTPlayerLike | null = null;
     let cancelled = false;
     loadYouTubeApi().then(() => {
       if (cancelled || !host.current || !window.YT) return;
@@ -72,6 +83,75 @@ export function YouTubePlayer({ videoId, title, onPlay }: { videoId: string; tit
       </div>
     );
   return <div ref={host} title={title} className="aspect-video w-full overflow-hidden rounded-2xl bg-black [&_iframe]:h-full [&_iframe]:w-full" />;
+}
+
+/**
+ * The mini player's YouTube player for a video in a mixed music queue: autoplays inline (playsinline, so
+ * phones don't jump to fullscreen), reports playback every 2 s while it plays, and says when the video
+ * ended (YT.PlayerState.ENDED) so the queue moves on. A video that can't play here moves on by itself.
+ */
+export function QueueVideoPlayer({ videoId, title, onProgress, onEnded }: { videoId: string; title: string; onProgress?: (playing: boolean, positionMs: number, durationMs?: number) => void; onEnded?: () => void }) {
+  const host = useRef<HTMLDivElement>(null);
+  const cb = useRef({ onProgress, onEnded });
+  cb.current = { onProgress, onEnded };
+  const [error, setError] = useState<string | null>(null);
+  useEffect(() => {
+    let player: YTPlayerLike | null = null;
+    let cancelled = false;
+    let tick: ReturnType<typeof setInterval> | undefined;
+    let skip: ReturnType<typeof setTimeout> | undefined;
+    setError(null);
+    const report = (playing: boolean) => {
+      const pos = Math.max(0, Math.round((player?.getCurrentTime?.() ?? 0) * 1000));
+      const dur = player?.getDuration?.();
+      cb.current.onProgress?.(playing, pos, dur ? Math.round(dur * 1000) : undefined);
+    };
+    loadYouTubeApi().then(() => {
+      if (cancelled || !host.current || !window.YT) return;
+      const el = document.createElement('div');
+      host.current.appendChild(el);
+      player = new window.YT.Player(el, {
+        videoId,
+        width: '100%',
+        height: '100%',
+        playerVars: { autoplay: 1, playsinline: 1, rel: 0, modestbranding: 1 },
+        events: {
+          onReady: (e: { target?: YTPlayerLike }) => e.target?.playVideo?.(),
+          onStateChange: (e: { data: number }) => {
+            clearInterval(tick);
+            if (e.data === YT_STATE.PLAYING) {
+              report(true);
+              tick = setInterval(() => report(true), 2000);
+            } else if (e.data === YT_STATE.PAUSED) report(false);
+            else if (e.data === YT_STATE.ENDED) cb.current.onEnded?.();
+          },
+          onError: (e: { data: number }) => {
+            setError(e.data === 101 || e.data === 150 ? 'This video can’t play inside ECHO.' : 'This video could not be played here.');
+            skip = setTimeout(() => cb.current.onEnded?.(), 4000);
+          },
+        },
+      });
+    });
+    return () => {
+      cancelled = true;
+      clearInterval(tick);
+      clearTimeout(skip);
+      player?.destroy();
+    };
+  }, [videoId]);
+  return (
+    <div className="relative aspect-video w-full overflow-hidden rounded-[12px] bg-black">
+      <div ref={host} title={title} className="absolute inset-0 [&_iframe]:h-full [&_iframe]:w-full" />
+      {error && (
+        <div role="status" className="absolute inset-0 grid place-items-center bg-ink-3 p-2 text-center text-[11.5px] leading-snug text-mist">
+          <span>
+            {error}{' '}
+            <a className="text-ember underline" href={`https://www.youtube.com/watch?v=${videoId}`} target="_blank" rel="noreferrer">YouTube</a>
+          </span>
+        </div>
+      )}
+    </div>
+  );
 }
 
 export function EmbedPlayer({ embed, title, onPlay }: { embed: Embed; title: string; onPlay?: () => void }) {

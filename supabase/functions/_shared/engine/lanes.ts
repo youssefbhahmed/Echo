@@ -151,6 +151,43 @@ export function isEntityExtra(item: { category: string; metadata?: Record<string
   return !!entityTagOf(item) && !(item.category === 'music' && laneTagOf(item));
 }
 
+// ───────────── videos inside music lanes ─────────────
+//
+// Contract: a YouTube live session or music video placed in a music lane is a MUSIC item —
+// category 'music', kind 'video', provider 'youtube', embed { type: 'youtube' }, its own id
+// `youtube:music:<videoId>` (never the Videos feed's `youtube:video:<videoId>` row), creators = the
+// performing artists (so one-per-artist, disliked artists and feedback work as for songs),
+// metadata.lane = its lane, metadata.video = true, metadata.videoKind 'live' | 'video',
+// metadata.session = where it was filmed. Being category 'music', it is grouped into the lane shelves on
+// Discover and in Echo AI answers and never appears in the Videos shelf.
+
+export const LANE_VIDEO_PREFIX = 'youtube:music:';
+
+/** Where a lane video was filmed and who plays (metadata.session, from its YouTube title; shared, not per user). */
+export interface SessionTag {
+  /** SessionChannel.key */
+  channel: string;
+  /** "Tiny Desk", "COLORS" */
+  venue: string;
+  prep: 'at' | 'on' | 'for';
+  /** The performing artist as the title credits them. */
+  artist: string;
+  /** Short display title: the song, or what the session is called ("Tiny Desk Concert"). */
+  label: string;
+}
+
+/** A YouTube live session / music video inside a music lane (see the contract above). */
+export function isLaneVideo(item: { category: string; kind?: string; embed?: { type: string } | null; metadata?: Record<string, unknown> }): boolean {
+  return item.category === 'music' && item.kind === 'video' && item.embed?.type === 'youtube';
+}
+
+export function sessionTagOf(item: { metadata?: Record<string, unknown> }): SessionTag | null {
+  const s = item.metadata?.session as Partial<SessionTag> | undefined;
+  if (!s || typeof s.venue !== 'string' || typeof s.artist !== 'string') return null;
+  const prep = s.prep === 'on' || s.prep === 'for' ? s.prep : 'at';
+  return { channel: typeof s.channel === 'string' ? s.channel : '', venue: s.venue, prep, artist: s.artist, label: typeof s.label === 'string' && s.label ? s.label : s.venue };
+}
+
 /** Every lane id this engine writes: the taxonomy lanes plus the request/open pseudo-lanes. */
 export const ENGINE_LANE_IDS: string[] = [...LANES.map((l) => l.id), REQUEST_LANE.id, MIX_LANE.id];
 /** The taxonomy lanes only (a song placed in one fits it by the lane's own rules, language included). */
@@ -165,7 +202,7 @@ export function isEngineLane(id: string | undefined | null): boolean {
  * Per-user / per-response fields of a recommended item: rebuilt for every response, never stored in the
  * shared catalog (content_items is readable by every signed-in user) nor carried over from it.
  */
-export const PER_USER_METADATA = ['lastShownAt', 'laneEra', 'laneMood', 'aiOrder', 'fallback', 'fallbackTier', 'inLibrary', 'entity', 'entityOrder', 'wantedScene'] as const;
+export const PER_USER_METADATA = ['lastShownAt', 'laneEra', 'laneMood', 'aiOrder', 'fallback', 'fallbackTier', 'inLibrary', 'entity', 'entityOrder', 'wantedScene', 'videoMatch'] as const;
 
 /** Item metadata without per-user / per-request fields (an entity lane tag is per request too). */
 export function withoutPerUser(meta: Record<string, unknown> | undefined): Record<string, unknown> {
@@ -483,6 +520,11 @@ export interface LibrarySongs {
   songs: Set<string>;
   /** The library rows' own item ids (an entity lane may show these songs, flagged "In your library"). */
   ids?: Set<string>;
+  /**
+   * The lane most of each library artist's songs belong to (normKey(artist) → lane id, by the songs' own
+   * genres): which lane a live session by an artist the user listens to joins. Local data only.
+   */
+  artistLanes?: Map<string, string>;
 }
 
 export function normIsrc(x: unknown): string {
@@ -491,15 +533,31 @@ export function normIsrc(x: unknown): string {
 }
 
 /** Index of library songs (title, credited artists, ISRC when the export had one). */
-export function librarySongIndex(rows: Array<{ id?: string | null; title?: string | null; creators?: string[] | null; isrc?: unknown }>): LibrarySongs {
+export function librarySongIndex(rows: Array<{ id?: string | null; title?: string | null; creators?: string[] | null; isrc?: unknown; genres?: string[] | null }>): LibrarySongs {
   const lib: LibrarySongs = { isrcs: new Set(), songs: new Set(), ids: new Set() };
+  const votes = new Map<string, Map<string, number>>();
   for (const r of rows) {
     if (r.id) lib.ids!.add(r.id);
     const isrc = normIsrc(r.isrc);
     if (isrc) lib.isrcs.add(isrc);
+    const lane = r.genres?.length ? laneOfGenres(r.genres) : null;
     for (const a of r.creators ?? []) {
       const k = r.title ? songKey(a, r.title) : '';
       if (k) lib.songs.add(k);
+      const ak = normKey(a);
+      if (!lane || !ak) continue;
+      const v = votes.get(ak) ?? new Map<string, number>();
+      v.set(lane, (v.get(lane) ?? 0) + 1);
+      votes.set(ak, v);
+    }
+  }
+  if (votes.size) {
+    lib.artistLanes = new Map();
+    for (const [a, v] of votes) {
+      let best = '';
+      let n = 0;
+      for (const [l, c] of v) if (c > n) [best, n] = [l, c];
+      if (best) lib.artistLanes.set(a, best);
     }
   }
   return lib;

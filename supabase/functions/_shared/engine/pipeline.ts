@@ -9,7 +9,9 @@ import type { Env, Provider } from '../providers/types.ts';
 import { aiConfig, mergeHint, sanitizeHint } from './ai.ts';
 import { applyUnderstanding, llmUnderstand } from './understand.ts';
 import { askedRegions, curateMusic, entityLaneFallback, fallbackTierOf, laneFallback, laneLooseMusic, musicQuotaFor, namesOf, planMusic, SEARCH_ORDER, STORED_ORDER, withoutNames, type MusicPlan } from './curator.ts';
-import { allowScenes, ENTITY_BY_LANE, entityTagOf, laneTagOf, MIX_LANE, type LibrarySongs } from './lanes.ts';
+import { allowScenes, ENTITY_BY_LANE, entityTagOf, isLaneVideo, laneTagOf, MIX_LANE, type LibrarySongs } from './lanes.ts';
+import { liveSessionPool, type SessionPoolResult } from '../providers/youtube.ts';
+import { matchEntitySessions, matchLaneSessions, sessionsServe } from './sessions.ts';
 import { entityExtras, entityReply, extrasCap, isArtistEntity, primaryEntity, resolveEntity, type EntityResolution } from './entities.ts';
 import { analyzeItem } from './analyze.ts';
 import { conceptLabel, CONCEPT_BY_ID } from './concepts.ts';
@@ -93,8 +95,14 @@ function timer() {
 }
 
 function canEmbed(item: ContentItem): boolean {
-  // Spotify Developer Policy: Spotify Content must not be ingested into ML/AI models.
-  return item.provider !== 'spotify';
+  // Spotify Developer Policy: Spotify Content must not be ingested into ML/AI models. Sessions in music
+  // lanes are matched locally only: their titles aren't embedded either.
+  return item.provider !== 'spotify' && !isLaneVideo(item);
+}
+
+/** Live sessions / music videos each music lane shows on top of its songs: 2 on a music page or for a named artist, 1 in a mixed feed. */
+export function laneVideosPerLane(categories: Category[], entity: boolean): number {
+  return entity || (categories.length === 1 && categories[0] === 'music') ? 2 : 1;
 }
 
 export function embeddingText(item: ContentItem): string {
@@ -362,7 +370,8 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
   const entityExcludeIds = musicPlan?.entity && deps.excludeIds && libraryIds?.size
     ? new Set([...deps.excludeIds].filter((id) => !libraryIds.has(id) || !!deps.shownIds?.has(id)))
     : undefined;
-  const musicPicks = (async (): Promise<{ items: ContentItem[]; detail: string; perLane: Record<string, number> } | null> => {
+  type MusicPicks = { items: ContentItem[]; detail: string; perLane: Record<string, number>; lanePicks?: Record<string, Array<{ artist: string; feat?: string[] }>>; regionalArtists?: Array<{ artist: string; region: string }> };
+  const musicPicks = (async (): Promise<MusicPicks | null> => {
     if (!curatorOn || !musicPlan || !ai) return null;
     // Open feed: briefed from the MUSIC taste (+ chosen moods) only; video/book themes never steer songs.
     const concepts = (effectiveHasQuery
@@ -381,7 +390,13 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     if (r.rateLimitedSec !== undefined) spotifyLimitedSec = r.rateLimitedSec;
     if (r.lookupLimitedSec !== undefined) spotifyLookupLimitedSec = r.lookupLimitedSec;
     return r;
-  })().catch((e) => ({ items: [] as ContentItem[], detail: `AI music picks skipped (${(e as Error).message.slice(0, 60)})`, perLane: {} as Record<string, number> }));
+  })().catch((e): MusicPicks => ({ items: [], detail: `AI music picks skipped (${(e as Error).message.slice(0, 60)})`, perLane: {} }));
+  // Live sessions for the music lanes: the shared, day-cached pool of session channels' uploads (no
+  // search.list; out of quota → the cached or last good pool only). Matched to lanes after the curator.
+  const sessionLanes = musicPlan ? (musicPlan.entity ? musicPlan.lanes.filter((l) => l.id === ENTITY_BY_LANE) : musicPlan.mode === 'lanes' ? musicPlan.lanes : []).map((l) => l.id) : [];
+  const poolP: Promise<SessionPoolResult> | null = sessionLanes.length && sessionsServe(sessionLanes) && !!PROVIDERS.youtube?.configured(deps.env)
+    ? liveSessionPool({ http: deps.http, env: deps.env }, { allowNetwork: !blocked.has('youtube') }).catch((e) => ({ videos: [], source: 'none' as const, units: 0, detail: `pool failed (${String((e as Error)?.message ?? e).slice(0, 60)})` }))
+    : null;
   // Items around a named entity in other media (bounded: a few provider calls), in parallel with the rest.
   const ownResolved = entity ? resolvedEntities.find((r) => fold(r.entity.name) === fold(entity.name))?.item ?? null : null;
   const extrasP = entity
@@ -495,6 +510,21 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
       }
     }
   }
+  // Sessions in the music lanes: matched locally to the curator's picks per lane and the user's library
+  // artists (or a named artist), under the lane rules; the ranker places them among the lane's songs.
+  if (poolP && musicPlan) {
+    const pool = await poolP;
+    if (pool.quota) quota.note('youtube', pool.quota.retryAfterSec);
+    const byLane = musicPlan.lanes.find((l) => l.id === ENTITY_BY_LANE);
+    const videos = musicPlan.entity
+      ? byLane ? matchEntitySessions(pool.videos, { name: musicPlan.entity.name, lane: byLane, excludeIds: deps.excludeIds, max: 2 }) : []
+      : matchLaneSessions(pool.videos, {
+        lanes: musicPlan.lanes, picks: mp?.lanePicks, regionalArtists: mp?.regionalArtists, profile: deps.profile, libraryArtistLanes: deps.library?.artistLanes, excludeIds: deps.excludeIds,
+      });
+    raw.push(...videos);
+    const kinds = ['pick', 'library', 'channel', 'entity'].map((k) => [k, videos.filter((v) => v.metadata?.videoMatch === k).length] as const).filter(([, n]) => n > 0);
+    pipeline.push({ step: 'music-videos', ms: 0, detail: `${pool.detail}; ${videos.length} offered to the lanes${kinds.length ? ` (${kinds.map(([k, n]) => `${k} ${n}`).join(', ')})` : ''}` });
+  }
   pipeline.push({ step: 'retrieval', ms: t(), detail: `${plan.length} queries → ${raw.length} items (${deps.http.calls - callsBefore} network calls, rest cached)` });
 
   // ── Steps 3–4: enrichment + semantic analysis ──
@@ -564,6 +594,7 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
     now: deps.now,
     musicLanes: musicPlan ? rankLanePlan(musicPlan, candidates) : undefined,
     entityBlock: entity ? { cap: capExtras } : undefined,
+    laneVideos: { perLane: laneVideosPerLane(categories, !!musicPlan?.entity) },
   });
   pipeline.push({ step: 'ranking', ms: t(), detail: `exploration ${Math.round(exploration * 100)}% · ${recommendations.length} picks after diversity` });
 
@@ -607,12 +638,13 @@ export async function runPipeline(req: DiscoverRequest, deps: PipelineDeps): Pro
  * Lane plan for the ranker. An open feed whose songs partly came from search (no AI curator) shows them
  * in an extra "Fresh picks" lane after the taste lanes, sized to the slots the lanes can't fill.
  */
-export function rankLanePlan(plan: MusicPlan, candidates: Array<{ category: string; metadata?: Record<string, unknown> }>): { order: string[]; targets: Record<string, number> } {
+export function rankLanePlan(plan: MusicPlan, candidates: Array<{ category: string; kind?: string; embed?: { type: string } | null; metadata?: Record<string, unknown> }>): { order: string[]; targets: Record<string, number> } {
   const base = { order: plan.order, targets: plan.targets };
   if (plan.order.includes(MIX_LANE.id)) return base;
   const have: Record<string, number> = {};
   for (const c of candidates) {
-    const id = c.category === 'music' ? laneTagOf(c)?.id : undefined;
+    // Songs only: a lane's videos ride on top of its song target.
+    const id = c.category === 'music' && !isLaneVideo(c) ? laneTagOf(c)?.id : undefined;
     if (id) have[id] = (have[id] ?? 0) + 1;
   }
   if (!have[MIX_LANE.id]) return base;

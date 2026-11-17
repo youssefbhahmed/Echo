@@ -1,13 +1,14 @@
 import type { Recommendation } from '@shared/types.ts';
 import { isQueueable, usePlayQueue } from '../lib/player';
-import { laneDomId, songsLabel, splitAnswer, ownedInEntityLane, type LaneGroup } from '../lib/lanes';
+import { isLaneVideo, laneCountLabel, laneDomId, splitAnswer, ownedInEntityLane, type LaneGroup } from '../lib/lanes';
 import { MediaCard } from './MediaCard';
 import { PlayAll } from './PlayAll';
 import { Tile } from './Tile';
 
 /**
  * The picks of one Echo AI answer: songs in their listening lanes ("Eminem", "Artists like Eminem", "For
- * your request"), each with "Play all" and tiles that play inline, then everything else as cards.
+ * your request"), each with "Play all" and tiles that play inline, then everything else as cards. A lane's
+ * live sessions / music videos are part of it (they play in its queue).
  */
 export function ChatAnswer({ recs, answerKey, onOpen, onWatch }: { recs: Recommendation[]; answerKey: string; onOpen: (r: Recommendation) => void; onWatch: (r: Recommendation) => void }) {
   const player = usePlayQueue();
@@ -18,8 +19,10 @@ export function ChatAnswer({ recs, answerKey, onOpen, onWatch }: { recs: Recomme
       {lanes.map((g) => {
         const hid = `answer-${answerKey}-${laneDomId(g.key)}`;
         const title = g.lane?.label ?? 'Songs';
+        const songs = g.items.filter((r) => !isLaneVideo(r.item)).length;
         const owned = g.items.filter((r) => ownedInEntityLane(r.item)).length;
-        const subtitle = owned ? `${songsLabel(g.items.length)} · ${owned === g.items.length ? 'all in your library' : `${g.items.length - owned} not in your library yet`}` : songsLabel(g.items.length);
+        const count = laneCountLabel(g.items.map((r) => r.item));
+        const subtitle = owned ? `${count} · ${owned === songs ? 'all in your library' : `${songs - owned} not in your library yet`}` : count;
         return (
           <section key={g.key || 'songs'} aria-labelledby={hid}>
             <div className="flex items-end justify-between gap-3">

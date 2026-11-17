@@ -4,6 +4,7 @@ import { createHttp } from '../_shared/providers/http.ts';
 import { providersFor } from '../_shared/providers/index.ts';
 import { tmdbTrailer } from '../_shared/providers/tmdb.ts';
 import { asPodcastEpisode, refreshYouTube } from '../_shared/providers/youtube.ts';
+import { refreshedLaneVideo } from '../_shared/engine/sessions.ts';
 import { CatalogBody } from '../_shared/schemas.ts';
 import type { Category, ContentItem } from '../_shared/types.ts';
 import { DbCache, env, getItems, HttpError, json, rateLimit, readJson, requireUser, serve, upsertItems } from '../_shared/server.ts';
@@ -56,7 +57,11 @@ serve(async (req) => {
     const stale = items.filter((i) => i.provider === 'youtube' && (i.metadata?.stale || Date.now() - new Date(String(i.metadata?.fetchedAt ?? 0)).getTime() > 25 * 86400_000));
     const byExt = new Map(stale.map((i) => [i.externalId, i]));
     const fresh = (await refreshYouTube(stale.map((i) => i.externalId), ctx).catch(() => []))
-      .map((f) => (byExt.get(f.externalId)?.category === 'podcasts' ? asPodcastEpisode(f) : f))
+      .map((f) => {
+        const was = byExt.get(f.externalId);
+        // Same video, same row shape: a podcast episode stays one, a session in a music lane stays a lane item.
+        return was?.category === 'podcasts' ? asPodcastEpisode(f) : was?.category === 'music' ? refreshedLaneVideo(was, f) : f;
+      })
       .map(analyzeItem);
     await upsertItems(fresh);
     return json(req, { refreshed: fresh.length + withArt.length });

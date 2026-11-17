@@ -3,7 +3,7 @@ import type { AnalyzedItem, Category, ConceptVector, Explanation, Intent, Recomm
 import { conceptPhrase, CONCEPT_BY_ID } from './concepts.ts';
 import { creatorKeys, genreKeys } from './profile.ts';
 import { familyOf, inBlockedFamily } from './music.ts';
-import { allowScenes, ENTITY_BY_LANE, ENTITY_LIKE_LANE, entityTagOf, isEntityExtra, laneTagOf, laneTargets, MIX_LANE, REQUEST_LANE, wantedSceneOf, yearOf } from './lanes.ts';
+import { allowScenes, ENTITY_BY_LANE, ENTITY_LIKE_LANE, entityTagOf, isEntityExtra, isEntityLane, isLaneVideo, laneTagOf, laneTargets, MIX_LANE, REQUEST_LANE, sessionTagOf, wantedSceneOf, yearOf } from './lanes.ts';
 import { itemWorld } from './worlds.ts';
 import { contentTokens, cosine, denseCosine, negativePart, normalize, normKey, positivePart, round, songKey } from './text.ts';
 
@@ -48,6 +48,11 @@ export interface RankContext {
    * media (metadata.entity, in metadata.entityOrder), then everything else by score.
    */
   entityBlock?: { cap: number };
+  /**
+   * Live sessions / music videos offered to the music lanes (lane items with kind 'video'): how many each
+   * lane shows on top of its songs (Music page 2, Everything 1). Without it, lane videos are left out.
+   */
+  laneVideos?: { perLane: number };
 }
 
 export interface LanePlan {
@@ -402,6 +407,31 @@ export function laneExplanation(item: AnalyzedItem, now = new Date()): Explanati
 const capFirst = (x: string) => (x ? `${x.charAt(0).toUpperCase()}${x.slice(1)}` : x);
 
 /**
+ * Reasons for a live session / music video in a music lane: "Anderson .Paak, whom you listen to, live on
+ * COLORS" (an artist of the user's library), "<Artist> live at Tiny Desk — from your Hip-hop & R&B lane"
+ * (an artist the curator picked for the lane), "Live session at Tiny Desk — from your Hip-hop & R&B lane"
+ * (the channel alone), "<Artist> live at Tiny Desk" in a named artist's own lane. null for anything else.
+ */
+export function videoExplanation(item: AnalyzedItem): Explanation['reasons'] | null {
+  if (!isLaneVideo(item)) return null;
+  const s = sessionTagOf(item);
+  const lane = laneTagOf(item);
+  const live = item.metadata?.videoKind !== 'video';
+  const where = s ? `${s.prep} ${s.venue}` : 'on YouTube';
+  const artist = s?.artist ?? item.creators[0] ?? 'This artist';
+  const what = live ? 'live' : 'music video';
+  const match = item.metadata?.videoMatch;
+  const taste = !!lane && !isEntityLane(lane.id) && lane.id !== REQUEST_LANE.id && lane.id !== MIX_LANE.id;
+  const fromLane = taste ? ` — from your ${lane!.label} lane` : '';
+  const y = yearOf(item.releaseDate);
+  const when: Explanation['reasons'] = y ? [{ kind: 'context', detail: `${live ? 'Filmed for' : 'Published by'} ${s?.venue ?? 'YouTube'}, ${y}` }] : [];
+  if (match === 'entity' || lane?.id === ENTITY_BY_LANE) return [{ kind: 'reference', detail: `${entityTagOf(item)?.name ?? artist} ${what} ${where}` }, ...when];
+  if (match === 'library') return [{ kind: 'creator', detail: `${artist}, whom you listen to, ${live ? 'live' : 'in a music video'} ${where}` }, ...(taste ? [{ kind: 'profile' as const, detail: `From your ${lane!.label} lane` }] : []), ...when];
+  if (match === 'pick') return [{ kind: 'profile', detail: `${artist} ${what} ${where}${fromLane}` }, { kind: 'context', detail: `${artist} is one of ECHO's curator picks for this lane` }, ...when];
+  return [{ kind: 'profile', detail: `${live ? 'Live session' : 'Music video'} ${where}${fromLane}` }, { kind: 'context', detail: `A recent ${s?.venue ?? 'YouTube'} session you haven't seen yet` }, ...when];
+}
+
+/**
  * Reasons for an item answering a named entity: "<Artist> — not in your library yet" / "In your library"
  * for their songs, "Like <Artist>: <the curator's short why>" for related songs, and "<title> — <how it
  * relates>" for works and things about them. null for any other item.
@@ -441,6 +471,9 @@ export function entityExplanation(item: AnalyzedItem): Explanation['reasons'] | 
  * user's recorded profile/feedback. Nothing is invented.
  */
 export function explain(item: AnalyzedItem, score: ScoreBreakdown & { keywordHits?: string[] }, intent: Intent, profile: TasteProfile, view: ProfileView, ctx: RankContext, trajectoryStep?: number, total?: number): Explanation {
+  // A live session / music video in a music lane says where it was filmed and why it is in the lane.
+  const videoReasons = videoExplanation(item);
+  if (videoReasons) return { text: `${videoReasons.slice(0, 2).map((r) => r.detail).join('. ')}.`, reasons: videoReasons, matchedConcepts: [] };
   // Answers to a named entity say how they relate to it, never "because you liked <some other song>".
   const entityReasons = entityExplanation(item);
   if (entityReasons) {
@@ -587,19 +620,22 @@ export function rankCandidates(candidates: AnalyzedItem[], intent: Intent, profi
   let rest = scored;
   if (laneScored.length) {
     const musicQuota = quotas?.get('music') ?? (cats.size === 1 ? limit : Math.ceil(limit / Math.max(1, cats.size)));
-    block = assembleLaneBlock(laneScored, ctx.musicLanes ?? derivedLanePlan(laneScored, musicQuota), limit);
+    const plan = ctx.musicLanes ?? derivedLanePlan(laneScored.filter((s) => !isLaneVideo(s.item)), musicQuota);
+    block = assembleLaneBlock(laneScored, plan, limit, { videosPerLane: ctx.laneVideos?.perLane ?? 0 });
     const blockArtists = new Set(block.flatMap((b) => creatorKeys(b.item)));
     rest = scored.filter((s) => !laneOf(s) && !(s.item.category === 'music' && creatorKeys(s.item).some((k) => blockArtists.has(k))));
-    if (quotas) quotas.set('music', Math.max(0, (quotas.get('music') ?? 0) - block.length));
+    if (quotas) quotas.set('music', Math.max(0, (quotas.get('music') ?? 0) - blockSongs(block)));
   }
+  // Lane videos ride on top of their lane's songs: they never take another category's slots.
+  const songsInBlock = blockSongs(block);
   // Items around a named entity (its works, things about it): in their own order, after its music lanes.
   let extras: Scored[] = [];
   if (ctx.entityBlock) {
     const order = (s: Scored) => (typeof s.item.metadata?.entityOrder === 'number' ? (s.item.metadata.entityOrder as number) : 1e6);
-    extras = rest.filter((s) => isEntityExtra(s.item) && s.score.penalty < 1).sort((a, b) => order(a) - order(b)).slice(0, Math.max(0, Math.min(ctx.entityBlock.cap, limit - block.length)));
+    extras = rest.filter((s) => isEntityExtra(s.item) && s.score.penalty < 1).sort((a, b) => order(a) - order(b)).slice(0, Math.max(0, Math.min(ctx.entityBlock.cap, limit - songsInBlock)));
     rest = rest.filter((s) => !isEntityExtra(s.item));
   }
-  let restPicked: Array<Scored & { trajectoryStep?: number }> = diversify(rest, Math.max(0, limit - block.length - extras.length), ctx.exploration, cats.size > 1, {
+  let restPicked: Array<Scored & { trajectoryStep?: number }> = diversify(rest, Math.max(0, limit - songsInBlock - extras.length), ctx.exploration, cats.size > 1, {
     quotas,
     // Big feeds can take a few more from one search (each search is a different theme).
     perQuery: intent.trajectory ? 4 : limit > 20 ? 3 : 2,
@@ -641,14 +677,40 @@ export function derivedLanePlan(items: Array<{ item: AnalyzedItem }>, total: num
   return { order, targets: Object.fromEntries(order.map((id, i) => [id, t[i]])) };
 }
 
+/** Songs in a lane block (its videos ride on top of the lanes' song targets). */
+export function blockSongs(block: Array<{ item: AnalyzedItem }>): number {
+  return block.filter((b) => !isLaneVideo(b.item)).length;
+}
+
+/** Most videos one lane shows (a lane short of songs may let videos fill its empty slots up to this). */
+export const MAX_LANE_VIDEOS = 3;
+
+/** A lane's songs with its videos placed in: the first after the 2nd song, then one every 2 songs; any left close the lane. */
+export function interleaveVideos<T>(songs: T[], videos: T[]): T[] {
+  const out: T[] = [];
+  let v = 0;
+  songs.forEach((s, i) => {
+    out.push(s);
+    if ((i + 1) % 2 === 0 && v < videos.length) out.push(videos[v++]);
+  });
+  while (v < videos.length) out.push(videos[v++]);
+  return out;
+}
+
 /**
  * Music block of a feed: lane by lane (plan order), each lane's songs in the curator's listening
  * order (stored fallback songs after them), up to the lane's target, one song per artist, skipping
- * songs under a hard penalty (blocked style, functional music, explicit dislikes).
+ * songs under a hard penalty (blocked style, functional music, explicit dislikes). Then the lane's live
+ * sessions / music videos (`videosPerLane` each, on top of the songs; a lane short of songs lets them
+ * fill its empty slots, at most MAX_LANE_VIDEOS), artists not already playing in the lane first, one
+ * video per artist across the block, placed by interleaveVideos. `limit` counts songs only.
  */
-export function assembleLaneBlock<T extends { item: AnalyzedItem; score: ScoreBreakdown }>(items: T[], plan: LanePlan, limit: number): T[] {
+export function assembleLaneBlock<T extends { item: AnalyzedItem; score: ScoreBreakdown }>(items: T[], plan: LanePlan, limit: number, opts: { videosPerLane?: number } = {}): T[] {
   const used = new Set<string>();
+  const videoArtists = new Set<string>();
+  const perLane = Math.max(0, opts.videosPerLane ?? 0);
   const out: T[] = [];
+  let songCount = 0;
   for (const id of plan.order) {
     const want = plan.targets[id] ?? 0;
     // A named artist's own lane is all theirs: one song per recording instead of one per artist, and
@@ -656,9 +718,13 @@ export function assembleLaneBlock<T extends { item: AnalyzedItem; score: ScoreBr
     const own = id === ENTITY_BY_LANE;
     const lane = items.filter((x) => laneTagOf(x.item)?.id === id && (own || x.score.penalty < 0.5)).sort((a, b) => aiOrderOf(a.item) - aiOrderOf(b.item) || b.score.total - a.score.total);
     const songs = new Set<string>();
-    let n = 0;
+    const laneSongs: T[] = [];
+    // The page's song limit, not a lack of verified songs, may cut a lane: that lane isn't "short".
+    let cut = false;
     for (const x of lane) {
-      if (n >= want || out.length >= limit) break;
+      if (isLaneVideo(x.item)) continue;
+      if (songCount >= limit) cut = true;
+      if (laneSongs.length >= want || songCount >= limit) break;
       const ck = creatorKeys(x.item);
       if (own) {
         const song = songKey(x.item.creators[0] ?? '', x.item.title) || x.item.id;
@@ -666,9 +732,26 @@ export function assembleLaneBlock<T extends { item: AnalyzedItem; score: ScoreBr
         songs.add(song);
       } else if (ck.some((k) => used.has(k))) continue;
       ck.forEach((k) => used.add(k));
-      out.push(x);
-      n++;
+      laneSongs.push(x);
+      songCount++;
     }
+    const deficit = cut ? 0 : Math.max(0, want - laneSongs.length);
+    // A lane the page limit cut off entirely shows nothing (its videos don't stand alone).
+    const cap = !perLane || (cut && !laneSongs.length) ? 0 : deficit > 0 ? Math.min(MAX_LANE_VIDEOS, perLane + deficit) : Math.min(MAX_LANE_VIDEOS, perLane);
+    const laneVideos: T[] = [];
+    if (cap) {
+      const playing = new Set(laneSongs.flatMap((x) => creatorKeys(x.item)));
+      const vids = lane.filter((x) => isLaneVideo(x.item));
+      const inLane = (x: T) => creatorKeys(x.item).some((k) => playing.has(k));
+      for (const x of [...vids.filter((v) => !inLane(v)), ...vids.filter(inLane)]) {
+        if (laneVideos.length >= cap) break;
+        const ck = creatorKeys(x.item);
+        if (!own && ck.some((k) => videoArtists.has(k))) continue;
+        ck.forEach((k) => videoArtists.add(k));
+        laneVideos.push(x);
+      }
+    }
+    out.push(...interleaveVideos(laneSongs, laneVideos));
   }
   return out;
 }
