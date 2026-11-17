@@ -130,7 +130,7 @@ export function planMusic(
  * rate-limited most of the time in Development Mode, so picks resolve through ListenBrainz (~40–50%
  * coverage) after the off-lane style, era, library and version filters (~70% pass): ~30% survive.
  */
-export const MAX_ASK = 64;
+export const MAX_ASK = 48;
 export const askCount = (target: number) => Math.max(12, Math.min(24, Math.ceil(target * 3) + 2));
 
 /** Curator brief from the plan: lane labels, generic descriptors, mood, era — never track or artist names. */

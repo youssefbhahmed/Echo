@@ -426,8 +426,9 @@ describe('curator prompts for "eminem"', () => {
         const system = body.messages[0].content as string;
         const text = `${system}\n---\n${body.messages[1].content}`;
         if (system.includes('request interpreter')) return new Response(JSON.stringify({ choices: [{ message: { content: JSON.stringify({ categories: ['music'], entities: [{ name: 'Eminem', kind: 'artist', want: 'all' }] }) } }] }));
-        if (/songs by Eminem/.test(system)) prompts.by = text;
-        else prompts.like = text;
+        // The first request of each kind (an empty answer triggers one smaller retry, not checked here).
+        if (/songs by Eminem/.test(system)) prompts.by ??= text;
+        else prompts.like ??= text;
         return new Response(JSON.stringify({ choices: [{ message: { content: '{"items":[]}' } }] }));
       }
       if (url.includes('accounts.spotify.com')) return new Response(JSON.stringify({ access_token: 't', expires_in: 3600 }));

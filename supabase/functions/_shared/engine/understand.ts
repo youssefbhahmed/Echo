@@ -373,13 +373,13 @@ function summarizePrevious(prev: Intent): string {
 
 /** Ask the LLM to interpret the message (with the previous request as context). */
 export async function llmUnderstand(text: string, prev: Intent | null, cfg: AiConfig, http: HttpClient): Promise<Understanding> {
-  const res = await withRateLimitRetry(() => http.json<{ choices: Array<{ message: { content: string } }> }>(`${cfg.baseUrl}/chat/completions`, {
+  const ask = (model: string) => http.json<{ choices: Array<{ message: { content: string } }> }>(`${cfg.baseUrl}/chat/completions`, {
     init: {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', ...(cfg.apiKey ? { Authorization: `Bearer ${cfg.apiKey}` } : {}) },
       body: JSON.stringify({
-        model: cfg.model,
-        ...modelParams(cfg.model),
+        model,
+        ...modelParams(model),
         temperature: 0,
         response_format: { type: 'json_object' },
         messages: [
@@ -390,7 +390,17 @@ export async function llmUnderstand(text: string, prev: Intent | null, cfg: AiCo
     },
     timeoutMs: 8000,
     provider: 'ai',
-  }));
+  });
+  let res: { choices: Array<{ message: { content: string } }> };
+  try {
+    res = await ask(cfg.model);
+  } catch (e) {
+    if ((e as { kind?: string })?.kind !== 'quota') throw e;
+    // Per-minute token limits are per model: when the general model is over its limit, the music model
+    // reads the request instead of dropping to the rules parser (which can't tell a film from a band).
+    const other = cfg.musicModel && cfg.musicModel !== cfg.model ? cfg.musicModel : null;
+    res = other ? await ask(other).catch(() => withRateLimitRetry(() => ask(cfg.model))) : await withRateLimitRetry(() => ask(cfg.model));
+  }
   const content = res.choices?.[0]?.message?.content ?? '{}';
   return sanitizeUnderstanding(JSON.parse(content.replace(/^```(json)?|```$/g, '').trim()), text);
 }

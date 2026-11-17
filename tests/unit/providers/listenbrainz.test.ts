@@ -151,7 +151,7 @@ describe('lbSpotifyIds with variants', () => {
     const { fetchImpl, bodies } = fakeLb(map, { reorder: true });
     const picks = Array.from({ length: 12 }, (_, i) => ({ artist: `Main ${i}`, track: `Song ${i}`, feat: [`Guest ${i}`] }));
     const ids = await lbSpotifyIds(picks, createHttp(new MemoryCache(), fetchImpl));
-    expect(bodies.map((b) => b.length)).toEqual([25, 11]); // 12 picks × 3 variants
+    expect(bodies.map((b) => b.length).sort((x, y) => y - x)).toEqual([25, 11]); // 12 picks × 3 variants
     // Every pick is mapped through its feat-credit row (the dropped last rows were an "as given" and an "&" row).
     expect(ids.map((x) => x[0])).toEqual(picks.map((_, i) => id(100 + i)));
   });
